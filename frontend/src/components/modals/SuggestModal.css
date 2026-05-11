@@ -1,0 +1,121 @@
+.suggest-card {
+  max-width: 700px;
+  width: 95vw;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.suggest-desc {
+  padding: 8px 24px 12px;
+  font-size: .83rem;
+  color: var(--slate-500);
+  line-height: 1.5;
+  margin: 0;
+  border-bottom: 1px solid var(--slate-100);
+}
+
+.suggest-table-wrap {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 16px;
+}
+
+.suggest-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .82rem;
+}
+
+.suggest-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--navy-900);
+  color: #fff;
+  padding: 8px 10px;
+  text-align: left;
+  font-size: .72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  z-index: 2;
+}
+
+.suggest-level-row td {
+  padding: 6px 12px;
+  border-top: 2px solid var(--slate-200);
+}
+
+.suggest-course-row {
+  border-bottom: 1px solid var(--slate-100);
+  transition: background .1s;
+}
+.suggest-course-row:hover { background: var(--slate-50); }
+.suggest-course-row td { padding: 8px 10px; vertical-align: middle; }
+
+.suggest-code {
+  font-family: var(--font-mono);
+  font-size: .82rem;
+  font-weight: 700;
+  color: var(--navy-800);
+  margin-right: 6px;
+}
+.suggest-name {
+  font-size: .78rem;
+  color: var(--slate-500);
+}
+.suggest-cat {
+  font-size: .72rem;
+  font-weight: 600;
+  background: var(--slate-100);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.suggest-num-input {
+  width: 52px;
+  padding: 4px 6px;
+  border: 1.5px solid var(--slate-200);
+  border-radius: 6px;
+  font-size: .85rem;
+  text-align: center;
+  font-family: var(--font-mono);
+  color: var(--navy-800);
+}
+.suggest-num-input:focus {
+  outline: none;
+  border-color: var(--teal-500);
+}
+
+.suggest-pattern-group {
+  display: flex;
+  gap: 6px;
+}
+.suggest-pattern-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px 8px;
+  border: 1.5px solid var(--slate-200);
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: .73rem;
+  font-weight: 500;
+  color: var(--slate-600);
+  background: var(--slate-50);
+  transition: all .12s;
+  line-height: 1.3;
+  min-width: 90px;
+}
+.suggest-pattern-btn input { display: none; }
+.suggest-pattern-btn small {
+  font-size: .65rem;
+  color: var(--slate-400);
+  font-weight: 400;
+}
+.suggest-pattern-btn.active {
+  border-color: var(--teal-500);
+  background: rgba(13,148,136,.07);
+  color: var(--teal-500);
+}
+.suggest-pattern-btn.active small { color: var(--teal-500); opacity:.7; }

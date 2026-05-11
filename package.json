@@ -1,0 +1,18 @@
+{
+  "name": "scheduler-app",
+  "version": "1.0.0",
+  "description": "Course Schedule Conflict Visualization System — monorepo",
+  "private": true,
+  "scripts": {
+    "install:all":  "npm install --prefix backend && npm install --prefix frontend",
+    "migrate":      "npm run migrate   --prefix backend",
+    "seed":         "npm run seed      --prefix backend",
+    "dev:backend":  "npm run dev       --prefix backend",
+    "dev:frontend": "npm run start     --prefix frontend",
+    "test":         "npm test          --prefix backend",
+    "build":        "npm run build     --prefix frontend"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

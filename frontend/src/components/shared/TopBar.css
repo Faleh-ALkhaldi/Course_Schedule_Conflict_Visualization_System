@@ -1,0 +1,156 @@
+.topbar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: var(--header-h);
+  background: var(--navy-900);
+  display: flex;
+  align-items: center;
+  gap: 0;
+  z-index: 100;
+  border-bottom: 1px solid rgba(255,255,255,.08);
+  padding: 0 16px 0 20px;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 200px;
+}
+.topbar-icon { font-size: 20px; color: var(--teal-400); }
+.topbar-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: .95rem;
+  color: var(--white);
+  letter-spacing: -.02em;
+}
+.topbar-semester {
+  font-family: var(--font-mono);
+  font-size: .72rem;
+  background: rgba(20,184,166,.15);
+  color: var(--teal-300);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(20,184,166,.3);
+  letter-spacing: .04em;
+}
+
+.topbar-views {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  gap: 2px;
+}
+.topbar-tab {
+  padding: 6px 18px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-family: var(--font-body);
+  font-size: .82rem;
+  font-weight: 500;
+  color: var(--slate-400);
+  cursor: pointer;
+  transition: all .15s;
+  letter-spacing: -.01em;
+}
+.topbar-tab:hover:not(.active) {
+  color: var(--slate-200);
+  background: rgba(255,255,255,.06);
+}
+.topbar-tab.active {
+  color: var(--teal-300);
+  background: rgba(20,184,166,.12);
+  border-color: rgba(20,184,166,.3);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 280px;
+  justify-content: flex-end;
+}
+
+.topbar-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-family: var(--font-body);
+  font-size: .8rem;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all .15s;
+  white-space: nowrap;
+}
+.topbar-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.topbar-btn.suggest {
+  background: rgba(20,184,166,.12);
+  border-color: rgba(20,184,166,.3);
+  color: var(--teal-300);
+}
+.topbar-btn.suggest:hover:not(:disabled) {
+  background: rgba(20,184,166,.2);
+}
+
+.topbar-btn.success {
+  background: rgba(34,197,94,.12);
+  border-color: rgba(34,197,94,.3);
+  color: #4ade80;
+}
+.topbar-btn.success:hover:not(:disabled) { background: rgba(34,197,94,.2); }
+
+.topbar-btn.warn {
+  background: rgba(251,191,36,.12);
+  border-color: rgba(251,191,36,.3);
+  color: var(--amber-300);
+}
+.topbar-btn.warn:hover:not(:disabled) { background: rgba(251,191,36,.2); }
+
+.topbar-btn.danger {
+  background: rgba(220,38,38,.12);
+  border-color: rgba(220,38,38,.3);
+  color: var(--red-300);
+  cursor: not-allowed;
+}
+
+.topbar-btn.export {
+  background: rgba(255,255,255,.06);
+  border-color: rgba(255,255,255,.12);
+  color: var(--slate-300);
+}
+.topbar-btn.export:hover:not(:disabled) { background: rgba(255,255,255,.1); }
+
+.topbar-user {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+  padding-left: 12px;
+  border-left: 1px solid rgba(255,255,255,.1);
+}
+.topbar-username {
+  font-size: .78rem;
+  color: var(--slate-400);
+  font-family: var(--font-mono);
+}
+.topbar-logout {
+  background: none;
+  border: none;
+  color: var(--slate-500);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px;
+  border-radius: 4px;
+  transition: color .15s;
+}
+.topbar-logout:hover { color: var(--red-300); }
+
+.topbar-btn.manage {
+  background: rgba(255,255,255,.06);
+  border-color: rgba(255,255,255,.12);
+  color: var(--slate-300);
+}
+.topbar-btn.manage:hover:not(:disabled) { background: rgba(255,255,255,.1); color: var(--white); }

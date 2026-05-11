@@ -1,0 +1,70 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,400&display=swap');
+
+/* ── Design tokens ──────────────────────────────────────────────────────────── */
+:root {
+  /* Core palette */
+  --navy-900: #0d1b2a;
+  --navy-800: #1b2d42;
+  --navy-700: #243652;
+  --navy-600: #2e4166;
+  --navy-500: #3a5180;
+  --teal-500: #0d9488;
+  --teal-400: #14b8a6;
+  --teal-300: #5eead4;
+  --amber-500: #d97706;
+  --amber-300: #fcd34d;
+  --red-500:   #dc2626;
+  --red-300:   #fca5a5;
+  --soft-yellow: #fef9c3;
+  --soft-red:    #fee2e2;
+  --white:     #ffffff;
+  --slate-50:  #f8fafc;
+  --slate-100: #f1f5f9;
+  --slate-200: #e2e8f0;
+  --slate-300: #cbd5e1;
+  --slate-400: #94a3b8;
+  --slate-500: #64748b;
+  --slate-600: #475569;
+
+  /* Typography */
+  --font-display: 'Syne', sans-serif;
+  --font-body:    'DM Sans', sans-serif;
+  --font-mono:    'DM Mono', monospace;
+
+  /* Spacing */
+  --header-h: 56px;
+  --sidebar-w: 260px;
+  --panel-w:   300px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,.12), 0 1px 2px rgba(0,0,0,.08);
+  --shadow-md: 0 4px 12px rgba(0,0,0,.15), 0 2px 4px rgba(0,0,0,.08);
+  --shadow-lg: 0 10px 32px rgba(0,0,0,.2), 0 4px 8px rgba(0,0,0,.1);
+
+  /* Grid */
+  --time-col-w: 68px;
+  --day-col-w:  140px;
+  --row-h:      52px;
+  --header-row-h: 38px;
+}
+
+/* ── Reset ───────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 14px; }
+body {
+  font-family: var(--font-body);
+  background: var(--slate-100);
+  color: var(--navy-900);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--slate-100); }
+::-webkit-scrollbar-thumb { background: var(--slate-300); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--slate-400); }
+
+/* ── Utility ─────────────────────────────────────────────────────────────────── */
+.mono { font-family: var(--font-mono); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
