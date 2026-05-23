@@ -9,8 +9,22 @@ const app = express();
 
 // ── Security & logging ────────────────────────────────────────────────────────
 app.use(helmet());
+
+// Accept either CORS_ORIGIN or legacy CORS_ORIGINS. Entries without a scheme
+// (e.g. "myhost.onrender.com" or "myhost:443") are normalized to https://myhost.
+const corsRaw = process.env.CORS_ORIGIN || process.env.CORS_ORIGINS || 'http://localhost:3000';
+const allowedOrigins = corsRaw
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+  .map(s => {
+    if (/^https?:\/\//i.test(s)) return s;
+    const hostOnly = s.replace(/:(80|443)$/, '');
+    return `https://${hostOnly}`;
+  });
+
 app.use(cors({
-  origin: (process.env.CORS_ORIGINS || 'http://localhost:3000').split(','),
+  origin: allowedOrigins,
   credentials: true,
 }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));

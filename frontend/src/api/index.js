@@ -1,7 +1,22 @@
 import axios from 'axios';
 
+// Resolve API base URL.
+// - If VITE_API_URL starts with http(s), use it as-is.
+// - If VITE_API_URL is a bare host (or host:port from a hosting platform),
+//   normalize to https://<host>/api/v1.
+// - Otherwise fall back to '/api/v1' so the Vite dev proxy keeps working.
+function resolveApiBaseUrl() {
+  const raw = import.meta.env.VITE_API_URL;
+  if (!raw) return '/api/v1';
+  if (/^https?:\/\//i.test(raw)) return raw;
+  const hostOnly = raw.replace(/:(80|443)$/, '');
+  return `https://${hostOnly}/api/v1`;
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || '/api/v1',
+  baseURL: API_BASE_URL,
   headers: { 'Content-Type': 'application/json' },
 });
 
@@ -65,7 +80,7 @@ export const saveSchedule = (scheduleId, confirmSoft = false) =>
 
 // ── Export ────────────────────────────────────────────────────────────────────
 export const getExportUrl = (scheduleId, view, filterId) => {
-  const base = (import.meta.env.VITE_API_URL || '/api/v1');
+  const base = API_BASE_URL;
   const params = new URLSearchParams({ view: view || 'full' });
   if (view === 'teacher' && filterId) params.set('instructorId', filterId);
   if (view === 'venue'   && filterId) params.set('venueId',      filterId);

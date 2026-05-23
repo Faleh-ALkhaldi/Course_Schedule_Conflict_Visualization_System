@@ -1,12 +1,16 @@
 const { Pool } = require('pg');
 require('dotenv').config();
 
+const host = process.env.DB_HOST || 'localhost';
+const isLocalHost = host === 'localhost' || host === '127.0.0.1';
+
 const pool = new Pool({
-  host:     process.env.DB_HOST     || 'localhost',
+  host,
   port:     parseInt(process.env.DB_PORT || '5432'),
   database: process.env.DB_NAME     || 'scheduler_db',
   user:     process.env.DB_USER     || 'scheduler_user',
   password: process.env.DB_PASSWORD || '',
+  ssl:      isLocalHost ? false : { rejectUnauthorized: false },
   max:      20,          // max connections in pool
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,

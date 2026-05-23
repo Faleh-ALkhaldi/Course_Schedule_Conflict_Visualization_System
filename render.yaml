@@ -1,0 +1,73 @@
+databases:
+  - name: cscvs-db
+    databaseName: scheduler_db
+    user: scheduler_user
+    plan: free
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    name: cscvs-backend
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node src/index.js
+    preDeployCommand: npm run migrate && npm run seed
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGIN
+        fromService:
+          type: web
+          name: cscvs-frontend
+          property: hostport
+      - key: DB_HOST
+        fromDatabase:
+          name: cscvs-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: cscvs-db
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: cscvs-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: cscvs-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: cscvs-db
+          property: password
+
+  - type: web
+    name: cscvs-frontend
+    runtime: static
+    plan: free
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    pullRequestPreviewsEnabled: false
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: cscvs-backend
+          property: hostport
+      - key: VITE_DEPT_ID
+        value: SWE-DEPT
+      - key: VITE_SEMESTER
+        value: Fall-2025
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

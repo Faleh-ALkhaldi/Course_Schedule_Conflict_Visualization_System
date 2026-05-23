@@ -3,6 +3,7 @@ const ctrl   = require('../controllers/index');
 const { authenticate } = require('../middleware/auth');
 
 // Public
+router.get ('/health',     (req, res) => res.json({ status: 'ok' }));
 router.post('/auth/login', ctrl.login);
 
 // All routes below require JWT
