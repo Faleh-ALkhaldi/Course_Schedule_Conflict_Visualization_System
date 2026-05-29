@@ -1,0 +1,167 @@
+// NEW-FU-280 (Phase 56): Add Instructor as a proper modal.
+//
+// Background: through Phase 55, the Add-Instructor form was an inline
+// `<form className="sp-form">` inside SidePanel.jsx. It inherited the
+// narrow sidebar width via the sidebar's flex chain, and the bare
+// <input> elements rendered with the browser default chrome — no
+// consistent border-radius, no focus ring, no labels above the fields.
+// Side by side with the Phase 55 Add-Course modal it looked unfinished.
+//
+// Promoting it to a modal (same `.sm-overlay` / `.sm-card` chrome as
+// Add Course and Add Section) gives us:
+//   • Full-width 480px card that escapes the sidebar's narrow scope.
+//   • The same labelled `.sm-field` rows used everywhere else.
+//   • An auto-derived KFUPM email preview the user can edit — common
+//     case (Faleh Khaldi → faleh.khaldi@kfupm.edu.sa) is one tab away
+//     from done, but full names with hyphens or non-ASCII initials
+//     can still be overridden by hand.
+//
+// All "+ Add Instructor" entry points (SidePanel sidebar, SectionModal
+// "+ New" shortcut) route through this component — single source of
+// truth, no more divergent inline forms.
+
+import React, { useState, useEffect, useMemo } from 'react';
+import { useApp } from '../../context/AppContext.jsx';
+import './SectionModal.css';
+
+// Derive a kfupm.edu.sa email from a free-form full name.
+//
+//   "Faleh Al-Khaldi"        → "faleh.al-khaldi@kfupm.edu.sa"
+//   "  Mahmoud  El   Sayed " → "mahmoud.el.sayed@kfupm.edu.sa"
+//   "محمد"                    → "" (non-Latin: leave for user to type)
+//
+// Strategy:
+//   1. Lowercase + trim + collapse internal whitespace.
+//   2. Drop characters that aren't a-z, 0-9, hyphen, or whitespace —
+//      this kills accents (until normalize'd), apostrophes ("O'Brien"
+//      → "o.brien"), and any stray punctuation.
+//   3. Split on whitespace, drop empties, join with '.'.
+//   4. If the result is empty (e.g. a non-Latin name), return ''. The
+//      user can type the local-part by hand — better than emitting a
+//      meaningless `@kfupm.edu.sa`.
+function deriveEmail(fullName) {
+  if (!fullName) return '';
+  const cleaned = fullName
+    .normalize('NFD')                        // separate accents into combining marks
+    .replace(/[̀-ͯ]/g, '')         // strip the combining marks
+    .toLowerCase()
+    .replace(/[^a-z0-9\-\s]/g, ' ')          // keep only letters, digits, '-', ws
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (cleaned.length === 0) return '';
+  return `${cleaned.join('.')}@kfupm.edu.sa`;
+}
+
+// `onCreated` (optional): if provided, the new instructor object is
+// passed to it after a successful POST. Used by SectionModal's "+ New"
+// shortcut so the form can auto-select the freshly-created instructor.
+// SidePanel doesn't pass it — the new entry just appears in the
+// sidebar list via the ADD_INSTRUCTOR reducer action.
+export default function AddInstructorModal({ onClose, showToast, onCreated }) {
+  const { addInstructor } = useApp();
+
+  // Escape closes — universal modal contract.
+  useEffect(() => {
+    function onKeyDown(e) { if (e.key === 'Escape') onClose(); }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
+  const [name, setName]   = useState('');
+  // `emailTouched` lets the email field auto-update from the name until
+  // the user explicitly types into it. After that, the user's input
+  // wins and the field is no longer regenerated on every keystroke.
+  const [email, setEmail]               = useState('');
+  const [emailTouched, setEmailTouched] = useState(false);
+  const [busy, setBusy]   = useState(false);
+  const [error, setError] = useState('');
+
+  const derivedEmail = useMemo(() => deriveEmail(name), [name]);
+  const displayedEmail = emailTouched ? email : derivedEmail;
+
+  function handleNameChange(e) {
+    setName(e.target.value);
+    // When the user hasn't touched email, keep our derived value in
+    // state so the submit handler sees the right value if they hit
+    // Enter without ever focusing the email field.
+    if (!emailTouched) setEmail(deriveEmail(e.target.value));
+  }
+  function handleEmailChange(e) {
+    setEmailTouched(true);
+    setEmail(e.target.value);
+  }
+
+  // Light client-side validation. The backend re-validates both fields
+  // (controllers/index.js#createInstructor) — this is just to keep the
+  // submit button accurate and the inline-error feedback fast.
+  const trimmedName  = name.trim();
+  const trimmedEmail = (emailTouched ? email : derivedEmail).trim();
+  const emailLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
+  const canSubmit = trimmedName.length > 0 && emailLooksValid && !busy;
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setBusy(true); setError('');
+    try {
+      const instructor = await addInstructor({
+        name:  trimmedName,
+        email: trimmedEmail,
+      });
+      showToast(`✓ Instructor ${instructor.name} added.`, 'success');
+      if (onCreated) onCreated(instructor);
+      onClose();
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Failed to add instructor.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="sm-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="sm-card" style={{ maxWidth: 480 }}>
+        <div className="sm-header">
+          <h2 className="sm-title">+ Add Instructor</h2>
+          <button className="sm-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+
+        <form className="sm-form" onSubmit={handleSubmit}>
+          <div className="sm-field">
+            <label htmlFor="aim-name">Full name</label>
+            <input id="aim-name" autoFocus required
+              placeholder="e.g. Faleh Al-Khaldi"
+              value={name}
+              onChange={handleNameChange} />
+          </div>
+
+          <div className="sm-field">
+            <label htmlFor="aim-email">
+              KFUPM email
+              <span className="sm-optional"> &nbsp;auto-derived; edit if needed</span>
+            </label>
+            <input id="aim-email" type="email" required
+              placeholder="firstname.lastname@kfupm.edu.sa"
+              value={displayedEmail}
+              onChange={handleEmailChange} />
+            {!emailTouched && derivedEmail && (
+              <div className="sm-end-preview">
+                Will save as <strong>{derivedEmail}</strong>
+              </div>
+            )}
+          </div>
+
+          {error && <div className="sm-error">{error}</div>}
+
+          <div className="sm-actions">
+            <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>
+            <button type="submit" className="sm-btn-save" disabled={!canSubmit}>
+              {busy ? '…' : 'Add Instructor'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

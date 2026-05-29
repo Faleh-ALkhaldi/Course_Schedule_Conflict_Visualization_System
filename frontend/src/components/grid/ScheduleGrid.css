@@ -1,12 +1,45 @@
 /* ── Root ────────────────────────────────────────────────────────────────────── */
 .sg-root {
   display: flex;
+  align-items: flex-start; /* don't stretch left col beyond its content */
   height: 100%;
   overflow: auto;
   background: var(--white);
   user-select: none;
   position: relative;
 }
+
+/* ── Zoom controls ───────────────────────────────────────────────────────────── */
+.sg-zoom-controls {
+  position: absolute;
+  top: 48px; /* below the sticky day-header row */
+  right: 12px;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sg-zoom-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid var(--slate-200);
+  background: var(--white);
+  color: var(--navy-800);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 4px rgba(0,0,0,.1);
+  transition: background .12s, box-shadow .12s;
+}
+.sg-zoom-btn:hover:not(:disabled) {
+  background: var(--slate-100);
+  box-shadow: 0 2px 6px rgba(0,0,0,.14);
+}
+.sg-zoom-btn:disabled { opacity: .35; cursor: not-allowed; }
 
 /* ── Sticky corner (time col header) ────────────────────────────────────────── */
 .sg-corner {
@@ -33,23 +66,24 @@
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background: var(--navy-900);
-  /* Fill all remaining vertical space below the grid with navy */
-  padding-bottom: 2000px;
-  margin-bottom: -2000px;
+  background: var(--white);   /* light bg so dark labels read clearly */
+  border-right: 1px solid var(--slate-300);
 }
 
 .sg-time-spacer {
   height: 40px; /* matches day header height */
   background: var(--navy-900);
   border-bottom: 2px solid var(--navy-700);
+  /* 10px gap below the spacer so the 07:00 label inside .sg-time-col gets
+     breathing room from the dark header band above. */
+  margin-bottom: 10px;
   flex-shrink: 0;
 }
 
 .sg-time-col {
   position: relative;
   flex: 1;
-  background: var(--navy-900);
+  background: var(--white);
 }
 
 .sg-hour-mark {
@@ -58,17 +92,25 @@
   right: 0;
   transform: translateY(-50%);  /* center label ON the line */
 }
+/* First hour mark (07:00) sits at top=0; without this override its translateY(-50%)
+   would push half the label above the time column's top edge into the dark
+   header strip. Anchor the first label to the top of the white area. */
+.sg-time-col .sg-hour-mark:first-child {
+  transform: translateY(0);
+  padding-top: 2px;
+}
 
 .sg-hour-label {
   display: block;
   text-align: right;
-  padding-right: 8px;
+  padding-right: 10px;
   font-family: var(--font-mono);
-  font-size: .68rem;
-  color: var(--slate-400);
-  font-weight: 500;
+  font-size: 12px;
+  color: #1f2937;                       /* dark neutral, AA on white */
+  font-weight: 600;
   line-height: 1;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;   /* digits align vertically across rows */
 }
 
 /* ── Right side (day headers + columns) ─────────────────────────────────────── */
@@ -87,6 +129,9 @@
   background: var(--navy-800);
   border-bottom: 2px solid var(--navy-700);
   height: 40px;
+  /* 10px gap below the dark header band so the first row (07:00) sits with
+     breathing room and doesn't visually press against the day-name labels. */
+  margin-bottom: 10px;
   flex-shrink: 0;
 }
 
@@ -97,11 +142,11 @@
   padding: 0 4px;
   line-height: 40px;
   font-family: var(--font-display);
-  font-size: .8rem;
-  font-weight: 600;
-  color: var(--slate-200);
-  letter-spacing: .04em;
-  border-right: 1px solid rgba(255,255,255,.06);
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #F1F5F9;          /* near-white on navy bg */
+  letter-spacing: .03em;
+  border-right: 1px solid rgba(255,255,255,.08);
 }
 
 /* ── Day columns body ────────────────────────────────────────────────────────── */
@@ -114,7 +159,7 @@
   flex: 1;
   min-width: 130px;
   position: relative;
-  border-right: 1px solid var(--slate-200);
+  border-right: 1px solid var(--slate-300);
   background: var(--white);
 }
 .sg-day-col:last-child { border-right: none; }
@@ -124,16 +169,20 @@
   position: absolute;
   left: 0; right: 0;
   height: 1px;
-  background: var(--slate-200);
+  background: var(--slate-300);   /* #cbd5e1 — clearly visible, not harsh */
   pointer-events: none;
   z-index: 0;
   transform: translateY(-50%);
+}
+/* First hour line (07:00) sits at top=0; keep it fully visible at the top edge. */
+.sg-day-col .sg-hour-line:first-child {
+  transform: translateY(0);
 }
 .sg-half-line {
   position: absolute;
   left: 0; right: 0;
   height: 1px;
-  background: var(--slate-100);
+  background: var(--slate-200);   /* lighter half-hour tick still visible */
   pointer-events: none;
   z-index: 0;
   transform: translateY(-50%);

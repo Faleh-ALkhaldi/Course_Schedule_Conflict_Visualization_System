@@ -4,6 +4,26 @@ class Section {
     sectionNumber, day, startTime, endTime,
     courseCode, courseName, academicLevel, category, numSections,
     instructorName, venueName,
+    // NEW-FU-93: section_type / venue_type / course has_lab carry the
+    // joined metadata needed by R-11 / R-12 evaluations. Defaults preserve
+    // backward compatibility for callers that don't populate them.
+    sectionType, venueType, hasLab,
+    // NEW-FU-270: course.credits joined for R-15 (InsufficientCreditCoverage).
+    // The rule needs to compute required weekly minutes per section group;
+    // we carry it on the section row so the rule has zero extra queries.
+    credits,
+    // NEW-FU-272 (Phase 50 #1): course.venue_exempt — capstone-style
+    // courses that legitimately don't have a venue. Rules R-05, R-10,
+    // R-11, R-12 consult this flag to skip the section.
+    isCapstone,
+    // NEW-FU-272 (Phase 50 #3): sections.gender. The conflict engine uses
+    // this to recognize a male/female sibling pair of the same course at
+    // the same slot as a single co-scheduled class (KFUPM convention),
+    // not as two overlapping sections firing R-04 / R-05.
+    gender,
+    // NEW-FU-275 (Phase 52 #5): course.is_external — student is placed
+    // off-campus (SWE 399 internship). Every conflict rule skips these.
+    isExternal,
     createdAt, updatedAt,
   }) {
     this.id             = id;
@@ -22,6 +42,20 @@ class Section {
     this.numSections    = numSections   ?? null;
     this.instructorName = instructorName ?? null;
     this.venueName      = venueName     ?? null;
+    // NEW-FU-93
+    this.sectionType    = sectionType   ?? 'Lec';
+    this.venueType      = venueType     ?? null;
+    this.hasLab         = hasLab        ?? false;
+    // NEW-FU-270: number coercion so toJSON emits a number not a string
+    // (pg returns numeric/int columns as JS numbers already, but defensive
+    // for callers that build Section() from plain objects).
+    this.credits        = credits != null ? Number(credits) : null;
+    // NEW-FU-272 (Phase 50 #1)
+    this.isCapstone    = isCapstone === true;
+    // NEW-FU-272 (Phase 50 #3)
+    this.gender         = gender ?? 'M';
+    // NEW-FU-275 (Phase 52 #5)
+    this.isExternal     = isExternal === true;
     this.createdAt      = createdAt;
     this.updatedAt      = updatedAt;
   }
@@ -46,7 +80,11 @@ class Section {
   }
 
   get label() {
-    return `${this.courseCode ?? this.courseId} (${this.sectionNumber}) on ${this.day} ${this.startTime}–${this.endTime}`;
+    // NEW-FU-282 (Phase 56): use sectionLabel so female sections render
+    // as "§F-XX". The helper handles the gender flag picked up from the
+    // section_gender column (set at construction time).
+    const { sectionLabel } = require('./sectionLabel');
+    return `${this.courseCode ?? this.courseId} (${sectionLabel(this)}) on ${this.day} ${this.startTime}–${this.endTime}`;
   }
 
   toJSON() {
@@ -59,6 +97,24 @@ class Section {
       venueId: this.venueId, venueName: this.venueName,
       sectionNumber: this.sectionNumber,
       day: this.day, startTime: this.startTime, endTime: this.endTime,
+      // NEW-FU-93: surface section + venue type info to the frontend so
+      // the section card can show the Lec/Lab badge and the SectionModal
+      // can gate the type selector on course.has_lab.
+      sectionType: this.sectionType,
+      venueType: this.venueType,
+      hasLab: this.hasLab,
+      // NEW-FU-270: surface credits so the frontend can render the same
+      // R-15 message in tooltips without a second courses fetch.
+      credits: this.credits,
+      // NEW-FU-272 (Phase 50): so the frontend can suppress venue-related
+      // UI affordances (assign-venue button, etc.) for exempt courses.
+      isCapstone: this.isCapstone,
+      // NEW-FU-272 (Phase 50 #3): so the frontend can reconstruct the
+      // display label (e.g., "F11" from section_number='11' + gender='F').
+      gender: this.gender,
+      // NEW-FU-275 (Phase 52 #5): so the frontend can render external
+      // sections with a dedicated badge (e.g., "Off-campus internship").
+      isExternal: this.isExternal,
     };
   }
 }

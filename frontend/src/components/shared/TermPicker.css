@@ -1,0 +1,685 @@
+/* NEW-FU-165: TermPicker chip + dropdown */
+
+/* NEW-FU-215: chip redesign — addresses two real issues.
+   1) The topbar background is #D6DFF0 (light steel), so the previous
+      `rgba(255,255,255,0.16)` background washed out completely → reads
+      as decorative text, not a control. New chip uses a solid dark
+      teal fill (#0d9488) for unmistakable presence + WCAG AA contrast
+      against both the topbar AND the white dropdown directly below.
+   2) Friendly label ("Spring 2026") leads; the raw code is a small
+      monospace tag inside the chip. Reverses the prior FU-170 hierarchy
+      where the code dominated. */
+.tp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  margin-left: 10px;
+  background: #0d9488;
+  border: 1.5px solid #0f766e;
+  border-radius: 999px;
+  color: #ffffff;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, box-shadow 0.14s, transform 0.06s;
+  position: relative;
+  box-shadow: 0 2px 6px rgba(13, 148, 136, 0.35), 0 1px 2px rgba(15, 23, 42, 0.12);
+}
+.tp-chip::before {
+  /* Accent dot — pale highlight so the chip reads as a stateful pill
+     even at a glance. The teal background already screams "interactive"
+     against the steel-blue topbar; the dot reinforces that this is a
+     SELECTOR ("you are here") rather than an action button. */
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ccfbf1;
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.55);
+}
+.tp-chip:hover {
+  background: #0f766e;
+  border-color: #134e4a;
+  box-shadow: 0 4px 10px rgba(15, 118, 110, 0.42), 0 1px 2px rgba(15, 23, 42, 0.18);
+  transform: translateY(-1px);
+}
+.tp-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.35), 0 2px 6px rgba(13, 148, 136, 0.35);
+}
+.tp-chip.open {
+  /* Distinct from hover — deeper fill + inset shadow so the user knows
+     the dropdown belongs to this chip. The caret rotates 180° (see
+     .tp-chip.open .tp-chip-caret below). */
+  background: #134e4a;
+  border-color: #042f2e;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.18);
+  transform: none;
+}
+.tp-chip-label {
+  white-space: nowrap;
+}
+.tp-chip-code {
+  font-family: var(--font-mono, ui-monospace, Menlo);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 6px;
+  color: #f0fdfa;
+}
+/* NEW-FU-190: conflict badges on the chip itself. Tight, prominent, and
+   high-contrast against the navy topbar. The ::before accent dot from
+   FU-170 still renders for the "active selection" cue; the badge is a
+   separate channel for "problems on this term". */
+.tp-chip-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1;
+}
+.tp-chip-badge-hard {
+  background: #dc2626;
+  color: #ffffff;
+  box-shadow: 0 0 0 1.5px rgba(220, 38, 38, 0.35);
+}
+.tp-chip-badge-soft {
+  background: #f59e0b;
+  color: #1f1610;
+  box-shadow: 0 0 0 1.5px rgba(245, 158, 11, 0.35);
+}
+
+.tp-chip-caret {
+  font-size: 12px;
+  opacity: 0.8;
+  transition: transform 0.15s;
+}
+.tp-chip.open .tp-chip-caret { transform: rotate(180deg); }
+
+/* ── Dropdown panel ───────────────────────────────────────────────────────── */
+.tp-popover {
+  position: absolute;
+  top: 52px;
+  left: 16px;
+  z-index: 200;
+  width: 460px;
+  max-height: 480px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.tp-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+.tp-popover-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.tp-popover-loading {
+  font-size: 11px;
+  color: #64748b;
+  font-style: italic;
+}
+
+/* NEW-FU-188: filter input + match-count chip. */
+.tp-filter-wrap {
+  position: relative;
+  padding: 8px 12px 6px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+.tp-filter-input {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  color: #0f172a;
+  box-sizing: border-box;
+}
+.tp-filter-input::placeholder {
+  color: #94a3b8;
+  font-weight: 400;
+}
+.tp-filter-input:focus {
+  outline: none;
+  border-color: #0d9488;
+  box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.18);
+}
+.tp-filter-count {
+  position: absolute;
+  right: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  font-weight: 700;
+  color: #64748b;
+  background: #f1f5f9;
+  padding: 1px 6px;
+  border-radius: 9px;
+  pointer-events: none;
+}
+
+.tp-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.tp-empty {
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: #64748b;
+  font-style: italic;
+}
+
+/* NEW-FU-216: two-line row layout.
+   Previous (FU-165 / FU-189) used a 5-column grid that squeezed
+   .tp-row-label to whatever was left after the stats + actions columns
+   took their natural width — which ellipsized "Spring 2026" to "S…".
+   New shape:
+     ┌────┬──────────────────────────────────────────┬─────────┐
+     │ ✓  │  Label · CODE  · Status pill             │ actions │
+     │    │  Date span  · 🔴N · 🟡N · 📚N · 📋N · ...│         │
+     └────┴──────────────────────────────────────────┴─────────┘
+   The title line gets the FULL middle column width with no overflow
+   cap — labels can never get clipped again. Actions are right-aligned
+   on the row and span both lines for visual weight balance. */
+.tp-row {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  /* NEW-FU-226: switched from center to start so the action cluster
+     (right column) hugs the top instead of sitting at the vertical
+     midpoint of the now-3-line content. Visual weight stays balanced. */
+  align-items: start;
+  column-gap: 10px;
+  padding: 12px 14px;
+  min-height: 80px;
+  cursor: pointer;
+  transition: background 0.1s;
+  border-left: 3px solid transparent;
+}
+.tp-row:hover, .tp-row:focus-visible {
+  background: #f1f5f9;
+  outline: none;
+}
+.tp-row.active {
+  background: #ecfdf5;
+  border-left-color: #0d9488;
+}
+.tp-row-check {
+  font-size: 14px;
+  font-weight: 800;
+  color: #0d9488;
+  text-align: center;
+}
+.tp-row-main {
+  display: flex;
+  flex-direction: column;
+  /* NEW-FU-226: bumped from 4px → 6px so the three info groups
+     (title / date / stats) read as distinct rows, not a stacked
+     blob. Still tight enough that the row doesn't sprawl. */
+  gap: 6px;
+  min-width: 0;
+}
+.tp-row-line-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tp-row-label {
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
+  /* NEW-FU-216: explicitly no clipping — the multi-line layout means
+     we never need to truncate. If the label ever gets bizarrely long
+     (it shouldn't — decodeTerm yields "Fall 2025"-style strings under
+     16 chars), it wraps to the next line within tp-row-line-title. */
+}
+.tp-row-code-chip {
+  font-family: var(--font-mono, ui-monospace, Menlo);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  color: #475569;
+}
+.tp-row.active .tp-row-code-chip {
+  background: #ccfbf1;
+  border-color: #0d9488;
+  color: #0f766e;
+}
+/* NEW-FU-226: line 2 — date span on its own row. Single inline span
+   today; the wrapper exists so any future "secondary metadata"
+   (e.g. created-by name) can land here without restructuring. */
+.tp-row-line-date {
+  display: flex;
+  align-items: center;
+  min-height: 14px;
+}
+/* NEW-FU-226: line 3 — stats icons + conflict pills, separated from
+   the date line so admins can scan the row group-by-group:
+   identity → calendar window → utilization counts. */
+.tp-row-line-stats {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.tp-row-span {
+  font-size: 11px;
+  color: #475569;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.tp-row-stats {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: #334155;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.tp-row-stats > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.tp-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* NEW-FU-181: status pill colors. Draft = neutral slate; Pending = amber;
+   Finalized = teal with lock glyph baked into the JSX. */
+.tp-status-pill {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.tp-status-draft {
+  background: #e2e8f0;
+  color: #475569;
+}
+.tp-status-pendingapproval {
+  background: #fef3c7;
+  color: #92400e;
+}
+.tp-status-finalized {
+  background: #ccfbf1;
+  color: #0f766e;
+  gap: 2px;
+}
+
+/* NEW-FU-184: conflict-count pills next to the status pill. Hidden when
+   count is 0 (JSX gate). Visual style matches conflict colors used
+   throughout the app: red for hard, amber for soft. */
+.tp-conflict-pill {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.tp-conflict-hard {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.tp-conflict-soft {
+  background: #fef3c7;
+  color: #92400e;
+}
+/* NEW-FU-245: unified action-button chassis. Previously
+   .tp-row-del/.tp-row-edit/.tp-row-lock were borderless transparent
+   glyphs while .tp-row-archive/.tp-row-unarchive carried a 26×26
+   bordered chip — which made the archive button the only one with
+   visible structure. This rule collapses the chassis so all five
+   buttons share size, border, and radius; per-button hover colors
+   stay below to preserve the semantic distinction (red on delete,
+   teal on rename, etc.). */
+.tp-row-del, .tp-row-edit, .tp-row-lock,
+.tp-row-archive, .tp-row-unarchive {
+  background: transparent;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  width: 26px;
+  height: 26px;
+  font-size: 13px;
+  cursor: pointer;
+  color: #475569;
+  margin-left: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s, color 0.1s, border-color 0.1s, transform 0.1s;
+  /* Hide the default browser button outline when un-focused so the
+     chassis reads cleanly; focus-visible below restores it for
+     keyboard navigation. */
+  outline: none;
+}
+.tp-row-del:focus-visible,
+.tp-row-edit:focus-visible,
+.tp-row-lock:focus-visible,
+.tp-row-archive:focus-visible,
+.tp-row-unarchive:focus-visible {
+  box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.45);
+}
+.tp-row-del:hover {
+  background: #fee2e2;
+  border-color: #ef4444;
+  color: #b91c1c;
+}
+.tp-row-lock:hover {
+  background: #f1f5f9;
+  border-color: #475569;
+  color: #0f172a;
+}
+/* NEW-FU-185 + NEW-FU-227: rename hover — teal-tinted (matches the
+   active-row accent and the chip palette) plus a subtle scale lift so
+   the tag-icon button reads as an actionable chip the way the colored
+   emoji siblings (lock/archive/delete) do. */
+.tp-row-edit:hover {
+  background: #ecfdf5;
+  border-color: #0d9488;
+  color: #0d9488;
+  transform: scale(1.06);
+}
+
+.tp-popover-foot {
+  border-top: 1px solid #e2e8f0;
+  padding: 8px 12px;
+  background: #f8fafc;
+  /* NEW-FU-194: lay out [+ Add new term] | [Show archived] side-by-side */
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.tp-add-btn {
+  flex: 1;
+  background: transparent;
+  border: 1px dashed #cbd5e1;
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.tp-add-btn:hover {
+  background: #f1f5f9;
+  border-color: #0d9488;
+  color: #0d9488;
+}
+
+/* NEW-FU-194: show / hide archived toggle. Solid when ON so users know
+   the list is "expanded" with archived rows; outlined when OFF. */
+.tp-archive-toggle {
+  background: transparent;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+  white-space: nowrap;
+}
+.tp-archive-toggle:hover {
+  border-color: #94a3b8;
+  color: #0f172a;
+  background: #f1f5f9;
+}
+.tp-archive-toggle.on {
+  background: #475569;
+  color: #ffffff;
+  border-color: #475569;
+}
+.tp-archive-toggle.on:hover {
+  background: #334155;
+  border-color: #334155;
+}
+
+/* NEW-FU-194: archived row visual treatment — desaturate the whole row
+   plus italicize the label so it's instantly distinguishable from
+   active terms even at a glance. Hover still highlights so admins can
+   target the unarchive button without struggle. */
+.tp-row.archived {
+  opacity: 0.62;
+  background: #f8fafc;
+}
+.tp-row.archived .tp-row-label { font-style: italic; }
+.tp-row.archived:hover {
+  opacity: 1.0;
+  background: #f1f5f9;
+}
+
+/* Archived status pill — matches the muted, warehouse-y palette. */
+.tp-status-archived {
+  background: #475569;
+  color: #f1f5f9;
+}
+
+/* NEW-FU-245: archive + unarchive now share the unified chassis
+   defined alongside lock/rename/delete above. Only the per-button
+   hover colors live here. */
+.tp-row-archive:hover {
+  background: #f1f5f9;
+  border-color: #475569;
+  color: #0f172a;
+}
+.tp-row-unarchive:hover {
+  background: #ecfdf5;
+  border-color: #0d9488;
+  color: #0d9488;
+}
+
+.tp-error {
+  margin: 8px 12px;
+  padding: 8px 10px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: #b91c1c;
+  font-size: 12px;
+}
+
+/* ── Modal (shared by Add + Delete) ──────────────────────────────────────── */
+.tp-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: tp-overlay-in 0.12s ease-out;
+}
+@keyframes tp-overlay-in {
+  from { opacity: 0; } to { opacity: 1; }
+}
+.tp-modal {
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.3);
+  padding: 24px;
+  width: 480px;
+  max-width: 90vw;
+  animation: tp-modal-in 0.15s ease-out;
+}
+@keyframes tp-modal-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.tp-modal-title {
+  margin: 0 0 14px;
+  font-size: 18px;
+  font-weight: 800;
+  color: #0f172a;
+}
+.tp-modal-body {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #334155;
+}
+.tp-modal-body code {
+  background: #f1f5f9;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--font-mono, ui-monospace, Menlo);
+  font-size: 13px;
+  color: #0f172a;
+}
+.tp-modal-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 14px;
+}
+.tp-modal-input {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 12px;
+  font-family: var(--font-mono, ui-monospace, Menlo);
+  font-size: 15px;
+  font-weight: 700;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 6px;
+  color: #0f172a;
+  box-sizing: border-box;
+}
+.tp-modal-input:focus {
+  outline: none;
+  border-color: #0d9488;
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.18);
+}
+.tp-modal-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #64748b;
+  font-style: italic;
+}
+.tp-preview {
+  margin: 12px 0;
+  padding: 12px 14px;
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+  border-radius: 8px;
+}
+.tp-preview-warn {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+  font-size: 13px;
+}
+.tp-preview-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 13px;
+  color: #0f172a;
+}
+.tp-preview-row + .tp-preview-row { margin-top: 6px; }
+.tp-preview-seed {
+  font-size: 12px;
+  color: #475569;
+  font-style: italic;
+  justify-content: flex-start;
+}
+/* NEW-FU-233: admin-supplied dates block inside AddTermModal.
+   Two date inputs stacked with the season-specific hint text below;
+   appears only for codes without a known override. */
+.tp-modal-dates {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed #cbd5e1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tp-modal-dates .tp-modal-label {
+  margin: 0;
+}
+
+.tp-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+.tp-btn-primary, .tp-btn-secondary, .tp-btn-danger {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.1s, opacity 0.1s;
+}
+.tp-btn-primary {
+  background: #0d9488;
+  color: white;
+}
+.tp-btn-primary:hover:not(:disabled) { background: #0f766e; }
+.tp-btn-secondary {
+  background: white;
+  color: #334155;
+  border-color: #cbd5e1;
+}
+.tp-btn-secondary:hover:not(:disabled) { background: #f1f5f9; }
+.tp-btn-danger {
+  background: #dc2626;
+  color: white;
+}
+.tp-btn-danger:hover:not(:disabled) { background: #b91c1c; }
+.tp-btn-primary:disabled, .tp-btn-secondary:disabled, .tp-btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

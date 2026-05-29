@@ -10,6 +10,11 @@ const Section  = require('../../domain/Section');
 
 function evaluate(changed) {
   if (!changed.category) return [];
+  // NEW-FU-273 (Phase 51 #1): capstone-style courses (SWE 411/412/413/414)
+  // legitimately meet in the evening because students prefer that window
+  // after their daytime classes. The UG-window check is inappropriate
+  // for them. Same flag that suppresses venue rules.
+  if (changed.isCapstone) return [];
 
   const window = TIME_WINDOWS[changed.category];
   if (!window) return [];

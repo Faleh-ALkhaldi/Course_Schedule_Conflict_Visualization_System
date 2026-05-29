@@ -11,6 +11,15 @@ const ExcelJS = require('exceljs');
 const SectionRepository    = require('../repositories/SectionRepository');
 const InstructorRepository = require('../repositories/InstructorRepository');
 const { ConflictRepository, CourseRepository, VenueRepository } = require('../repositories/repositories');
+const { getClient } = require('../config/db');
+// NEW-FU-282 (Phase 56): shared label helper so exported Excel / CSV /
+// PDF render female sections as "§F-XX" rather than "§XX".
+const { sectionLabel } = require('../domain/sectionLabel');
+// NEW-FU-21: reuse the canonical lock-and-status-check from ScheduleService
+// so importFromExcel respects the same finalize-immutability contract that
+// every other section-writing path (assignSection/createSection/deleteSection
+// /updateSectionInfo/suggest) enforces.
+const schedSvc = require('./ScheduleService');
 
 const sectionRepo  = new SectionRepository();
 const instrRepo    = new InstructorRepository();
@@ -65,6 +74,60 @@ function assignColumns(entries) {
   return colEnds.length||1;
 }
 
+// NEW-C1: prevent CSV/XLSX formula injection. A user-controlled value that
+// starts with `=`, `+`, `-`, `@`, tab, or CR will be interpreted as a formula
+// by Excel/Sheets/Numbers when the file is opened. Prefixing with a single
+// quote forces literal-string interpretation. Only applied to strings — numeric
+// columns (duration etc.) flow through untouched.
+function safeCell(v) {
+  if (typeof v !== 'string' || v.length === 0) return v;
+  return /^[=+\-@\t\r]/.test(v) ? "'" + v : v;
+}
+
+// NEW-FU-79: produce a string safe to use as either an Excel sheet name OR
+// the filename half of a Content-Disposition header. Excel forbids `/ \ ? *
+// [ ] :` in sheet names and a name can't start with a single quote. HTTP
+// Content-Disposition is sensitive to `"` and CR/LF (Node sanitizes CR/LF
+// but a stray quote produces malformed headers some browsers handle poorly).
+// We strip the dangerous set to '-' and trim any leading/trailing dashes or
+// quotes the result might still carry. Empty result falls back to a sane
+// default chosen by the caller.
+function safeFilenamePart(s) {
+  if (typeof s !== 'string') return '';
+  // NEW-FU-79 + NEW-FU-90: strip Excel-forbidden chars AND HTTP-troublesome
+  // chars. The added `;` and `=` (FU-90) are Content-Disposition parameter
+  // separators — currently `safeFilenamePart` is only fed by `semester`
+  // (FU-74 already gates this charset at create-time) and instructor/venue
+  // names (looser FU-46 length-only validator), so defence-in-depth here
+  // means a future endpoint that pipes one of those names into a header
+  // can't produce a malformed Content-Disposition.
+  return s
+    .replace(/[\\/?*[\]:"<>|;=\r\n\t]/g, '-')
+    .replace(/^['\-\s]+|['\-\s]+$/g, '')
+    .trim();
+}
+
+// NEW-H1: exceljs returns time cells as Date objects (or numbers for raw
+// fractional-day values). Coercing those via .toString() yields "1899-12-31..."
+// which then parses to 0 minutes and silently collapses every section to 00:00.
+// Normalize to "HH:MM" here so the import path stays string-only downstream.
+function cellToTimeString(value) {
+  if (value == null) return '';
+  if (value instanceof Date) {
+    const h = value.getUTCHours();
+    const m = value.getUTCMinutes();
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  }
+  if (typeof value === 'number') {
+    // Excel stores times as fraction of a day (0.5 = 12:00). Round to nearest minute.
+    const totalMin = Math.round(value * 24 * 60);
+    const h = (Math.floor(totalMin / 60) % 24 + 24) % 24;
+    const m = ((totalMin % 60) + 60) % 60;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  }
+  return String(value).trim().substring(0, 5);
+}
+
 // ── TABLE EXPORT ────────────────────────────────────────────────────────────────
 async function buildTableWorkbook(scheduleId, semester) {
   const sections = await sectionRepo.findBySchedule(scheduleId);
@@ -83,12 +146,16 @@ async function buildTableWorkbook(scheduleId, semester) {
   const ws = wb.addWorksheet('Sections');
 
   // Column definitions
+  // NEW-FU-100: Section Type column ('Lec' or 'Lab') so the export round-
+  // trips the new attribute. Placed right after Section # so the section's
+  // identity columns stay grouped.
   const cols = [
     { header:'Course Code',    key:'courseCode',    width:14 },
     { header:'Course Name',    key:'courseName',    width:28 },
     { header:'Academic Level', key:'academicLevel', width:16 },
     { header:'Category',       key:'category',      width:10 },
     { header:'Section #',      key:'sectionNumber', width:10 },
+    { header:'Section Type',   key:'sectionType',   width:12 },   // NEW-FU-100
     { header:'Days',           key:'days',          width:28 },
     { header:'Start Time',     key:'startTime',     width:12 },
     { header:'End Time',       key:'endTime',       width:12 },
@@ -122,17 +189,20 @@ async function buildTableWorkbook(scheduleId, semester) {
 
     const row = ws.getRow(rowNum++);
     row.height = 18;
-    row.getCell('courseCode').value    = sec.courseCode     ?? '';
-    row.getCell('courseName').value    = sec.courseName     ?? '';
+    // NEW-C1: every user-supplied string flows through safeCell() to neutralise
+    // formula-injection payloads in course names, instructor names, etc.
+    row.getCell('courseCode').value    = safeCell(sec.courseCode     ?? '');
+    row.getCell('courseName').value    = safeCell(sec.courseName     ?? '');
     row.getCell('academicLevel').value = level;
-    row.getCell('category').value      = sec.category       ?? '';
-    row.getCell('sectionNumber').value = sec.sectionNumber  ?? '';
+    row.getCell('category').value      = safeCell(sec.category       ?? '');
+    row.getCell('sectionNumber').value = safeCell(sec.sectionNumber  ?? '');
+    row.getCell('sectionType').value   = safeCell(sec.sectionType    ?? 'Lec');   // NEW-FU-100
     row.getCell('days').value          = days.sort().join(', ');
     row.getCell('startTime').value     = startT;
     row.getCell('endTime').value       = endT;
     row.getCell('duration').value      = duration;
-    row.getCell('instructor').value    = sec.instructorName ?? '';
-    row.getCell('venue').value         = sec.venueName      ?? '';
+    row.getCell('instructor').value    = safeCell(sec.instructorName ?? '');
+    row.getCell('venue').value         = safeCell(sec.venueName      ?? '');
 
     row.eachCell(cell => {
       cell.fill   = { type:'pattern', pattern:'solid', fgColor:{ argb } };
@@ -143,7 +213,9 @@ async function buildTableWorkbook(scheduleId, semester) {
   }
 
   // Auto-filter on header
-  ws.autoFilter = { from:'A1', to:`K1` };
+  // NEW-FU-100: extend to column L now that Section Type was inserted
+  // before Days (12 columns total: A..L).
+  ws.autoFilter = { from:'A1', to:`L1` };
 
   return wb;
 }
@@ -159,18 +231,23 @@ async function buildGridWorkbook(scheduleId, filter, semester) {
       sectionRepo.findByInstructor(scheduleId,filter.id),
     ]);
     sections=secs; officeHours=ohs;
-    sheetName=`${semester} – ${instr?.name??'Instructor'}`;
+    // NEW-C1 + NEW-FU-79: sheet name is user-visible AND must satisfy Excel's
+    // forbidden-char rules. safeCell handles formula injection in cell values;
+    // safeFilenamePart strips `/ \ ? * [ ] : " < > | etc.` that would make
+    // exceljs throw at write time.
+    sheetName=`${safeFilenamePart(semester) || 'Schedule'} – ${safeFilenamePart(instr?.name) || 'Instructor'}`;
   } else if (filter.type==='venue' && filter.id) {
     const {VenueRepository}=require('../repositories/repositories');
     const venue=await new VenueRepository().findById(filter.id);
     sections=await sectionRepo.findByVenue(scheduleId,filter.id);
-    sheetName=`${semester} – ${venue?.name??'Venue'}`;
+    sheetName=`${safeFilenamePart(semester) || 'Schedule'} – ${safeFilenamePart(venue?.name) || 'Venue'}`;
   }
 
   const allConflicts = await conflictRepo.findBySchedule(scheduleId);
+  // M-2: Amber highlight should mark *unresolved* soft conflicts — not confirmed ones.
   const softIds = new Set(
-    allConflicts.filter(c=>c.isSoft&&c.confirmed)
-      .flatMap(c=>[c.sectionAId,c.sectionBId].filter(Boolean))
+    allConflicts.filter(c => c.isSoft && !c.confirmed)
+      .flatMap(c => [c.sectionAId, c.sectionBId].filter(Boolean))
   );
 
   const daySecEntries={};
@@ -259,11 +336,16 @@ async function buildGridWorkbook(scheduleId, filter, semester) {
       const argb=isSoft?SOFT_COLOR:(LEVEL_COLORS[sec.academicLevel]??'FFE8F4FD');
       safeMerge(ws,startRow,excelCol,endRow-1,excelCol);
       const cell=ws.getCell(startRow,excelCol);
-      cell.value=[
-        `${sec.courseCode??''} §${sec.sectionNumber??''}`,
+      // NEW-C1: sanitise each line individually before joining, then once more
+      // on the joined value (a multi-line block can still start with a leading
+      // `=` from any source line — Excel only checks the first character of
+      // the whole cell, but defence in depth is cheap).
+      cell.value = safeCell([
+        safeCell(`${sec.courseCode??''} ${sectionLabel(sec)}`),
         `${(sec.startTime??'').substring(0,5)}–${(sec.endTime??'').substring(0,5)}`,
-        sec.instructorName??'(no instructor)', sec.venueName??'',
-      ].filter(Boolean).join('\n');
+        safeCell(sec.instructorName ?? '(no instructor)'),
+        safeCell(sec.venueName ?? ''),
+      ].filter(Boolean).join('\n'));
       cell.fill={type:'pattern',pattern:'solid',fgColor:{argb}};
       cell.font={size:9}; cell.alignment={vertical:'top',horizontal:'left',wrapText:true};
       cell.border=thin(isSoft?'FFB45309':'FF2E75B6');
@@ -287,193 +369,325 @@ async function buildGridWorkbook(scheduleId, filter, semester) {
 }
 
 // ── IMPORT ──────────────────────────────────────────────────────────────────────
-async function importFromExcel(buffer, scheduleId) {
-  const db = require('../config/db');
+
+// NEW: extracted from importFromExcel so the PDF/Word parsers in
+// ImportParserService.js can feed pre-parsed rows into the same
+// transactional commit path without copy-pasting the lock/upsert logic.
+async function commitRows(rowData, scheduleId) {
+  if (!rowData.length) throw new Error('No data rows found in file.');
+
+  const errors  = [];
+  let   created = 0;
+  let   skipped = 0;
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    await schedSvc.assertSchedulerEditableLocked(client, scheduleId);
+
+    // Step 1: upsert courses
+    const courseByCode = new Map();
+    const allCoursesRes = await client.query(
+      `SELECT id, course_code, name, academic_level, category, num_sections FROM courses`
+    );
+    for (const c of allCoursesRes.rows) courseByCode.set(c.course_code?.toLowerCase(), c);
+
+    for (const row of rowData) {
+      const key = row.courseCode.toLowerCase();
+      if (!courseByCode.has(key)) {
+        const isGR = row.category?.toUpperCase() === 'GR';
+        const level = isGR ? 'Graduate' :
+          ['Freshman','Sophomore','Junior','Senior'].find(
+            l => l.toLowerCase() === row.academicLevel?.toLowerCase()
+          ) ?? 'Freshman';
+        const res = await client.query(`
+          INSERT INTO courses (course_code, name, credits, academic_level, category, num_sections)
+          VALUES ($1,$2,$3,$4,$5,$6)
+          ON CONFLICT (course_code) DO UPDATE SET name=EXCLUDED.name
+          RETURNING id, course_code, name, academic_level, category, num_sections
+        `, [row.courseCode, row.courseName, row.credits, level, isGR?'GR':'UG', 1]);
+        courseByCode.set(key, res.rows[0]);
+      }
+    }
+
+    // Step 2: upsert instructors
+    const importedInstrNames = [...new Set(
+      rowData.map(r => r.instructorName?.trim()).filter(Boolean).map(n => n.toLowerCase())
+    )];
+    const existingInstrsRes = await client.query(`SELECT id, name FROM instructors`);
+    const instrByName = new Map(existingInstrsRes.rows.map(i => [i.name?.toLowerCase(), i]));
+
+    for (const name of importedInstrNames) {
+      if (!instrByName.has(name)) {
+        const displayName = rowData.find(r => r.instructorName?.toLowerCase() === name)?.instructorName ?? name;
+        const slug  = displayName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '').toLowerCase() || 'instructor';
+        let   email = `${slug}@dept.edu`;
+        for (let i = 2; i < 100; i++) {
+          const probe = await client.query(`SELECT 1 FROM instructors WHERE email = $1`, [email]);
+          if (!probe.rowCount) break;
+          email = `${slug}_${i}@dept.edu`;
+        }
+        const res = await client.query(
+          `INSERT INTO instructors (name, email) VALUES ($1, $2) RETURNING id, name`,
+          [displayName, email]
+        );
+        instrByName.set(name, res.rows[0]);
+      }
+    }
+
+    // Step 3: upsert venues
+    const importedVenueNames = [...new Set(
+      rowData.map(r => r.venueName?.trim()).filter(Boolean).map(n => n.toLowerCase())
+    )];
+    const existingVenuesRes = await client.query(`SELECT id, name FROM venues`);
+    const venueByName = new Map(existingVenuesRes.rows.map(v => [v.name?.toLowerCase(), v]));
+
+    for (const name of importedVenueNames) {
+      if (!venueByName.has(name)) {
+        const displayName = rowData.find(r => r.venueName?.toLowerCase() === name)?.venueName ?? name;
+        const res = await client.query(
+          `INSERT INTO venues (name, type, capacity)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+           RETURNING id, name`,
+          [displayName, 'LectureHall', 30]
+        );
+        venueByName.set(name, res.rows[0]);
+      }
+    }
+
+    // Step 4: atomically replace sections for this schedule
+    await client.query(`DELETE FROM sections WHERE schedule_id = $1`, [scheduleId]);
+
+    for (const row of rowData) {
+      const course = courseByCode.get(row.courseCode.toLowerCase());
+      if (!course) { errors.push(`Course "${row.courseCode}" could not be created.`); continue; }
+      const instructor = instrByName.get(row.instructorName?.toLowerCase()) ?? null;
+      const venue      = venueByName.get(row.venueName?.toLowerCase())      ?? null;
+
+      for (const day of row.days) {
+        try {
+          const ins = await client.query(`
+            INSERT INTO sections
+              (schedule_id,course_id,instructor_id,venue_id,section_number,day,start_time,end_time,section_type)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT DO NOTHING
+            RETURNING id
+          `, [
+            scheduleId, course.id,
+            instructor?.id ?? null,
+            venue?.id      ?? null,
+            row.sectionNumber, day, row.startTime, row.endTime,
+            row.sectionType ?? 'Lec',
+          ]);
+          if (ins.rowCount > 0) created++;
+          else                  skipped++;
+        } catch(err) {
+          errors.push(`${row.courseCode} ${sectionLabel(row)} on ${day}: ${err.message}`);
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    try { client.release(err); } catch { /* ignore */ }
+    throw err;
+  } finally {
+    try { client.release(); } catch { /* already released via catch path */ }
+  }
+
+  return { created, skipped, errors };
+}
+
+async function parseExcelToRows(buffer) {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer);
   const ws = wb.getWorksheet('Sections') ?? wb.worksheets[0];
   if (!ws) throw new Error('No worksheet found in uploaded file.');
 
-  // Read header row
+  // NEW-FU-68: case-insensitive header matching. Previously "Course Code"
+  // worked but "course code" or "COURSE CODE" produced "Missing required
+  // column" errors — a UX trap when users paste headers from another tool.
+  // We normalize both the file's headers AND our internal lookups to
+  // lowercase, but keep an original-case reverse map for any place that
+  // still cares about the canonical name (none currently).
   const headers = {};
   ws.getRow(1).eachCell((cell, colNum) => {
     const v = cell.value?.toString().trim();
-    if (v) headers[v] = colNum;
+    if (v) headers[v.toLowerCase()] = colNum;
   });
 
   const required = ['Course Code','Section #','Days','Start Time','End Time'];
   for (const req of required) {
-    if (!headers[req]) throw new Error(`Missing required column: "${req}"`);
+    if (!headers[req.toLowerCase()]) throw new Error(`Missing required column: "${req}"`);
   }
 
-  // Parse all rows first
+  // Parse all rows first (no DB access).
+  // NEW-H1: time columns use cellToTimeString() to correctly handle Date and
+  // number cell types (Excel-formatted times).
+  // NEW-L7: split day strings on `,`, `;`, `/`, or any whitespace so import
+  // tolerates the most common delimiter typos.
   const rowData = [];
   for (let r = 2; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
-    const get = col => row.getCell(headers[col])?.value?.toString().trim() ?? '';
-    const courseCode    = get('Course Code');
-    const sectionNumber = get('Section #');
-    const daysStr       = get('Days');
-    const startTime     = get('Start Time');
-    const endTime       = get('End Time');
+    // NEW-FU-24 + NEW-FU-68: guard `headers[col.toLowerCase()]` so an
+    // optional missing column doesn't trip row.getCell(undefined). The
+    // lowercased key matches FU-68's case-insensitive header table.
+    const getStr  = col => {
+      const k = headers[col.toLowerCase()];
+      return k ? (row.getCell(k)?.value?.toString().trim() ?? '') : '';
+    };
+    const getTime = col => {
+      const k = headers[col.toLowerCase()];
+      return k ? cellToTimeString(row.getCell(k)?.value) : '';
+    };
+    const courseCode    = getStr('Course Code');
+    const sectionNumber = getStr('Section #');
+    const daysStr       = getStr('Days');
+    const startTime     = getTime('Start Time');
+    const endTime       = getTime('End Time');
     if (!courseCode || !sectionNumber || !daysStr || !startTime || !endTime) continue;
+
+    // NEW-M13 + NEW-FU-24 + NEW-FU-68: lowercased optional-column lookup.
+    const creditsCol = headers['credits'];
+    const creditsCell = creditsCol ? row.getCell(creditsCol)?.value : undefined;
+    const credits = Number.isFinite(Number(creditsCell)) ? parseInt(creditsCell, 10) : 3;
+
+    // NEW-FU-100: read Section Type with 'Lec' default. Files exported
+    // from older versions (no Section Type column) treat every row as a
+    // lecture — consistent with the migration 009 default. We validate
+    // against the allowed set so a stray "Tutorial" or typo lands as 'Lec'
+    // rather than tripping the DB CHECK at insert.
+    const rawSectionType = getStr('Section Type');
+    const sectionType = (rawSectionType === 'Lab' ? 'Lab' : 'Lec');
     rowData.push({
       courseCode,
-      courseName:    get('Course Name')    || courseCode,
-      academicLevel: get('Academic Level') || 'Freshman',
-      category:      get('Category')       || 'UG',
+      courseName:    getStr('Course Name')    || courseCode,
+      academicLevel: getStr('Academic Level') || 'Freshman',
+      category:      getStr('Category')       || 'UG',
+      credits,
       sectionNumber,
-      days: daysStr.split(',').map(d=>d.trim()).filter(Boolean),
+      sectionType,    // NEW-FU-100
+      days: daysStr.split(/[,;/\s]+/).map(d => d.trim()).filter(Boolean),
       startTime,
       endTime,
-      instructorName: get('Instructor'),
-      venueName:      get('Venue'),
+      instructorName: getStr('Instructor'),
+      venueName:      getStr('Venue'),
     });
   }
 
-  if (!rowData.length) throw new Error('No data rows found in file.');
-
-  // ── Step 1: delete ALL existing sections for this schedule ──────────────
-  await db.query(`DELETE FROM sections WHERE schedule_id = $1`, [scheduleId]);
-
-  // ── Step 2: find which courses are referenced in the file ───────────────
-  const importedCourseCodes = [...new Set(rowData.map(r => r.courseCode.toLowerCase()))];
-
-  // Delete courses NOT in the import file (and their sections, already cleared)
-  const allCourses = await new CourseRepository().findAll();
-  for (const course of allCourses) {
-    if (!importedCourseCodes.includes(course.course_code?.toLowerCase())) {
-      await db.query(`DELETE FROM courses WHERE id = $1`, [course.id]);
-    }
-  }
-
-  // ── Step 3: create missing courses ─────────────────────────────────────
-  const courseByCode = new Map();
-  const freshCourses = await new CourseRepository().findAll();
-  for (const c of freshCourses) courseByCode.set(c.course_code?.toLowerCase(), c);
-
-  const LEVEL_RANK = {freshman:1,sophomore:2,junior:3,senior:4,graduate:5};
-  for (const row of rowData) {
-    const key = row.courseCode.toLowerCase();
-    if (!courseByCode.has(key)) {
-      const isGR = row.category?.toUpperCase() === 'GR';
-      const level = isGR ? 'Graduate' :
-        ['Freshman','Sophomore','Junior','Senior'].find(
-          l => l.toLowerCase() === row.academicLevel?.toLowerCase()
-        ) ?? 'Freshman';
-      const res = await db.query(`
-        INSERT INTO courses (course_code, name, credits, academic_level, category, num_sections)
-        VALUES ($1,$2,$3,$4,$5,$6)
-        ON CONFLICT (course_code) DO UPDATE SET name=EXCLUDED.name
-        RETURNING id, course_code, name, academic_level, category, num_sections
-      `, [row.courseCode, row.courseName, 3, level, isGR?'GR':'UG', 1]);
-      courseByCode.set(key, res.rows[0]);
-    }
-  }
-
-  // ── Step 4: manage instructors ─────────────────────────────────────────
-  // Find all instructor names referenced in the file
-  const importedInstrNames = [...new Set(
-    rowData.map(r => r.instructorName?.trim()).filter(Boolean).map(n => n.toLowerCase())
-  )];
-
-  // Load existing instructors
-  const existingInstrs = await instrRepo.findAll();
-  const instrByName    = new Map(existingInstrs.map(i => [i.name?.toLowerCase(), i]));
-
-  // Remove instructors NOT referenced in the import file
-  for (const instr of existingInstrs) {
-    if (!importedInstrNames.includes(instr.name?.toLowerCase())) {
-      await db.query(`DELETE FROM instructors WHERE id = $1`, [instr.id]);
-      instrByName.delete(instr.name?.toLowerCase());
-    }
-  }
-
-  // Create new instructors that don't exist yet
-  for (const name of importedInstrNames) {
-    if (!instrByName.has(name)) {
-      const displayName = rowData.find(r => r.instructorName?.toLowerCase() === name)?.instructorName ?? name;
-      const res = await db.query(
-        `INSERT INTO instructors (name, email) VALUES ($1, $2) RETURNING id, name`,
-        [displayName, `${displayName.replace(/\s+/g,'_').toLowerCase()}@dept.edu`]
-      );
-      instrByName.set(name, res.rows[0]);
-    }
-  }
-
-  // ── Step 4b: manage venues (same as instructors — create new, remove unrelated) ─
-  const importedVenueNames = [...new Set(
-    rowData.map(r => r.venueName?.trim()).filter(Boolean).map(n => n.toLowerCase())
-  )];
-
-  const existingVenues = await new VenueRepository().findAll();
-  const venueByName    = new Map(existingVenues.map(v => [v.name?.toLowerCase(), v]));
-
-  // Remove venues NOT referenced in the import file
-  for (const venue of existingVenues) {
-    if (!importedVenueNames.includes(venue.name?.toLowerCase())) {
-      await db.query(`DELETE FROM venues WHERE id = $1`, [venue.id]);
-      venueByName.delete(venue.name?.toLowerCase());
-    }
-  }
-
-  // Create new venues that don't exist yet
-  for (const name of importedVenueNames) {
-    if (!venueByName.has(name)) {
-      const displayName = rowData.find(r => r.venueName?.toLowerCase() === name)?.venueName ?? name;
-      const res = await db.query(
-        `INSERT INTO venues (name, type, capacity) VALUES ($1, $2, $3) RETURNING id, name`,
-        [displayName, 'LectureHall', 30]
-      );
-      venueByName.set(name, res.rows[0]);
-    }
-  }
-
-  // ── Step 5: insert sections ────────────────────────────────────────────
-  const errors  = [];
-  let   created = 0;
-
-  for (const row of rowData) {
-    const course     = courseByCode.get(row.courseCode.toLowerCase());
-    if (!course) { errors.push(`Course "${row.courseCode}" could not be created.`); continue; }
-    const instructor = instrByName.get(row.instructorName?.toLowerCase()) ?? null;
-    const venue      = venueByName.get(row.venueName?.toLowerCase())      ?? null;
-
-    for (const day of row.days) {
-      try {
-        await db.query(`
-          INSERT INTO sections
-            (schedule_id,course_id,instructor_id,venue_id,section_number,day,start_time,end_time)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-          ON CONFLICT DO NOTHING
-        `, [
-          scheduleId, course.id,
-          instructor?.id ?? null,
-          venue?.id      ?? null,
-          row.sectionNumber, day, row.startTime, row.endTime,
-        ]);
-        created++;
-      } catch(err) {
-        errors.push(`${row.courseCode} §${row.sectionNumber} on ${day}: ${err.message}`);
-      }
-    }
-  }
-
-  return { created, errors };
+  return rowData;
 }
 
+async function importFromExcel(buffer, scheduleId) {
+  const rows = await parseExcelToRows(buffer);
+  return commitRows(rows, scheduleId);
+}
+
+// Format dispatch tables. Each entry returns either a Buffer
+// (PDF/DOCX) or an exceljs Workbook (XLSX), plus the response
+// content-type and filename extension.
+const pdfSvc  = require('./PdfExportService');
+const docxSvc = require('./DocxExportService');
+const importParser = require('./ImportParserService');
+
+const EXPORT_FORMATS = {
+  xlsx: {
+    mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ext:  'xlsx',
+    async build(scheduleId, filter, semester) {
+      const wb = filter.type === 'full'
+        ? await buildTableWorkbook(scheduleId, semester)
+        : await buildGridWorkbook(scheduleId, filter, semester);
+      // Caller streams via wb.xlsx.write(res); return shape kept distinct
+      // so the controller can detect "workbook vs buffer".
+      return { workbook: wb };
+    },
+  },
+  pdf: {
+    mime: 'application/pdf',
+    ext:  'pdf',
+    async build(scheduleId, filter, semester) {
+      const buffer = filter.type === 'full'
+        ? await pdfSvc.buildTablePdfBuffer(scheduleId, semester)
+        : await pdfSvc.buildGridPdfBuffer(scheduleId, filter, semester);
+      return { buffer };
+    },
+  },
+  docx: {
+    mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ext:  'docx',
+    async build(scheduleId, filter, semester) {
+      const buffer = filter.type === 'full'
+        ? await docxSvc.buildTableDocxBuffer(scheduleId, semester)
+        : await docxSvc.buildGridDocxBuffer(scheduleId, filter, semester);
+      return { buffer };
+    },
+  },
+  // PNG export happens client-side (html2canvas captures the rendered DOM
+  // — server has no DOM to render). The controller rejects format=png with
+  // a 400 so a stray API call surfaces a clear message instead of failing
+  // silently.
+};
+
+const IMPORT_FORMATS = {
+  xlsx: parseExcelToRows,
+  docx: importParser.parseDocxToRows,
+  pdf:  importParser.parsePdfToRows,
+};
+
 class ExportService {
-  async buildWorkbook(scheduleId, filter={type:'full'}, semester='') {
-    // Full semester → tabular rows; filtered views → visual grid
-    if (filter.type === 'full') {
-      return buildTableWorkbook(scheduleId, semester);
+  async buildExport(scheduleId, filter = { type: 'full' }, semester = '', format = 'xlsx') {
+    const fmt = EXPORT_FORMATS[format];
+    if (!fmt) {
+      const err = new Error(`Unsupported export format: "${format}". Allowed: ${Object.keys(EXPORT_FORMATS).join(', ')}.`);
+      err.status = 400;
+      throw err;
     }
+    const result = await fmt.build(scheduleId, filter, semester);
+    return { ...result, mime: fmt.mime, ext: fmt.ext };
+  }
+
+  // Back-compat: existing callers (tests) still expect a Workbook here.
+  async buildWorkbook(scheduleId, filter = { type: 'full' }, semester = '') {
+    if (filter.type === 'full') return buildTableWorkbook(scheduleId, semester);
     return buildGridWorkbook(scheduleId, filter, semester);
   }
 
+  // Excel-only legacy entry point; preserved so any direct caller
+  // continues to work.
   async importWorkbook(buffer, scheduleId) {
     return importFromExcel(buffer, scheduleId);
   }
+
+  // Format-dispatched import. Parses first, then commits. The two-stage
+  // shape (parseRows + commitRows) is intentional — a future "preview
+  // before commit" flow can call parseRows alone, render the rows in the
+  // UI, and only invoke commitRows after the user confirms.
+  async parseRows(buffer, format = 'xlsx') {
+    const parser = IMPORT_FORMATS[format];
+    if (!parser) {
+      const err = new Error(`Unsupported import format: "${format}". Allowed: ${Object.keys(IMPORT_FORMATS).join(', ')}.`);
+      err.status = 400;
+      throw err;
+    }
+    return parser(buffer);
+  }
+
+  async commitRows(rows, scheduleId) {
+    return commitRows(rows, scheduleId);
+  }
+
+  async importBuffer(buffer, scheduleId, format = 'xlsx') {
+    const rows = await this.parseRows(buffer, format);
+    return commitRows(rows, scheduleId);
+  }
 }
 
-module.exports = new ExportService();
+// NEW-FU-79: expose safeFilenamePart as a static helper on the exported
+// singleton so the controller's exportSchedule can use it for the
+// Content-Disposition filename without duplicating the regex.
+const exportSvc = new ExportService();
+exportSvc.safeFilenamePart = safeFilenamePart;
+module.exports = exportSvc;

@@ -109,9 +109,9 @@
 }
 .suggest-pattern-btn input { display: none; }
 .suggest-pattern-btn small {
-  font-size: .65rem;
-  color: var(--slate-400);
-  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 500;
 }
 .suggest-pattern-btn.active {
   border-color: var(--teal-500);
@@ -119,3 +119,286 @@
   color: var(--teal-500);
 }
 .suggest-pattern-btn.active small { color: var(--teal-500); opacity:.7; }
+
+/* NEW-FU-242: per-course credits chip — surfaces WHY the pattern set
+   varies per row. Subtle so it doesn't compete with the course code. */
+.suggest-credits {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+
+/* NEW-FU-249: stepped per-course layout — duration toggle, day
+   templates, optional lab block. Each "step" labels its axis so
+   the user sees the same vocabulary the modal description uses
+   ("Duration", "Days", "Lab section"). */
+.suggest-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.suggest-step:last-child {
+  margin-bottom: 0;
+}
+.suggest-step-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: #64748b;
+  min-width: 60px;
+}
+.suggest-duration-group .suggest-pattern-btn {
+  /* Duration buttons are narrower than day buttons — labels are
+     just "50 min" / "75 min", no day list. */
+  min-width: 64px;
+}
+.suggest-lab-step {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #cbd5e1;
+}
+.suggest-lab-label {
+  color: #0f766e; /* teal — matches the "active" accent so the lab
+                    block reads as a distinct sub-section, not a
+                    third independent choice. */
+}
+.suggest-lab-btn small {
+  font-style: italic;
+  color: #94a3b8;
+}
+
+/* NEW-FU-254: weekday-pick buttons (Sun / Mon / Tue / Wed / Thu).
+   Compact 3-letter labels — keeps the 5-button row from blowing out
+   the modal width. */
+.suggest-weekday-btn {
+  min-width: 48px;
+  text-align: center;
+}
+
+/* NEW-FU-255: section-block wrapper (parallel for .lec-block and
+   .lab-block within a course row). Lecture is the unstyled default;
+   lab gets a tinted background + top divider so the two sub-sections
+   read as visually distinct without crowding the layout. */
+.suggest-section-block {
+  margin-bottom: 8px;
+}
+.suggest-section-block:last-child {
+  margin-bottom: 0;
+}
+.suggest-section-heading {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+  color: #475569;
+}
+.suggest-lec-heading {
+  /* Slate — the neutral default. */
+  color: #334155;
+}
+.suggest-lab-heading {
+  color: #0f766e; /* teal — same as the active-pattern accent so the
+                    lab block reads as related-but-distinct. */
+}
+.suggest-lab-block {
+  margin-top: 10px;
+  padding: 10px 12px 8px;
+  background: rgba(13, 148, 136, 0.04);
+  border: 1px dashed rgba(13, 148, 136, 0.28);
+  border-radius: 6px;
+}
+
+/* NEW-FU-255: stronger course-row chassis. The left border accent
+   is set inline (per-row based on academic level color); here we add
+   the bottom separator + breathing room so adjacent courses don't
+   visually run together. */
+.suggest-course-row {
+  border-bottom: 1px solid #e2e8f0;
+}
+.suggest-course-row > td {
+  padding-top: 14px;
+  padding-bottom: 14px;
+}
+
+/* NEW-FU-258: TRUE course-card chassis. The FU-255 attempt used a
+   single 1px bottom-border which blended into the background — the
+   user reported same-level courses still ran together visually.
+   This upgrade switches the table to `border-collapse: separate` +
+   `border-spacing` so each row sits in its own bordered envelope
+   with a 16px gap between rows. Border-radius works only on cell
+   corners (TR borders don't honor radius in any browser); we round
+   td:first-child + td:last-child to fake the rounded box. */
+.suggest-table {
+  border-collapse: separate;
+  border-spacing: 0 16px;
+}
+.suggest-course-row {
+  /* Remove the FU-255 bottom-border — replaced by full td borders
+     on the row's cells below. */
+  border-bottom: none;
+}
+.suggest-course-row > td {
+  background: #ffffff;
+  border-top:    1px solid #cbd5e1;
+  border-bottom: 1px solid #cbd5e1;
+  /* Default vertical padding stays at FU-255's 14px so cards have
+     comfortable internal breathing room. */
+  padding-top: 14px;
+  padding-bottom: 14px;
+}
+.suggest-course-row > td:first-child {
+  /* The 3px left-border accent — the JSX (FU-258) sets
+     `--row-accent` as a CSS custom property on the <tr> using
+     LEVEL_COLORS. We read it here so the first td renders the
+     colored stripe. <tr>s in border-collapse:separate don't render
+     their own borders, so the accent has to live on a td. */
+  border-left:  3px solid var(--row-accent, #cbd5e1);
+  border-top-left-radius:    8px;
+  border-bottom-left-radius: 8px;
+}
+.suggest-course-row > td:last-child {
+  border-right: 1px solid #cbd5e1;
+  border-top-right-radius:    8px;
+  border-bottom-right-radius: 8px;
+}
+.suggest-course-row:hover > td {
+  background: #f8fafc;
+}
+
+/* Inline-set border-left from JSX wins over the default via
+   higher CSS specificity. Just make sure the inline width matches
+   the radius below by overriding the per-row inline `borderLeft`
+   style — leave that to the JSX. */
+
+/* Level-group header row stays full-width tinted; no card chassis
+   for it. Inherit the prior FU-255 styling unchanged. */
+.suggest-level-row > td {
+  background: transparent;
+  border: none;
+  padding: 4px 12px;
+  border-top: 2px solid var(--slate-200);
+}
+
+/* NEW-FU-264: pre-flight banners. Three variants:
+   • info  — neutral (recommend in flight)
+   • warn  — amber (recommend failed OR capacity warnings present)
+   The banner sits BETWEEN the description and the table so the user
+   notices it before scanning the per-course rows. */
+.suggest-banner {
+  margin: 0 24px 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: .8rem;
+  font-weight: 500;
+  line-height: 1.4;
+  border: 1px solid;
+}
+.suggest-banner-info {
+  background: #eff6ff; /* blue-50  */
+  border-color: #bfdbfe; /* blue-200 */
+  color: #1e40af;       /* blue-800 */
+}
+.suggest-banner-warn {
+  background: #fffbeb; /* amber-50  */
+  border-color: #fde68a; /* amber-200 */
+  color: #92400e;       /* amber-800 */
+}
+
+/* NEW-FU-264: subtle "✦ Recommendations pre-filled" badge in the
+   description line. Reads as a status hint, not a CTA. */
+.suggest-recommend-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(13, 148, 136, 0.08);
+  color: #0f766e; /* teal-700 */
+  font-size: .7rem;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+
+/* NEW-FU-265: dimmed appearance for course rows whose checkbox is
+   off. Stays visible (so the user can flip it back) but visually
+   recedes. Opacity-only — preserves all the existing border /
+   accent / hover work from FU-258. */
+.suggest-course-row-skipped > td {
+  opacity: .45;
+}
+.suggest-course-row-skipped > td:first-child,
+.suggest-course-row-skipped > td:nth-child(2) {
+  /* Keep the checkbox + course-code column fully opaque so the user
+     can still read which row they unchecked. */
+  opacity: 1;
+}
+.suggest-course-row-skipped > td:nth-child(2) {
+  opacity: .65;
+}
+
+/* NEW-FU-286 (Phase 24): "Apply all" header label. The previous
+   unlabeled checkbox was undiscoverable — users only realized it
+   toggled all rows by clicking it. The label + visible text makes
+   the affordance self-explanatory. Compact font so it doesn't push
+   the table layout. */
+.suggest-apply-all-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: .68rem;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: #fff;
+  user-select: none;
+  /* NEW-FU-297 (Phase 26): enforce single-line so "Deselect all" doesn't
+     wrap to two lines on narrow viewports. The <th> sets whiteSpace:
+     nowrap too — belt-and-suspenders against future wrappable variants. */
+  white-space: nowrap;
+}
+.suggest-apply-all-label input[type="checkbox"] {
+  cursor: pointer;
+  width: 14px;
+  height: 14px;
+  /* Accent on the indeterminate state matches the active-pattern teal
+     so the partial-selection state reads as a deliberate UI signal. */
+  accent-color: #14b8a6;
+}
+
+/* NEW-FU-265: badge on the Run button showing how many courses the
+   run will touch when the user has narrowed the apply set. */
+.suggest-apply-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.25);
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+
+/* NEW-FU-266: per-course capacity warning. Sits under the course
+   name, picks up the amber palette to stay consistent with the
+   top-of-modal warning banner. Compact font; one line in most cases
+   but wraps for long messages. */
+.suggest-capacity-warning {
+  margin-top: 6px;
+  padding: 4px 8px;
+  background: #fffbeb; /* amber-50  */
+  border-left: 3px solid #f59e0b; /* amber-500 */
+  border-radius: 4px;
+  color: #92400e; /* amber-800 */
+  font-size: .72rem;
+  font-weight: 500;
+  line-height: 1.35;
+}

@@ -56,6 +56,10 @@ function sec(overrides = {}) {
     numSections:    overrides.numSections   ?? 1,
     instructorName: overrides.instructorName ?? null,
     venueName:      overrides.venueName     ?? null,
+    // NEW-FU-93: forward new domain fields so R-11/R-12 tests can probe them.
+    sectionType:    overrides.sectionType,
+    venueType:      overrides.venueType,
+    hasLab:         overrides.hasLab,
   });
 }
 
@@ -419,6 +423,364 @@ describe('R09 — One Instructor Per Section', () => {
     const after  = sec({ ...before, id:`sec-${_id++}`, instructorId:'instr-C' });
     expect(sectionRepo.validateOneInstructor(before)).not.toBeNull();
     expect(sectionRepo.validateOneInstructor(after)).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R-10 — No venue assigned (NEW-FU-91)
+// Parallel to R-09 (missing instructor). Some sections legitimately run in
+// regular departmental classrooms not tracked in the venues table — so the
+// constraint is Soft, not Hard. The user can save anyway via soft-confirm.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('R10 — One Venue Per Section (NEW-FU-91)', () => {
+  test('TC-28: no venue → Soft advisory (not Hard blocking)', () => {
+    const a = sec({ courseCode:'SWE301', sectionNumber:'B', venueId:null });
+    const result = sectionRepo.validateOneVenue(a);
+    expect(result).not.toBeNull();
+    expect(result.severity).toBe(SEVERITY.SOFT);
+    expect(result.message).toMatch(/no venue/i);
+  });
+
+  test('TC-28b: venue assigned → no R-10 warning', () => {
+    const a = sec({ venueId:'venue-X' });
+    expect(sectionRepo.validateOneVenue(a)).toBeNull();
+  });
+
+  test('TC-29: warning present before assignment and absent after', () => {
+    const before = sec({ venueId:null });
+    const after  = sec({ ...before, id:`sec-${_id++}`, venueId:'venue-X' });
+    expect(sectionRepo.validateOneVenue(before)).not.toBeNull();
+    expect(sectionRepo.validateOneVenue(after)).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Section-number format helper (NEW-FU-95)
+// The DB CHECK + controller regex agree on '01'..'99' (two-digit, zero-padded).
+// We exercise the regex directly here so it's locked in.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Section number format (NEW-FU-95)', () => {
+  const SECTION_NUM_RE = /^(0[1-9]|[1-9][0-9])$/;
+  test('TC-30: "01" through "09" are valid', () => {
+    for (const n of ['01','02','03','04','05','06','07','08','09']) {
+      expect(SECTION_NUM_RE.test(n)).toBe(true);
+    }
+  });
+  test('TC-30b: "10" through "99" are valid', () => {
+    for (const n of ['10','42','77','99']) {
+      expect(SECTION_NUM_RE.test(n)).toBe(true);
+    }
+  });
+  test('TC-31: "00" is invalid (no zero section)', () => {
+    expect(SECTION_NUM_RE.test('00')).toBe(false);
+  });
+  test('TC-31b: single-digit and triple-digit are invalid', () => {
+    expect(SECTION_NUM_RE.test('1')).toBe(false);
+    expect(SECTION_NUM_RE.test('100')).toBe(false);
+  });
+  test('TC-31c: letters/symbols are invalid', () => {
+    expect(SECTION_NUM_RE.test('A')).toBe(false);
+    expect(SECTION_NUM_RE.test('1A')).toBe(false);
+    expect(SECTION_NUM_RE.test('01a')).toBe(false);
+    expect(SECTION_NUM_RE.test(' 01')).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R-11, R-12 — venue-type mismatch predicates (NEW-FU-97 / NEW-FU-98)
+// The rules live inline in ScheduleService._evaluateSchedule; here we
+// exercise the predicate logic on Section domain objects.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function isR11Hit(s) { return !!s.venueId && s.sectionType === 'Lab' && s.venueType && s.venueType !== 'Laboratory'; }
+function isR12Hit(s) { return !!s.venueId && s.sectionType === 'Lec' && s.venueType === 'Laboratory'; }
+
+describe('R11 — Lab section in non-Lab venue (NEW-FU-97)', () => {
+  test('TC-32: Lab section in LectureHall → R-11 fires', () => {
+    const a = sec({ sectionType:'Lab', venueId:'v-1', venueType:'LectureHall' });
+    expect(isR11Hit(a)).toBe(true);
+    expect(isR12Hit(a)).toBe(false);
+  });
+  test('TC-32b: Lab section in Laboratory → R-11 does NOT fire', () => {
+    const a = sec({ sectionType:'Lab', venueId:'v-1', venueType:'Laboratory' });
+    expect(isR11Hit(a)).toBe(false);
+  });
+  test('TC-32c: no venue assigned → R-11 deferred to R-10 (does NOT fire)', () => {
+    const a = sec({ sectionType:'Lab', venueId:null, venueType:null });
+    expect(isR11Hit(a)).toBe(false);
+  });
+});
+
+describe('R12 — Lecture section in Lab venue (NEW-FU-98)', () => {
+  test('TC-33: Lec section in Laboratory → R-12 fires', () => {
+    const a = sec({ sectionType:'Lec', venueId:'v-1', venueType:'Laboratory' });
+    expect(isR12Hit(a)).toBe(true);
+    expect(isR11Hit(a)).toBe(false);
+  });
+  test('TC-33b: Lec section in LectureHall → R-12 does NOT fire', () => {
+    const a = sec({ sectionType:'Lec', venueId:'v-1', venueType:'LectureHall' });
+    expect(isR12Hit(a)).toBe(false);
+  });
+  test('TC-33c: no venue assigned → R-12 deferred to R-10 (does NOT fire)', () => {
+    const a = sec({ sectionType:'Lec', venueId:null, venueType:null });
+    expect(isR12Hit(a)).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R-13 — Instructor with no office hours (NEW-FU-99)
+// Predicate: instructor assigned to a section, ohMap has no entry (or
+// empty array) for that instructor.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function isR13Hit(s, ohMap) {
+  if (!s.instructorId) return false;
+  return !ohMap.has(s.instructorId);
+}
+
+describe('R13 — Instructor with no office hours (NEW-FU-99)', () => {
+  test('TC-34: instructor teaching with no OH entries → R-13 fires', () => {
+    const a = sec({ instructorId:'instr-X' });
+    const oh = new Map(); // no OH for anyone
+    expect(isR13Hit(a, oh)).toBe(true);
+  });
+  test('TC-34b: instructor with at least one OH → R-13 does NOT fire', () => {
+    const a = sec({ instructorId:'instr-X' });
+    const oh = new Map([['instr-X', [{ day:'Monday', startTime:'09:00', endTime:'10:00' }]]]);
+    expect(isR13Hit(a, oh)).toBe(false);
+  });
+  test('TC-34c: section without instructor → R-13 does NOT fire (R-09 handles)', () => {
+    const a = sec({ instructorId:null });
+    expect(isR13Hit(a, new Map())).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R-14 — has_lab course must have both Lec AND Lab sections (NEW-FU-107)
+// The rule lives inline in ScheduleService._evaluateSchedule; here we
+// exercise the predicate logic over Section domain objects.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function r14CourseStatus(sections) {
+  const status = new Map();
+  for (const s of sections) {
+    if (!s.hasLab) continue;
+    let st = status.get(s.courseId);
+    if (!st) { st = { hasLec:false, hasLab:false }; status.set(s.courseId, st); }
+    if (s.sectionType === 'Lec') st.hasLec = true;
+    if (s.sectionType === 'Lab') st.hasLab = true;
+  }
+  return status;
+}
+function isR14Missing(status) {
+  return [...status.values()].filter(s => !(s.hasLec && s.hasLab));
+}
+
+describe('R14 — has_lab course missing Lec or Lab (NEW-FU-107)', () => {
+  test('TC-35: has_lab course with both Lec AND Lab → no R-14', () => {
+    const ss = [
+      sec({ courseId:'C1', sectionType:'Lec', hasLab:true }),
+      sec({ courseId:'C1', sectionType:'Lab', hasLab:true }),
+    ];
+    expect(isR14Missing(r14CourseStatus(ss)).length).toBe(0);
+  });
+  test('TC-35b: has_lab course with only Lec → R-14 fires (missing Lab)', () => {
+    const ss = [
+      sec({ courseId:'C1', sectionType:'Lec', hasLab:true }),
+      sec({ courseId:'C1', sectionType:'Lec', hasLab:true, sectionNumber:'02' }),
+    ];
+    const missing = isR14Missing(r14CourseStatus(ss));
+    expect(missing.length).toBe(1);
+    expect(missing[0].hasLec).toBe(true);
+    expect(missing[0].hasLab).toBe(false);
+  });
+  test('TC-35c: has_lab course with only Lab → R-14 fires (missing Lec)', () => {
+    const ss = [
+      sec({ courseId:'C1', sectionType:'Lab', hasLab:true, sectionNumber:'50' }),
+    ];
+    const missing = isR14Missing(r14CourseStatus(ss));
+    expect(missing.length).toBe(1);
+    expect(missing[0].hasLec).toBe(false);
+    expect(missing[0].hasLab).toBe(true);
+  });
+  test('TC-35d: has_lab=false course → R-14 does NOT fire regardless of types', () => {
+    const ss = [
+      sec({ courseId:'C2', sectionType:'Lec', hasLab:false }),
+    ];
+    expect(r14CourseStatus(ss).size).toBe(0);
+  });
+  test('TC-35e: two has_lab courses, one complete + one missing Lab → 1 R-14', () => {
+    const ss = [
+      sec({ courseId:'C1', sectionType:'Lec', hasLab:true }),
+      sec({ courseId:'C1', sectionType:'Lab', hasLab:true }),
+      sec({ courseId:'C2', sectionType:'Lec', hasLab:true }),
+    ];
+    const missing = isR14Missing(r14CourseStatus(ss));
+    expect(missing.length).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Type-scoped section-number format (NEW-FU-105 / NEW-FU-108)
+// The DB CHECK and controller regex agree:
+//   Lec: ^(0[1-9]|[1-4][0-9])$  → '01'..'49'
+//   Lab: ^[5-9][0-9]$           → '50'..'99'
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Type-scoped section number format (NEW-FU-105/108)', () => {
+  const LEC_RE = /^(0[1-9]|[1-4][0-9])$/;
+  const LAB_RE = /^[5-9][0-9]$/;
+  test('TC-36: Lec range accepts 01..49', () => {
+    for (const n of ['01','09','10','25','49']) expect(LEC_RE.test(n)).toBe(true);
+  });
+  test('TC-36b: Lec range rejects 50..99', () => {
+    for (const n of ['50','75','99']) expect(LEC_RE.test(n)).toBe(false);
+  });
+  test('TC-37: Lab range accepts 50..99', () => {
+    for (const n of ['50','75','99']) expect(LAB_RE.test(n)).toBe(true);
+  });
+  test('TC-37b: Lab range rejects 01..49', () => {
+    for (const n of ['01','25','49']) expect(LAB_RE.test(n)).toBe(false);
+  });
+  test('TC-37c: both ranges reject 00, 100, A, "1", " 50"', () => {
+    for (const n of ['00','100','A','1',' 50']) {
+      expect(LEC_RE.test(n)).toBe(false);
+      expect(LAB_RE.test(n)).toBe(false);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Type-scoped duration validation (NEW-FU-106 / NEW-FU-109)
+//   Lec: 50..75 minutes
+//   Lab: 50..165 minutes
+// ─────────────────────────────────────────────────────────────────────────────
+
+function durationMinutes(start, end) {
+  const [h1, m1] = start.split(':').map(Number);
+  const [h2, m2] = end.split(':').map(Number);
+  return (h2*60+m2) - (h1*60+m1);
+}
+function isLecDurationOk(d) { return d >= 50 && d <= 75; }
+function isLabDurationOk(d) { return d >= 50 && d <= 165; }
+
+describe('Per-type duration validation (NEW-FU-106/109)', () => {
+  test('TC-38: Lec accepts 50, 60, 75; rejects 30, 90, 165', () => {
+    expect(isLecDurationOk(50)).toBe(true);
+    expect(isLecDurationOk(60)).toBe(true);
+    expect(isLecDurationOk(75)).toBe(true);
+    expect(isLecDurationOk(30)).toBe(false);
+    expect(isLecDurationOk(90)).toBe(false);
+    expect(isLecDurationOk(165)).toBe(false);
+  });
+  test('TC-39: Lab accepts 50, 75, 100, 165; rejects 30, 200', () => {
+    expect(isLabDurationOk(50)).toBe(true);
+    expect(isLabDurationOk(75)).toBe(true);
+    expect(isLabDurationOk(100)).toBe(true);
+    expect(isLabDurationOk(165)).toBe(true);
+    expect(isLabDurationOk(30)).toBe(false);
+    expect(isLabDurationOk(200)).toBe(false);
+  });
+  test('TC-40: durationMinutes computes correctly from HH:MM strings', () => {
+    expect(durationMinutes('08:00', '09:15')).toBe(75);
+    expect(durationMinutes('13:00', '15:45')).toBe(165);
+    expect(durationMinutes('09:00', '09:50')).toBe(50);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SuggestService — smarter algorithm helpers (NEW-FU-115 / NEW-FU-116)
+// The helpers are pure functions extracted/reused here for testing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Mirror of FU-115's tertiary-key candidate sort. Tier order:
+//   1) preferred (same-course) instructor first
+//   2) instructors with at least one OH first (avoids R-13)
+//   3) least loaded
+function sortCandidates(instructors, ohMap, preferredId, instrLoad) {
+  return [...instructors].sort((a, b) => {
+    if (a.id === preferredId) return -1;
+    if (b.id === preferredId) return  1;
+    const aHasOH = ohMap.has(a.id);
+    const bHasOH = ohMap.has(b.id);
+    if (aHasOH !== bHasOH) return aHasOH ? -1 : 1;
+    return (instrLoad.get(a.id) ?? 0) - (instrLoad.get(b.id) ?? 0);
+  });
+}
+
+// Mirror of FU-116's deterministic shuffle so we can test reproducibility.
+function seededShuffle(arr, seed) {
+  const result = [...arr];
+  let t = (seed * 2654435761) >>> 0;
+  for (let i = result.length - 1; i > 0; i--) {
+    t = (t * 1664525 + 1013904223) >>> 0;
+    const j = t % (i + 1);
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+
+describe('SuggestService.sortCandidates (NEW-FU-115)', () => {
+  const instructors = [
+    { id: 'A', name: 'Dr. A' },
+    { id: 'B', name: 'Dr. B' },
+    { id: 'C', name: 'Dr. C' },
+  ];
+  const loadEqual = new Map([['A',0],['B',0],['C',0]]);
+
+  test('TC-41: instructor with OHs ranks above instructor without OHs', () => {
+    const oh = new Map([['B', [{ day:'Mon', startTime:'09:00', endTime:'10:00' }]]]);
+    const ordered = sortCandidates(instructors, oh, null, loadEqual);
+    // B has OH; A and C have none → B first
+    expect(ordered[0].id).toBe('B');
+  });
+  test('TC-41b: preferred (same-course) wins over has-OH', () => {
+    const oh = new Map([['B', [{}]]]);
+    const ordered = sortCandidates(instructors, oh, 'A', loadEqual);
+    // Preferred A first (even though A has no OH)
+    expect(ordered[0].id).toBe('A');
+  });
+  test('TC-41c: load is tertiary key (after OH presence)', () => {
+    const oh = new Map([['A',[{}]],['B',[{}]],['C',[{}]]]); // all have OH
+    const load = new Map([['A',5],['B',1],['C',3]]);
+    const ordered = sortCandidates(instructors, oh, null, load);
+    expect(ordered.map(i => i.id)).toEqual(['B','C','A']);
+  });
+  test('TC-41d: when nobody has OHs, load takes over', () => {
+    const oh = new Map();
+    const load = new Map([['A',2],['B',5],['C',1]]);
+    const ordered = sortCandidates(instructors, oh, null, load);
+    expect(ordered.map(i => i.id)).toEqual(['C','A','B']);
+  });
+});
+
+describe('SuggestService.seededShuffle (NEW-FU-116)', () => {
+  test('TC-42: same seed → same shuffle (reproducible)', () => {
+    const arr = [1,2,3,4,5];
+    expect(seededShuffle(arr, 1)).toEqual(seededShuffle(arr, 1));
+    expect(seededShuffle(arr, 42)).toEqual(seededShuffle(arr, 42));
+  });
+  test('TC-42b: different seeds → different shuffles (statistical)', () => {
+    const arr = [1,2,3,4,5,6,7,8,9,10];
+    const a = seededShuffle(arr, 1);
+    const b = seededShuffle(arr, 2);
+    const c = seededShuffle(arr, 7);
+    // At least 2 of 3 should differ from each other (not all equal)
+    expect(JSON.stringify(a) === JSON.stringify(b) &&
+           JSON.stringify(b) === JSON.stringify(c)).toBe(false);
+  });
+  test('TC-42c: shuffle preserves all elements (no loss, no duplicates)', () => {
+    const arr = [1,2,3,4,5];
+    const shuffled = seededShuffle(arr, 99);
+    expect([...shuffled].sort()).toEqual([...arr].sort());
+  });
+  test('TC-42d: shuffle does not mutate the input array', () => {
+    const arr = [1,2,3,4,5];
+    const snapshot = [...arr];
+    seededShuffle(arr, 5);
+    expect(arr).toEqual(snapshot);
   });
 });
 

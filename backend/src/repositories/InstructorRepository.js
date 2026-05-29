@@ -1,7 +1,25 @@
 const { query } = require('../config/db');
 
 class InstructorRepository {
-  async findAll() {
+  /**
+   * NEW-FU-274 (Phase 51 #5): optional term-scoped filter. When `termCode`
+   * is supplied, only return instructors who have at least one section in
+   * a schedule for that term — avoids showing 251-only instructors in a
+   * 252 sidebar. Empty terms (no sections) return an empty list.
+   */
+  async findAll(termCode = null) {
+    if (termCode) {
+      const res = await query(
+        `SELECT DISTINCT i.id, i.name, i.email, i.created_at, i.updated_at
+         FROM instructors i
+         JOIN sections s   ON s.instructor_id = i.id
+         JOIN schedules sc ON sc.id = s.schedule_id
+         WHERE sc.semester = $1
+         ORDER BY i.name`,
+        [termCode]
+      );
+      return res.rows;
+    }
     const res = await query(
       `SELECT id, name, email, created_at, updated_at FROM instructors ORDER BY name`
     );
@@ -55,10 +73,21 @@ class InstructorRepository {
     return this.findById(res.rows[0].id);
   }
 
-  async addOfficeHour(instructorId, { day, startTime, endTime }) {
-    const res = await query(
+  async addOfficeHour(instructorId, { day, startTime, endTime }, client = null) {
+    // NEW-FU-27: return the complete row so the frontend's
+    // `setOhList(prev => [...prev, oh])` can render the new entry
+    // immediately. Previously RETURNING only `id` produced a row that
+    // rendered as just "–" until the next loadView refresh.
+    // start_time / end_time are cast to text to match the shape returned
+    // by getOfficeHours() (HH:MM:SS strings, not pg TIME objects).
+    // NEW-FU-64: accept an optional transactional client so callers can
+    // perform the write inside a SELECT … FOR UPDATE lock on the instructor
+    // row, eliminating the TOCTOU window vs. the overlap pre-check.
+    const db = client ?? { query: (t, p) => query(t, p) };
+    const res = await db.query(
       `INSERT INTO office_hours (instructor_id, day, start_time, end_time)
-       VALUES ($1,$2,$3,$4) RETURNING id`,
+       VALUES ($1,$2,$3,$4)
+       RETURNING id, day, start_time::text AS start_time, end_time::text AS end_time`,
       [instructorId, day, startTime, endTime]
     );
     return res.rows[0];
@@ -66,6 +95,31 @@ class InstructorRepository {
 
   async deleteOfficeHour(ohId) {
     await query(`DELETE FROM office_hours WHERE id = $1`, [ohId]);
+  }
+
+  /**
+   * NEW-FU-41: atomic single-row update for an office hour. Replaces the
+   * frontend's previous "create new + delete old" pattern, which left a
+   * duplicate row in the DB whenever the delete failed (network blip, 5xx).
+   * One UPDATE keeps the same OH row id, so any joined data referencing it
+   * stays consistent — and conflict revalidation sees exactly one row.
+   *
+   * Returns the updated row in the same shape as addOfficeHour() so the
+   * frontend can splice it into its local OH list without reshaping. Null
+   * when no row matched (404 territory for the caller).
+   */
+  async updateOfficeHour(ohId, { day, startTime, endTime }, client = null) {
+    // NEW-FU-64: accept transactional client for callers performing the
+    // update inside an instructor-row lock (closes the TOCTOU window).
+    const db = client ?? { query: (t, p) => query(t, p) };
+    const res = await db.query(
+      `UPDATE office_hours
+       SET day = $2, start_time = $3, end_time = $4
+       WHERE id = $1
+       RETURNING id, day, start_time::text AS start_time, end_time::text AS end_time`,
+      [ohId, day, startTime, endTime]
+    );
+    return res.rows[0] ?? null;
   }
 }
 

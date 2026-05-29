@@ -23,17 +23,24 @@
 .view-label {
   padding: 10px 20px 8px;
   font-family: var(--font-display);
-  font-size: .82rem;
-  font-weight: 600;
-  color: var(--navy-700);
-  letter-spacing: -.01em;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -.005em;
   background: var(--white);
   border-bottom: 1px solid var(--slate-200);
   flex-shrink: 0;
+  /* Flex so the title and helper text become distinct items;
+     the helper span's marginLeft:auto then correctly pushes it to the right. */
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 .view-hint {
-  font-weight: 400;
-  color: var(--slate-400);
+  font-weight: 500;
+  font-size: 13px;
+  /* Darker neutral for AA contrast on white background */
+  color: var(--text-secondary);
   font-family: var(--font-body);
 }
 
@@ -44,7 +51,43 @@
   background: var(--white);
 }
 
+/* ── Archived-term banner (NEW-FU-203) ─────────────────────────────────────────
+   Sits just above the schedule grid when the active schedule is archived.
+   Slate-amber palette keeps it distinct from error / success toasts: this
+   isn't a failure, it's just a state of rest the user should be aware of.
+*/
+.scheduler-archived-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #fef3c7;          /* amber-50 */
+  border: 1px solid #fcd34d;    /* amber-300 */
+  border-left: 4px solid #b45309; /* amber-700, the load-bearing stripe */
+  color: #78350f;               /* amber-900 — passes AA on amber-50 */
+  font-size: 13px;
+  line-height: 1.4;
+}
+.scheduler-archived-icon {
+  font-size: 18px;
+}
+.scheduler-archived-msg strong {
+  font-weight: 700;
+}
+
 /* ── Toast ────────────────────────────────────────────────────────────────────── */
+/* NEW-FU-293 (Phase 58): the audit toast in the Phase 58 screenshot
+   was appearing as unstyled text floating over the grid because:
+     1. `.toast-warn` was NEVER defined in CSS (only success/error/info).
+        With no background-color rule, the div was transparent and the
+        text bled into the grid behind it.
+     2. `white-space: nowrap` forced the audit's 100+ char message to
+        extend past the viewport width — a centered overflowing element
+        looks visually identical to "inline in the grid."
+   Fixes: define `.toast-warn` with amber chrome; allow multi-line wrap
+   with `white-space: normal`; bound the width so long messages keep a
+   pill shape (max-width: 90vw, max-width on text via min(...) so the
+   pill doesn't span the entire screen on widescreen monitors). */
 .toast {
   position: fixed;
   bottom: 24px;
@@ -57,7 +100,13 @@
   z-index: 300;
   box-shadow: var(--shadow-lg);
   animation: toast-in .25s cubic-bezier(.16,1,.3,1);
-  white-space: nowrap;
+  /* NEW-FU-293 (Phase 58): nowrap removed so long messages wrap inside
+     the pill instead of bursting through the viewport edges. The
+     max-width bound keeps the pill from spanning a 1440px display. */
+  white-space: normal;
+  max-width: min(640px, 90vw);
+  text-align: center;
+  line-height: 1.4;
 }
 @keyframes toast-in {
   from { opacity:0; transform: translateX(-50%) translateY(16px); }
@@ -66,3 +115,8 @@
 .toast-success { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
 .toast-error   { background: var(--soft-red); color: var(--red-500); border: 1px solid var(--red-300); }
 .toast-info    { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+/* NEW-FU-293 (Phase 58): amber chrome for warn-level toasts (audit
+   warnings, partial-failure notices). Same shape as the existing
+   info/error pills — slightly darker amber so it stays distinct from
+   success-green and doesn't get mistaken for an error. */
+.toast-warn    { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }

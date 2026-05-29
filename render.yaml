@@ -14,7 +14,13 @@ services:
     rootDir: backend
     buildCommand: npm install
     startCommand: node src/index.js
-    preDeployCommand: npm run migrate && npm run seed
+    # NEW-FU-38: dropped `npm run seed` from the auto-deploy chain. Seed
+    # creates admin1 with the hardcoded password "password123" — fine for
+    # dev, catastrophic for prod. Migrations still run automatically. To
+    # bootstrap a fresh prod DB with seed data once, run via Render shell:
+    #   ALLOW_SEED=1 npm run seed
+    # then rotate the admin password immediately.
+    preDeployCommand: npm run migrate
     healthCheckPath: /api/v1/health
     envVars:
       - key: NODE_ENV

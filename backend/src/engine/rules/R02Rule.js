@@ -17,6 +17,10 @@
  */
 const { SEVERITY, RULE_IDS, ACADEMIC_LEVELS } = require('../../config/constants');
 const Conflict = require('../../domain/Conflict');
+// NEW-FU-282 (Phase 56): use the shared label helper so female sections
+// show up as "§F-XX" in conflict description text (display-only, no
+// rule-logic change).
+const { sectionLabel } = require('../../domain/sectionLabel');
 
 function toMin(t) {
   if (!t) return 0;
@@ -73,6 +77,13 @@ function evaluate(changed, allSections) {
     const otherLevel = ACADEMIC_LEVELS[otherLogical[0][0]?.academicLevel?.toUpperCase()];
     if (!otherLevel) continue;
 
+    // NEW-FU-275 (Phase 52 #2): grad-grad overlap is allowed per user
+    // directive — at the Graduate tier students elect between courses,
+    // so a same-slot overlap is a choice, not a blocker. Skip when BOTH
+    // sides are Graduate. Adjacent-level Senior↔Graduate still fires.
+    if (changed.academicLevel === 'Graduate' &&
+        otherLogical[0][0]?.academicLevel === 'Graduate') continue;
+
     const diff = Math.abs(changedLevel - otherLevel);
     if (diff > 1) continue;
 
@@ -83,7 +94,17 @@ function evaluate(changed, allSections) {
     const otherCode  = otherLogical[0][0]?.courseCode ?? otherCourseId;
     const otherLvl   = otherLogical[0][0]?.academicLevel ?? '';
     const repB       = overlapping[0][0];
-    const secListAll = Array.from(otherSecMap.keys()).map(n=>`§${n}`).join(', ');
+    // NEW-FU-80: sort section numbers so the description is deterministic
+    // across saves (see R01Rule for full rationale; same iteration-order
+    // dependency on pg's unordered section result-set affects R-02).
+    //
+    // NEW-FU-282 (Phase 56): iterate entries (not keys) so we have the
+    // section rows on hand — sectionLabel needs the gender field to pick
+    // between "§XX" and "§F-XX". All rows in a logical-section bucket
+    // share the same gender, so reading from rows[0] is safe.
+    const secListAll = Array.from(otherSecMap.entries())
+      .sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true }))
+      .map(([, rows]) => sectionLabel(rows[0])).join(', ');
 
     if (diff === 0) {
       // Same level — Hard conflict
@@ -95,15 +116,19 @@ function evaluate(changed, allSections) {
 
       if (hasEscape) {
         // Escape exists → Soft warning (students CAN take both via free sections)
-        const freeSecs = freeOther.map(logB => {
-          const row = logB[0];
-          return `§${row?.sectionNumber} (${row?.day} ${(row?.startTime??'').substring(0,5)})`;
-        }).join(', ');
+        // NEW-FU-80: sort the free-sections list by section number so the
+        // description is deterministic across saves (same reason as
+        // secListAll above — FU-78 signatures depend on description stability).
+        const freeSecs = freeOther
+          .map(logB => logB[0])
+          .sort((a, b) => String(a?.sectionNumber ?? '').localeCompare(String(b?.sectionNumber ?? ''), undefined, { numeric: true }))
+          .map(row => `${sectionLabel(row)} (${row?.day} ${(row?.startTime ?? '').substring(0,5)})`)
+          .join(', ');
         conflicts.push(new Conflict({
           id: null, scheduleId: changed.scheduleId,
           ruleId: RULE_IDS.R02, severity: SEVERITY.SOFT,
           description:
-            `${changedCode} (1 section, §${changed.sectionNumber}) overlaps with ` +
+            `${changedCode} (1 section, ${sectionLabel(changed)}) overlaps with ` +
             `${overlapping.length} of ${otherLogical.length} section${otherLogical.length>1?'s':''} ` +
             `of ${otherCode} (${otherLvl}, sections: ${secListAll}). ` +
             `Escape available: students can enroll in ${otherCode} ${freeSecs} to avoid the conflict.`,
@@ -116,7 +141,7 @@ function evaluate(changed, allSections) {
           id: null, scheduleId: changed.scheduleId,
           ruleId: RULE_IDS.R02, severity: SEVERITY.HARD,
           description:
-            `${changedCode} has only 1 section (§${changed.sectionNumber}) and all ` +
+            `${changedCode} has only 1 section (${sectionLabel(changed)}) and all ` +
             `${otherLogical.length} section${otherLogical.length>1?'s':''} of ${otherCode} ` +
             `(${otherLvl}, sections: ${secListAll}) overlap with it. ` +
             `Students cannot take both courses — no escape route exists.`,

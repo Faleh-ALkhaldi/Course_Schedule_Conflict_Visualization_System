@@ -9,6 +9,8 @@
  */
 const { SEVERITY, RULE_IDS } = require('../../config/constants');
 const Conflict = require('../../domain/Conflict');
+// NEW-FU-282 (Phase 56): shared label helper for §F-XX rendering.
+const { sectionLabel } = require('../../domain/sectionLabel');
 
 function toMin(t) {
   if (!t) return 0;
@@ -85,8 +87,37 @@ function evaluate(changed, allSections) {
       const otherCode   = otherLogical[0][0]?.courseCode ?? otherCourseId;
       const totalA      = changedLogical.length;
       const totalB      = otherLogical.length;
-      const secListA    = Array.from(changedSecMap.keys()).map(n=>`§${n}`).join(', ');
-      const secListB    = Array.from(otherSecMap.keys()).map(n=>`§${n}`).join(', ');
+      // NEW-FU-80: sort section numbers alphanumerically before joining so
+      // the description is deterministic across saves. Prior code's list
+      // order tracked Map insertion order, which tracked the result-set
+      // order from `SELECT … FROM sections WHERE schedule_id=$1` (no
+      // ORDER BY). pg can reorder rows after UPDATEs, so the same
+      // conflict could produce two different descriptions across saves —
+      // and the FU-78 signature scheme (description-keyed) would then
+      // falsely flag the post-edit conflict as "new" even though no
+      // logical violation changed.
+      // NEW-FU-282 (Phase 56): iterate entries (not keys) so we can read
+      // the section row's gender and render "§F-XX" for female sections
+      // (display-only; rule logic unchanged). All rows in a logical-
+      // section bucket share the same gender, so rows[0] is canonical.
+      const sortSecs = m => Array.from(m.entries())
+        .sort(([a], [b]) => String(a).localeCompare(String(b), undefined, { numeric: true }))
+        .map(([, rows]) => sectionLabel(rows[0])).join(', ');
+      // NEW-FU-80 (extended): canonicalize the course-pair order too.
+      // R-01 is symmetric (the violation belongs to a course pair, not to
+      // a "first" course), but the evaluator fires once per section in
+      // the schedule — so the description's "X and Y" order depends on
+      // which section gets evaluated first. The evaluateAll dedup keeps
+      // whichever orientation fires first, which still varies with the
+      // section-array iteration order. Forcing the alphabetically-smaller
+      // courseCode to appear first makes the surviving conflict's
+      // description AND the FU-78 signature stable end-to-end.
+      const pair = [
+        { code: changedCode, secMap: changedSecMap, total: totalA },
+        { code: otherCode,   secMap: otherSecMap,   total: totalB },
+      ].sort((a, b) => String(a.code).localeCompare(String(b.code)));
+      const secListA    = sortSecs(pair[0].secMap);
+      const secListB    = sortSecs(pair[1].secMap);
       const repB        = otherLogical[0].find(r =>
         changedLogical.some(logA => logicalOverlaps(logA, [r]))
       ) ?? otherLogical[0][0];
@@ -95,8 +126,8 @@ function evaluate(changed, allSections) {
         id: null, scheduleId: changed.scheduleId,
         ruleId: RULE_IDS.R01, severity: SEVERITY.HARD,
         description:
-          `${changedCode} (${totalA} sections: ${secListA}) and ` +
-          `${otherCode} (${totalB} sections: ${secListB}) ` +
+          `${pair[0].code} (${pair[0].total} sections: ${secListA}) and ` +
+          `${pair[1].code} (${pair[1].total} sections: ${secListB}) ` +
           `are both ${changed.academicLevel}-level and every section combination overlaps — ` +
           `students have no way to take both courses.`,
         sectionAId: changed.id,

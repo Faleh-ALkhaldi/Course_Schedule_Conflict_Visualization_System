@@ -1,18 +1,67 @@
 .sblock {
   width: 100%;
   height: 100%;
+  /* NEW-FU-134: removed min-height: 80px (was FU-129). The floor caused
+     visual overlap with hour-axis labels at low zoom and with adjacent
+     same-lane cards at low zoom. Cards now claim only the height of
+     their time slot; the tier-* classes shrink the font sizes / padding
+     so all 4 info elements (code, time, instructor, venue) remain
+     visible at every density tier and at every zoom level. */
   border: 1.5px solid;
   border-radius: 5px;
-  padding: 3px 5px;
-  font-size: .72rem;
+  padding: 6px 10px;
+  font-size: 13px;
   line-height: 1.25;
+  color: var(--text-primary);
   box-shadow: 0 1px 3px rgba(0,0,0,.1);
   overflow: hidden;
   transition: box-shadow .12s, opacity .1s;
   position: relative;
   box-sizing: border-box;
+  /* NEW-FU-289 (Phase 57): min-width:0 lets the card shrink below
+     its intrinsic content width when nested in a flex/grid lane
+     under pressure. Without it, the `text-overflow: ellipsis` on
+     the code/venue rows engages prematurely (because the children
+     refuse to compress) and we see "KH…" mid-name clipping at
+     widths where the 2-line clamp could otherwise wrap cleanly. */
+  min-width: 0;
+  /* NEW-FU-155 lever A: smoothing hints. Safari/macOS renders thin
+     strokes blurry without these. `optimizeLegibility` enables
+     kerning/ligatures which marginally helps SF Mono at small sizes. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  /* NEW-FU-155 lever D: 1px white text-shadow lifts text off pastel
+     backgrounds. Invisible on white (no test backgrounds are pure
+     white), but adds definition on cream/mint/lavender/amber/tan. */
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.4);
 }
-.sblock:hover { box-shadow: 0 3px 10px rgba(0,0,0,.18); z-index: 10; }
+.sblock:hover {
+  box-shadow: 0 3px 10px rgba(0,0,0,.18);
+  z-index: 50;
+  overflow: visible;   /* let popover escape */
+}
+
+/* NEW-FU-405 (Phase 45): Replaced the Phase 44 silent colored stripe
+   with the existing text "LEC"/"LAB" badge — but now ALWAYS visible
+   at every tier, via absolute positioning so it doesn't consume
+   flex header width (the root cause of Phase 41 having to hide it).
+   The text label is self-explanatory: a first-time user reading
+   "LEC" understands it's a lecture without learning a color code.
+   The badge keeps its color encoding (blue pill for Lec, amber for
+   Lab) as a secondary cue, so users with both color vision and
+   reading get both signals.
+
+   The badge is positioned at the BOTTOM-RIGHT corner — the only
+   corner not already occupied (top-left = conflict dots, top-right
+   = section badge §X, bottom-left = clean fallback if venue text
+   gets long). The actual rules that do this live further down in
+   the narrow-tier block. Phase 44's `::after` stripe is deleted
+   to avoid redundancy.
+
+   .sblock::after is left declared but transparent so any future
+   pseudo-element work has a clean base. */
+.sblock::after { display: none; }
 .sblock.is-overlay {
   box-shadow: 0 8px 24px rgba(0,0,0,.25);
   transform: rotate(1deg) scale(1.03);
@@ -24,32 +73,968 @@
   50%      { box-shadow: 0 0 0 4px rgba(220,38,38,0); }
 }
 .sblock.conflict-soft { border-style: dashed; }
-.sblock.compact { padding: 2px 4px; }
 
-.sblock-header { display:flex; justify-content:space-between; align-items:baseline; gap:3px; }
-.sblock-code   { font-family:var(--font-mono); font-size:.72rem; font-weight:600; }
-.sblock-section{ font-family:var(--font-mono); font-size:.62rem; opacity:.7; }
-.sblock-time   { font-family:var(--font-mono); font-size:.62rem; opacity:.8; margin-top:1px; }
-.sblock-instr  { font-size:.68rem; opacity:.85; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.sblock-venue  { font-size:.62rem; font-family:var(--font-mono); opacity:.6; }
+/* NEW-FU-294 (Phase 58): padding-right values across every tier were
+   sized for the legacy 3-char §XX badge. The Phase 56 §F-XX form is
+   5 chars wide (~10px wider at base font), so the existing reserves
+   leave course-code text colliding with the absolute-positioned chip
+   ("SWE" + "§F-86" reading as "SWF-86" in the user's screenshot).
+   Each tier's reserve bumped by ~10px to fully clear the wider chip. */
+.sblock-header { display:flex; justify-content:flex-start; align-items:baseline; gap:3px; padding-right: 32px; }
+/* NEW-FU-142 + FU-155: text colors INHERIT from .sblock (`color: colors.text`
+   set inline — per-level dark text). FU-155 bumped sub-field weights
+   600 → 700 (lever B) for uniform stroke body at small sizes, added
+   +0.01em letter-spacing on mono fields (lever C) to widen visible
+   character cells, and removed the opacity:.85 from .sblock-section
+   (lever G) so the section badge inherits full color saturation. */
+/* NEW-FU-400 (Phase 40): card text resilience at extreme horizontal
+   density. Phase 35 (FU-362) set `white-space:normal; word-break:
+   break-word` on all four content fields to fix VERTICAL truncation
+   (mid-name ellipsis). That fix had a fatal side-effect: at 5+
+   overlapping sections in one time slot, the lane shrinks below the
+   width of a single character — and `break-word` happily wraps text
+   ONE LETTER PER LINE. The user's screenshot shows `SWE301` rendered
+   as `S\nW\nE\n3\n0\n1` stacked vertically, which destroys the card.
+
+   Phase 40 contract: course code, section number, time range, and
+   type badge are ATOMIC IDENTITY TOKENS. They MUST never wrap mid-
+   token at any width. Instructor and venue MAY wrap when there's
+   room for them (≥ 2 word boundaries), or get ellipsis-clipped
+   otherwise. The tooltip carries the full information.
+
+   `overflow-wrap: normal` is stricter than `break-word`: it ONLY
+   wraps at natural break opportunities (spaces, hyphens) — not
+   inside tokens. Combined with `white-space: nowrap` on identity
+   tokens, this guarantees no per-letter wrap.
+
+   The card itself still has `overflow:hidden` so clipped text
+   simply disappears past the edge; the tooltip remains the
+   authoritative source. */
+/* NEW-FU-306 (Phase 64): word-break:keep-all + overflow-wrap:normal
+   added explicitly to every text token. The Phase 63 rule (no mid-word
+   break ever) must apply uniformly — not just to instructor/venue. */
+.sblock-code   { font-family:var(--font-mono); font-size:13px; font-weight:700; letter-spacing:.01em;
+                 white-space:nowrap; overflow:hidden; text-overflow:clip; min-width:0;
+                 word-break:keep-all; overflow-wrap:normal; }
+/* NEW-FU-307 (Phase 65): section chip becomes a subtle pill. Before,
+   the chip was glyph-only — at certain zoom levels the eye merged it
+   with the trailing digit of the course code ("SWE 326⁰¹" reading as
+   one cluster). The pill chrome (background + 1px ring) crosses a
+   visual boundary that the eye reads as "different token." The 1px
+   ring is the same `box-shadow: 0 0 0 1px` pattern used by
+   .sblock-type-badge for design-language consistency. */
+/* NEW-FU-307 (Phase 65): trim the pill's horizontal padding from
+   `1px 5px` to `1px 3px` — that's 4 px saved on width (2 each side).
+   The header padding-right (32 px) was sized for the pre-pill chip;
+   the pill added 10 px of padding without bumping the header
+   reserve. At zoom < 100%, proportional scaling tightened the gap
+   below the safety margin. Shrinking the pill puts us back in
+   the clearance budget at every zoom level. The pill is still
+   visually distinct (background + ring still apply). */
+.sblock-section{ position:absolute; top:4px; right:5px; font-family:var(--font-mono); font-size:11px; font-weight:700; letter-spacing:.01em; pointer-events:none;
+                 white-space:nowrap; word-break:keep-all; overflow-wrap:normal;
+                 padding:1px 3px; border-radius:3px; background:rgba(255,255,255,0.7);
+                 box-shadow:0 0 0 1px rgba(0,0,0,0.08); line-height:1.4; }
+/* NEW-FU-402 (Phase 42): time uses a wrap-at-children pattern. Parent
+   is white-space: normal so a line break can happen between the start
+   and end span; each child span is white-space: nowrap so HH:MM never
+   splits mid-token. The browser will keep both spans on one line if
+   they fit; otherwise it wraps to "09:00\n–09:50" or "09:00–\n09:50"
+   — never "09:00–09" (clipped). */
+/* NEW-FU-306 (Phase 64): added explicit overflow-wrap:normal +
+   -webkit-line-clamp:2. The line-clamp is the critical fix — the
+   parent had no clamp set, but tier-tiny/micro rules cascade
+   `-webkit-line-clamp: 4 / 2` from the instr rule via inheritance.
+   For time specifically, 2 lines is the right max — "11:00–\n11:50"
+   uses both lines, never more. Without the explicit clamp the
+   browser was rendering only 1 line and clipping "11:50". */
+.sblock-time   { font-family:var(--font-mono); font-size:12px; font-weight:700; letter-spacing:.01em; margin-top:1px;
+                 white-space:normal; overflow:hidden; word-break:keep-all; overflow-wrap:normal; line-height:1.15;
+                 display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+.sblock-time > span         { white-space: nowrap; word-break: keep-all; }
+.sblock-time .sblock-time-dash { display:inline; }
+/* NEW-FU-402: instructor uses native word-wrap (break at spaces) with
+   a 2-line max via line-clamp. -webkit-line-clamp needs the box model,
+   so keep display:-webkit-box for the clamp to engage. Names like
+   "Dr. Mohammed Al-Rashid" wrap as "Dr. Mohammed\nAl-Rashid". Plain
+   one-word names stay one line.
+   NEW-FU-292 (Phase 58): clamp bumped 2 → 3 to give single-word names
+   ("KHALID", "MAHMOOD", "ALSALEH") more space to break inside the token
+   when lanes are < 60px wide. Combined with the tier-tight / tier-
+   minimal `overflow-wrap: anywhere` override below, a 7-char name
+   becomes "KHA\nLID" instead of the previous "KH…" clip. */
+/* NEW-FU-304 (Phase 63): `overflow-wrap: break-word` → `normal`.
+   `break-word` is the legacy permissive form of `anywhere` — it
+   permits mid-word breaks when no other option fits. Phase 63's
+   "no mid-word break ever" rule requires `normal` instead. The
+   CSS engine now wraps ONLY at spaces or hyphens (which are
+   natural break points under `word-break: normal`). Single words
+   that overflow the lane are clipped at the card's right edge
+   by the parent's `overflow: hidden`. */
+.sblock-instr  { font-size:12px; font-weight:700;
+                 white-space:normal; overflow-wrap:normal; word-break:normal;
+                 overflow:hidden; text-overflow:ellipsis;
+                 display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical;
+                 line-height:1.15; }
+/* NEW-FU-406 (Phase 46): venue is the BOTTOM text row in the card,
+   which means its right edge could collide with the bottom-right
+   LEC/LAB badge AND its left edge could collide with the bottom-left
+   delete-X. Both are absolutely positioned, so they occupy real pixels
+   over wherever venue lays out. margin-right (32px) reserves room for
+   the badge; margin-left (24px) reserves room for the delete-X. These
+   are baseline values — per-tier rules below shrink them as the
+   indicators themselves shrink.
+
+   NEW-FU-289 (Phase 57): wrap rule promoted from tier-minimal to the
+   base rule so EVERY density tier renders "24-101-A" as "24-\n101-A"
+   when the lane is too narrow for one line, instead of the previous
+   "24-1…" mid-token clip. The wrap is hyphen-aware (overflow-wrap:
+   break-word + word-break: normal) so hyphens are the preferred break
+   point, never inside a numeric token. 2-line clamp caps card height
+   so a long legacy name doesn't balloon the row.
+   NEW-FU-292 (Phase 58): clamp bumped 2 → 3 for parity with the
+   .sblock-instr bump above; gives "76-1024-A" room to wrap to 3 lines
+   at the narrowest tiers without the trailing `-` orphan looking weird. */
+.sblock-venue  { font-family:var(--font-mono); font-size:12px; font-weight:700; letter-spacing:.01em;
+                 margin-right: 32px; margin-left: 24px;
+                 white-space: normal;
+                 overflow: hidden;
+                 /* NEW-FU-304 (Phase 63): `break-word` → `normal`.
+                    Hyphens are still natural break points (so
+                    "24-101-A" → "24-\n101-A" works), but the
+                    engine never breaks INSIDE a number group. */
+                 overflow-wrap: normal;
+                 word-break: normal;
+                 text-overflow: clip;
+                 display: -webkit-box;
+                 -webkit-line-clamp: 3;
+                 -webkit-box-orient: vertical;
+                 line-height: 1.15; }
 
 .sblock-dot {
-  position:absolute; top:3px; right:3px;
-  width:6px; height:6px; border-radius:50%;
+  width:7px; height:7px; border-radius:50%;
 }
 .sblock-dot.hard { background:#dc2626; }
 .sblock-dot.soft { background:#d97706; }
 .sblock-no-instr {
-  font-size: .62rem;
-  color: #b45309;
+  font-size: 11px;
+  font-weight: 700;
+  /* NEW-FU-155 lever H: darkened from #92400e (failed ≥5.5 on Graduate
+     and Hard-conflict backgrounds) to #7c2d12, which clears ≥7:1 on
+     every pastel + conflict background. Still recognizably an orange-
+     brown warning colour. */
+  color: #7c2d12;
   font-style: italic;
-  opacity: .9;
 }
 
 .sblock-dots {
   position: absolute;
-  top: 3px; right: 3px;
+  top: 7px; left: 7px;
   display: flex;
   flex-direction: column;
+  gap: 3px;
+  pointer-events: none;
+  z-index: 2;
+}
+.sblock.conflict-hard .sblock-header,
+.sblock.conflict-soft .sblock-header {
+  padding-left: 14px;
+}
+
+/* NEW-FU-406 (Phase 46): badge is now ABSOLUTELY positioned at the
+   bottom-right corner at EVERY tier. Phase 45's tier-specific
+   absolute positioning is promoted to the base rule, eliminating
+   the inconsistency where the badge sat inline-in-header at wider
+   tiers but bottom-right at narrow tiers (the user rejected the
+   two-positions-for-one-element design as "unacceptable").
+
+   Position: bottom: 2px; right: 3px. This is reserved for the
+   LEC/LAB text pill. The delete-X lives at bottom-LEFT (line 399)
+   to keep the two corners disjoint. */
+.sblock-type-badge {
+  position: absolute;
+  bottom: 2px;
+  right: 3px;
+  margin: 0;
+  z-index: 2;
+  font-size: .62rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: .02em;
+  white-space: nowrap;
+  /* NEW-FU-306 (Phase 64): explicit word-break:keep-all so the
+     three-letter LEC/LAB token never splits at any tier. */
+  word-break: keep-all;
+  overflow-wrap: normal;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08);
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+   NEW-FU-134: density tiers. The `tier-*` class is added by SectionBlock
+   based on the per-lane width computed in ScheduleGrid:
+     spacious  laneW ≥ 180  → default (everything full size)
+     compact   laneW 130–180 → slightly tighter fonts + padding
+     tight     laneW 90–130  → small fonts, tight line-height
+     minimal   laneW < 90    → smallest fonts, time = start-only
+                               (JSX collapses time text in this tier)
+   At every tier ALL four info fields (code, time, instructor, venue)
+   stay visible — only the font sizes shrink.
+   ────────────────────────────────────────────────────────────────── */
+.sblock.tier-spacious { /* defaults above */ }
+
+.sblock.tier-compact {
+  padding: 5px 8px;
+  line-height: 1.22;
+}
+.sblock.tier-compact .sblock-code   { font-size: 12px; }
+.sblock.tier-compact .sblock-section{ font-size: 10px; top: 4px; right: 6px; }
+.sblock.tier-compact .sblock-time,
+.sblock.tier-compact .sblock-instr,
+/* NEW-FU-406 (Phase 46): venue margin-right/margin-left inherited from
+   base. tier-compact badge is .56rem ≈ 9px font ≈ 28px wide pill, and
+   delete-X is 18px wide — the base 32/24 margins are correct. */
+.sblock.tier-compact .sblock-venue  { font-size: 11px; }
+.sblock.tier-compact .sblock-no-instr{ font-size: 10px; }
+.sblock.tier-compact .sblock-type-badge { font-size: .56rem; padding: 1px 4px; }
+.sblock.tier-compact .sblock-header { padding-right: 28px; }
+
+.sblock.tier-tight {
+  padding: 4px 6px;
+  line-height: 1.18;
+}
+/* NEW-FU-155 lever E: tier-tight bump — code 11→11.5px and
+   time/instr/venue 10→10.5px. Half-pixel feels small but is the
+   threshold where SF Mono switches from anti-aliased blur to crisp
+   stroke rendering at the default browser zoom level on macOS. */
+/* NEW-FU-401 (Phase 41): reduced tier-tight time font from 10.5 → 9.5
+   so "07:00–08:15" (10 chars in mono ≈ 60px @ 9.5px) fits in the 88-130px
+   tight-tier card widths without clipping. The Phase 40 nowrap+clip would
+   show "07:00-08:1" (chopped tail) at this density — losing the end time
+   was identification loss the user rejected. */
+.sblock.tier-tight .sblock-code   { font-size: 11.5px; }
+.sblock.tier-tight .sblock-section{ font-size: 9px; top: 3px; right: 5px; }
+.sblock.tier-tight .sblock-time   { font-size: 9.5px; margin-top: 0; letter-spacing: -0.02em; }
+.sblock.tier-tight .sblock-instr  { font-size: 10.5px; margin-top: 0; }
+/* NEW-FU-406 (Phase 46): tier-tight venue keeps base margins (32/24)
+   since badge/delete-X are similar size to tier-compact. */
+.sblock.tier-tight .sblock-venue  { font-size: 10.5px; margin-top: 0; }
+.sblock.tier-tight .sblock-no-instr{ font-size: 9.5px; }
+/* NEW-FU-406 (Phase 46): margin-left removed — badge is now absolutely
+   positioned (see base rule) so flex-margin is irrelevant dead code. */
+.sblock.tier-tight .sblock-type-badge { font-size: .5rem; padding: 0 3px; }
+.sblock.tier-tight .sblock-header { padding-right: 26px; gap: 2px; }
+
+.sblock.tier-minimal {
+  padding: 2px 3px;
+  line-height: 1.08;
+  font-size: 9px;
+}
+/* NEW-FU-401 (Phase 41): tier-minimal time also shrunk + letter-spacing
+   tightened so the full "HH:MM–HH:MM" range fits without clipping. */
+.sblock.tier-minimal .sblock-code   { font-size: 9px; }
+/* NEW-FU-404 (Phase 44): top:4 keeps the §X badge BELOW the new
+   3px top-edge type stripe. Previously top:1 collided with the
+   stripe; the user's screenshot confirmed visual obscuring. */
+.sblock.tier-minimal .sblock-section{ font-size: 7px; top: 4px; right: 3px; font-weight: 700; }
+.sblock.tier-minimal .sblock-time   { font-size: 7.5px; margin-top: 0; letter-spacing: -0.03em; }
+.sblock.tier-minimal .sblock-instr,
+/* NEW-FU-405 (Phase 45): margin-right (NOT padding-right) reserves
+   space for the absolutely-positioned LEC/LAB pill at bottom-right.
+   padding-right only shrinks the INNER text area but leaves the
+   element's bounding box at full parent width — so the DOM-overlap
+   check still saw an intersection with the badge. margin-right
+   reduces the element's actual computed width, moving its right
+   edge inward by 28px, ensuring zero bounding-box overlap. */
+/* NEW-FU-406 (Phase 46): margin-left:18px clears the tier-minimal
+   delete-X (13×13 button at left:2 → right edge at 15px → 18 = 3px
+   buffer). margin-right:28px clears the badge (~24px pill). */
+/* NEW-FU-285 (Phase 56) → NEW-FU-289 (Phase 57): the wrap rule that
+   used to live HERE moved to the base `.sblock-venue` selector so all
+   four tiers (spacious / compact / tight / minimal) share the hyphen-
+   wrap + 2-line clamp behaviour. This block keeps only the
+   tier-minimal-specific overrides: tighter font, tighter margins, and
+   a slightly shorter line-height. */
+.sblock.tier-minimal .sblock-venue  {
+  /* NEW-FU-292 (Phase 58): font 8.5 → 7.5px so longer venue names
+     ("24-101-A" = 8 chars) get more pixels to fit per line before
+     the 3-line clamp engages. At 7.5px mono each char is ~4.5px
+     wide, fitting ~7 chars across the 34px content area at minimal
+     tier — barely covers the convention's longest XX-YYY-Z form. */
+  font-size: 7.5px;
+  margin-top: 0;
+  margin-right: 28px;
+  margin-left: 18px;
+  line-height: 1.1;
+}
+.sblock.tier-minimal .sblock-no-instr{ font-size: 8px; }
+
+/* NEW-FU-292 (Phase 58): last-resort fallback for instructor / venue
+   text at the narrow tiers. `overflow-wrap: anywhere` is stricter than
+   `break-word` — it allows a break INSIDE a token when no other wrap
+   opportunity exists. Combined with the 3-line clamp from the base
+   rule, a 7-char single-word name like "KHALID" becomes "KHA\nLID"
+   instead of clipping to "KH…". Tier-spacious / tier-compact keep the
+   base `break-word` behaviour because their lanes are wide enough that
+   the fallback never engages — wrap at spaces / hyphens stays the
+   preferred path for readability. */
+/* NEW-FU-296 (Phase 59): extended `overflow-wrap: anywhere` to tier-
+   micro and tier-tiny too. At those tiers the lanes are < 60 px and
+   the useFitText hook has shrunk the font to its 5 px floor — without
+   `anywhere`, a single-word name like "KHALID" still hits ellipsis
+   because `break-word` only breaks at word boundaries. With `anywhere`
+   the hook + CSS combo can produce "KHA\nLID" rather than "KH…". */
+/* NEW-FU-296 (Phase 59) → NEW-FU-304 (Phase 63): `overflow-wrap:
+   anywhere` REMOVED. Phase 62 verified that the strategy reliably
+   emits the right wrap point (full or wrap-at-space). The CSS
+   `anywhere` fallback was then char-breaking long single words
+   ("HAMMAD" → "HAMM\nAD") which is exactly what the user rejects.
+   New rule: word-break: keep-all + overflow-wrap: normal — the
+   CSS engine may break ONLY at spaces or hyphens, never inside a
+   word. Long single words that don't fit overflow horizontally
+   and get clipped at the card's right edge by `overflow: hidden`
+   — "ALJASSE" clipped is strictly better than "ALJASS\nER"
+   fragmented. */
+.sblock.tier-tight .sblock-instr,
+.sblock.tier-tight .sblock-venue,
+.sblock.tier-minimal .sblock-instr,
+.sblock.tier-minimal .sblock-venue,
+.sblock.tier-micro .sblock-instr,
+.sblock.tier-micro .sblock-venue,
+.sblock.tier-tiny .sblock-instr,
+.sblock.tier-tiny .sblock-venue {
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+
+/* NEW-FU-296 (Phase 59): tier-micro and tier-tiny had `line-clamp: 1`
+   from the Phase 41 design (short cards, one line max). With the new
+   useFitText hook shrinking the font, a 2-line clamp gives single-
+   word names enough vertical room to wrap to two lines inside the
+   tier-micro card height (~22 px at 5 px font × 4-px line-height
+   leaves ~12 px for two 5-px lines + line-height padding). */
+.sblock.tier-micro .sblock-instr,
+.sblock.tier-micro .sblock-venue,
+.sblock.tier-tiny .sblock-instr,
+.sblock.tier-tiny .sblock-venue {
+  -webkit-line-clamp: 2;
+}
+
+/* NEW-FU-292 (Phase 58): instructor font at tier-minimal drops 8 → 7.5px
+   so its character count keeps parity with the venue (which also dropped
+   to 7.5px above). Without this, at narrow lanes the instructor would
+   wrap more aggressively than the venue and the card's two text rows
+   would render at different visual densities. */
+.sblock.tier-minimal .sblock-instr { font-size: 7.5px; }
+/* NEW-FU-137: badge is no longer max-width clipped — it shows full
+   "LEC"/"LAB" uppercase in every tier. Width is naturally tight from
+   the small font + minimal padding. */
+.sblock.tier-minimal .sblock-type-badge {
+  font-size: 7px; padding: 0 2px;
+}
+/* NEW-FU-307 (Phase 65): bumped padding-right 20 → 30 px. The Phase
+   65 pill chrome added 6 px to the chip width — needed for the
+   header reservation to clear the new wider chip even after zoom
+   downscale. */
+.sblock.tier-minimal .sblock-header  { padding-right: 30px; gap: 1px; }
+.sblock.tier-minimal .sblock-dots    { top: 3px; left: 3px; gap: 2px; }
+.sblock.tier-minimal .sblock-dot     { width: 5px; height: 5px; }
+
+/* NEW-FU-138: tier-micro — for cards that are SHORT vertically (low zoom
+   OR brief slot durations) or extremely narrow lanes (<60px). Ultra-
+   compact 7px fonts with line-height 1.0 so 4 content lines fit in
+   ≤32-34px (covers a 50-min card at rowH=22 zoom = 36.6px). */
+.sblock.tier-micro {
+  padding: 1px 2px;
+  /* NEW-FU-155 lever E: 1.0 → 1.05 line-height for breathing room.
+     Ascenders/descenders were touching each other at 1.0; 1.05 adds
+     ~0.4px between lines without breaking the 30-36px content budget. */
+  line-height: 1.05;
+  font-size: 7px;
+}
+.sblock.tier-micro .sblock-code   { font-size: 8px; }
+/* NEW-FU-404 (Phase 44): top:3 keeps §X below the 2px stripe at tier-micro. */
+.sblock.tier-micro .sblock-section{ font-size: 6px; top: 3px; right: 2px; font-weight: 700; }
+.sblock.tier-micro .sblock-time,
+.sblock.tier-micro .sblock-instr,
+/* NEW-FU-405 (Phase 45): margin-right (not padding-right) — shrinks
+   the bounding box so the badge sits outside it. */
+/* NEW-FU-406 (Phase 46): horizontal margins ZEROED at tier-micro because
+   the indicators now live in a dedicated bottom strip (padding-bottom:
+   14px on the card). Venue gets the full content-area width so it
+   actually renders visible text instead of collapsing to 0 width. */
+.sblock.tier-micro .sblock-venue  { font-size: 7px; margin-top: 0; margin-right: 0; margin-left: 0; }
+.sblock.tier-micro .sblock-no-instr{ font-size: 6.5px; }
+.sblock.tier-micro .sblock-type-badge {
+  font-size: 5.5px; padding: 0 1px;
+}
+.sblock.tier-micro .sblock-header  { padding-right: 18px; gap: 1px; }
+.sblock.tier-micro .sblock-dots    { top: 2px; left: 2px; gap: 1px; }
+.sblock.tier-micro .sblock-dot     { width: 4px; height: 4px; }
+
+/* NEW-FU-403 (Phase 43): tier-tiny REWORK. The Phase 40 version hid
+   everything except the course code at this density — but Phase 43's
+   contract requires every field visible on every card. So tier-tiny
+   shows ALL six fields at ultra-tight 6-7px fonts.
+   NEW-FU-406 (Phase 46): the delete-row is no longer hidden at tier-tiny.
+   It's absolutely positioned at bottom-left as a 12×12 button (see the
+   tier-tiny delete-row size override near the bottom of this file).
+
+   The card may grow vertically to fit the 4 lines (header + time +
+   instructor + venue) — vertical growth is preferable to hidden
+   info per Phase 43's last-resort rule. */
+.sblock.tier-tiny {
+  padding: 1px 2px 1px 5px;       /* extra left padding for color band */
+  line-height: 1.0;
+  font-size: 6px;
+  border-left-width: 4px;
+}
+.sblock.tier-tiny .sblock-header { padding-right: 22px; gap: 1px; padding-left: 0; }
+.sblock.tier-tiny .sblock-code   {
+  font-size: 7.5px;
+  letter-spacing: -0.05em;        /* squeeze the mono "SWE301" tighter */
+  font-stretch: condensed;
+  font-weight: 800;
+}
+/* Section badge: digit-only at this tier (drop the § glyph for room). */
+.sblock.tier-tiny .sblock-section {
+  font-size: 6px;
+  /* NEW-FU-404 (Phase 44): top:3 — below the 2px stripe. Previously
+     top:0 collided with the stripe; the §X text rendered ON TOP of
+     the colored stripe and was unreadable against the saturated bg. */
+  top: 3px;
+  right: 2px;
+  font-weight: 800;
+  letter-spacing: -0.05em;
+}
+.sblock.tier-tiny .sblock-time   { font-size: 6px; letter-spacing: -0.06em; line-height: 1.0; margin-top: 0; }
+.sblock.tier-tiny .sblock-instr  { font-size: 6px; line-height: 1.0; -webkit-line-clamp: 1; }
+/* NEW-FU-405 (Phase 45): margin-right shrinks bounding box for no overlap. */
+/* NEW-FU-406 (Phase 46): horizontal margins ZEROED at tier-tiny.
+   The card's padding-bottom:14px puts indicators in a dedicated
+   bottom strip BELOW the content area — venue no longer needs
+   horizontal margin to clear them. */
+.sblock.tier-tiny .sblock-venue  { font-size: 6px; line-height: 1.0; letter-spacing: -0.05em; margin-right: 0; margin-left: 0; }
+.sblock.tier-tiny .sblock-no-instr { font-size: 5.5px; }
+/* NEW-FU-406 (Phase 46): Phase 41-45 hid the delete-X at narrow tiers
+   on the rationale that it competed with the course code for flex
+   width. That rationale is now obsolete because the delete-X is
+   absolutely positioned at bottom-left (see base rule), so it occupies
+   ZERO flex room. The user explicitly required: "return the X button
+   back" at every tier. Size is shrunk per-tier (see .sblock.tier-tiny
+   .sblock-delete-row near the bottom) so the button stays clickable
+   without dominating the card. */
+/* Conflict dot stays — it's a single pixel-cluster, still visible. */
+/* NEW-FU-404 (Phase 44): top:3 — below the 2px stripe at tier-tiny. */
+.sblock.tier-tiny .sblock-dots { top: 3px; left: 1px; gap: 1px; }
+.sblock.tier-tiny .sblock-dot  { width: 3px; height: 3px; }
+
+/* NEW-FU-147: Popover is permanently `position: fixed` in CSS — the
+   measurement step in SectionBlock.jsx flips display:block briefly to
+   read getBoundingClientRect(), and without position:fixed the popover
+   was rendering in-flow inside the card (taking full card width and
+   pushing other content). With position:fixed baked in, the off-screen
+   measurement never affects layout, and the JS positioner only needs
+   to overwrite top/left.
+   width:auto/height:auto ensures the box is sized to its content (not
+   stretched by any inherited block-level expansion). */
+.sblock-popover {
+  display: none;
+  position: fixed;
+  top: -9999px;
+  left: -9999px;
+  width: auto;
+  height: auto;
+  min-width: 220px;
+  max-width: 300px;
+  background: #1e293b;
+  color: #f8fafc;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 12px 32px rgba(0,0,0,.4);
+  /* NEW-FU-301 (Phase 26): pointer-events restored to none. With the
+     popover's interactive button removed, the popover is once again a
+     pure tooltip — having pointer-events: auto would let the popover
+     swallow clicks/hovers meant for the underlying card (e.g., if
+     positioned over a neighboring card). The pre-FU-289 default is
+     correct again. */
+  pointer-events: none;
+  white-space: normal;
+  /* NEW-FU-152: max-int range so even an obnoxious z-index:9999 in a
+     future ancestor can't out-rank the popover. Combined with the
+     createPortal-into-document.body move (also FU-152), the popover
+     now wins z-order regardless of any caller's stacking shenanigans. */
+  z-index: 2147483000;
+  animation: sblock-popover-in .12s ease-out;
+}
+@keyframes sblock-popover-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.sblock-popover-title {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sblock-popover-type {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #475569;
+  color: #f1f5f9;
+}
+.sblock-popover-row {
+  font-size: 11.5px;
+  color: #cbd5e1;
+  margin-top: 2px;
+}
+
+/* NEW-FU-144: removed the @media (max-width: 1200px) override that
+   forced the popover to the left of the card — the JS positioner
+   handles edge detection at every viewport size. */
+
+/* NEW-FU-272: per-day quick-delete ✕ in the card header.
+   NEW-FU-406 (Phase 46): repositioned to ABSOLUTE bottom-LEFT corner.
+   NEW-FU-407 (Phase 47): enlarged to an accident-proof hit target.
+   NEW-FU-408 (Phase 48): HOVER-REVEAL — Phase 47's "visible at rest"
+   (opacity 0.85) made a busy 40+ card schedule read as "cluttered with
+   delete buttons" instead of a clean course layout. The visual noise
+   from a red X on every card distracted from the actual content. So
+   Phase 48 reverts the rest opacity to 0 (invisible) and reveals the
+   X via card-hover — the standard pattern for destructive secondary
+   actions (Trello cards, Gmail row actions, Finder file controls).
+
+   Crucially, the size/shape/styling stay full-Phase-47 — when the X
+   appears on hover it must still feel substantial (26×26 base, red
+   border, tinted bg, shadow). Only the *rest-state visibility* changes:
+     • rest:           opacity 0     (invisible — clean schedule)
+     • card hovered:   opacity 0.95  (revealed — user signalled intent)
+     • X hovered:      opacity 1.0   (armed — direct mouse over X)
+   The 0.12s opacity transition makes the appearance smooth, not a
+   jarring snap-on. The X is still in the DOM and clickable on hover
+   because pointer-events:auto + opacity > 0 once revealed.
+
+   Click isolation (e.stopPropagation in JSX, line 277-288 of
+   SectionBlock.jsx) still prevents the X click from bubbling to the
+   card's edit-popover onClick. */
+.sblock-delete-row {
+  position: absolute;
+  bottom: 2px;
+  left: 3px;
+  z-index: 2;                    /* above any overlapping venue text */
+  background: rgba(220, 38, 38, 0.18);
+  color: #b91c1c;
+  border: 1px solid rgba(220, 38, 38, 0.4);
+  border-radius: 5px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;                    /* Phase 48: 0.85 → 0 (hidden at rest) */
+  transition: opacity 0.12s, background 0.12s, transform 0.08s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.sblock:hover .sblock-delete-row {
+  opacity: 0.95;                 /* Phase 48: card hover reveals the X */
+}
+.sblock-delete-row:hover {
+  opacity: 1;                    /* direct hover on X — fully armed */
+  background: rgba(220, 38, 38, 0.32);
+  transform: scale(1.04);        /* subtle "armed for click" feedback */
+}
+.sblock-delete-row:active {
+  transform: scale(0.96);        /* tactile press feedback */
+}
+/* NEW-FU-406 (Phase 46): the Phase 41 hide-rule for delete-row at all
+   narrow tiers has been removed. The user rejected the missing-X-button
+   as "unacceptable" — the per-day delete affordance must remain at
+   every tier. The original Phase 41 rationale (flex-width competition
+   with the course code) is obsolete because the delete-X is now
+   absolutely-positioned at bottom-LEFT (see base rule above), so it
+   no longer consumes any flex room. Size is reduced per-tier so the
+   button stays proportional to the card. */
+
+/* NEW-FU-406 (Phase 46): the Phase 45 block that absolutely-positioned
+   the badge ONLY at narrow tiers (.narrow / tier-minimal / tier-micro /
+   tier-tiny) has been collapsed into the BASE `.sblock-type-badge` rule
+   at line 166. The badge now sits at bottom-right at EVERY tier — the
+   user rejected the previous tier-conditional placement (inline at wide
+   tiers, absolute at narrow tiers) as visually inconsistent.
+
+   What remains here are ONLY the size-adjustment overrides for the two
+   densest tiers, where the default font size (.62rem ≈ 9.9px) would
+   crowd the 22-30px wide venue text. tier-micro/tier-tiny shrink the
+   pill to ~5.5px font with 2px padding so the pill stays roughly 16-18px
+   wide on sub-40px lanes. The bottom/right offsets also pull in by 1px
+   for tighter corner-hugging at extreme densities. */
+.sblock.tier-micro .sblock-type-badge,
+.sblock.tier-tiny  .sblock-type-badge {
+  font-size: 5.5px;
+  padding: 0 2px;
+  bottom: 1px;
+  right: 2px;
+  line-height: 1.5;
+}
+
+/* NEW-FU-401 (Phase 41): force the course code to claim ALL remaining
+   header width and never clip below its content. At narrow tiers the
+   .narrow override sets overflow:visible (rule below this file already
+   does), but the BASE .sblock-code rule from Phase 40 had overflow:hidden
+   which only the .narrow override unset — at tier-tight/minimal without
+   the narrow modifier (e.g., 130px wide cards), the code still clipped.
+   This rule says: at any tier-tight or denser, the code never clips. */
+.sblock.tier-tight  .sblock-code,
+.sblock.tier-minimal .sblock-code,
+.sblock.tier-micro   .sblock-code {
+  overflow: visible;
+  text-overflow: clip;
+}
+
+/* NEW-FU-301 (Phase 26): .sblock-popover-actions + .sblock-popover-delete
+   CSS removed. The popover button that used these classes is gone —
+   whole-section deletion lives on the side panel ✕ now. Popover is
+   pure info display once again. */
+
+/* NEW-FU-306 (Phase 27): width-aware narrow layout. Applied via the
+   JSX-injected `.sblock.narrow` class when ResizeObserver reports the
+   card's rendered width < 140px. This happens when two sections
+   overlap in time and ScheduleGrid splits the column ~50/50.
+
+   The user's bug: course code truncated to "SWE…" and instructor
+   name lost its tail ("Dr. R…" instead of "Dr. Rashed"). The fix
+   keeps the course code at FULL length (most important identifier),
+   abbreviates the instructor's given name to an initial (handled
+   in JS — see abbreviateInstructorName in SectionBlock.jsx), and
+   shrinks fonts + tightens padding to reclaim horizontal room.
+
+   The narrow modifier composes with the existing tier-* classes
+   (spacious / compact / tight / minimal / micro) — both can apply,
+   and the narrow rules take precedence on width-sensitive properties. */
+.sblock.narrow {
+  padding: 4px 6px;
+}
+.sblock.narrow .sblock-header {
   gap: 2px;
+  /* NEW-FU-401 (Phase 41): the Phase 27 padding-right:14px reserved
+     room for the ✕ button. Phase 41 hides the ✕ at .narrow (and
+     tighter tiers) entirely, so the reservation is wasted space —
+     it was clipping "SWE301" to "SW" in dense lanes. Drop it. */
+  padding-right: 2px;
+}
+/* NEW-FU-401 (Phase 41): the conflict-* padding-left:14px reservation
+   for the conflict dots is too generous at narrow / dense tiers — at
+   a 48px header with 14+14 padding, the code has only 20px to render
+   "SWE301". The dots themselves are 5px wide; reduce reserved room
+   to 8px at narrow tiers (still clears the dots without smashing
+   into the code). */
+.sblock.narrow.conflict-hard .sblock-header,
+.sblock.narrow.conflict-soft .sblock-header,
+.sblock.tier-minimal.conflict-hard .sblock-header,
+.sblock.tier-minimal.conflict-soft .sblock-header,
+.sblock.tier-micro.conflict-hard   .sblock-header,
+.sblock.tier-micro.conflict-soft   .sblock-header,
+.sblock.tier-tiny.conflict-hard    .sblock-header,
+.sblock.tier-tiny.conflict-soft    .sblock-header {
+  padding-left: 8px;
+}
+.sblock.narrow .sblock-code {
+  font-size: 10.5px;
+  /* CRITICAL: course code stays visible at full length — no ellipsis.
+     The user pointed out "SWE301" should never become "SWE…". */
+  overflow: visible;
+  text-overflow: clip;
+}
+/* NEW-FU-403 (Phase 43): the Phase 27 rule that HID the section
+   badge at .narrow was rejected by the user. Phase 43 keeps the
+   badge visible at every tier; it just shrinks at narrow. The ✕
+   button it used to compete with is already display:none at
+   .narrow (Phase 41), so no horizontal collision. */
+.sblock.narrow .sblock-section {
+  font-size: 8px;
+  /* NEW-FU-404 (Phase 44): top:4 — clears the 3px stripe with 1px gap. */
+  top: 4px;
+  right: 4px;
+}
+.sblock.narrow .sblock-type-badge {
+  font-size: 8px;
+  padding: 0 3px;
+  /* NEW-FU-406 (Phase 46): margin-left dropped — badge is absolutely
+     positioned at bottom-right (see base rule), no longer a flex child. */
+}
+.sblock.narrow .sblock-time {
+  font-size: 9.5px;
+}
+.sblock.narrow .sblock-instr,
+.sblock.narrow .sblock-venue {
+  font-size: 9.5px;
+}
+/* NEW-FU-405 (Phase 45): margin-right (not padding-right) shrinks
+   the venue bounding box so it doesn't intersect the LEC/LAB pill.
+   NEW-FU-406 (Phase 46): margin-left:20px reserved for the .narrow
+   16×16 delete-X (left:3 → right edge ~19). */
+.sblock.narrow .sblock-venue { margin-right: 28px; margin-left: 20px; }
+.sblock.narrow .sblock-no-instr {
+  font-size: 9px;
+}
+.sblock.narrow .sblock-delete-row {
+  /* NEW-FU-407 (Phase 47): 16 → 20 (≥400 px² hit area). */
+  width: 20px;
+  height: 20px;
+  font-size: 13px;
+}
+
+/* NEW-FU-407 (Phase 47): per-tier delete-X size overrides — Phase 47
+   bumps every size to comfortable hit targets. Floor is 14×14 (196 px²)
+   at tier-tiny, well above Fitts's-Law confidence threshold for
+   mouse/trackpad targeting. The glyph (font-size) is ~60% of button
+   dimensions so the ✕ stays crisp and centered.
+     spacious/compact (base) : 26×26  font 16
+     narrow                  : 20×20  font 13
+     tier-tight              : 22×22  font 14   (was 14×14 / 11)
+     tier-minimal            : 18×18  font 12   (was 13×13 / 10)
+     tier-micro              : 16×16  font 10   (was 12×12 / 9)
+     tier-tiny               : 14×14  font 9    (was 12×12 / 9) */
+.sblock.tier-tight .sblock-delete-row {
+  width: 22px;
+  height: 22px;
+  font-size: 14px;
+}
+.sblock.tier-minimal .sblock-delete-row {
+  width: 18px;
+  height: 18px;
+  font-size: 12px;
+  bottom: 1px;
+  left: 2px;
+}
+.sblock.tier-micro .sblock-delete-row {
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+  bottom: 1px;
+  left: 2px;
+}
+.sblock.tier-tiny .sblock-delete-row {
+  width: 14px;
+  height: 14px;
+  font-size: 9px;
+  bottom: 1px;
+  left: 1px;
+}
+
+/* NEW-FU-406 (Phase 46): reserve the bottom strip as an indicator-only
+   zone at tier-micro and tier-tiny. The delete-X and LEC/LAB badge sit
+   in this zone via `position: absolute; bottom: 1px`; content lays out
+   above it in normal flow.
+   NEW-FU-407 (Phase 47): strip grew 14 → 18px because the delete-X
+   itself grew from 12 to 16 at tier-micro (and from 11 to 14 at
+   tier-tiny). The strip = max(delete-X height, badge height) + 2px
+   buffer = 16 + 2 = 18px. Without this growth, the larger X would
+   creep up into the venue's y-range, recreating the Phase 46 overlap
+   problem at a new scale. */
+.sblock.tier-micro,
+.sblock.tier-tiny {
+  padding-bottom: 18px;
+}
+
+/* NEW-FU-406 (Phase 46): when narrow + densest tiers combine (card
+   widths fall to 35-45px), the badge (~23px) + delete-X (12px) sum
+   to ≥35px — they overlap each other horizontally and there's no
+   room left for venue text either. Shrink BOTH the badge text and
+   the delete-X so the indicators clear each other:
+     "LEC"/"LAB" pill at 5px font with 0 padding ≈ 15px wide
+     delete-X     at 11×11px
+   Combined indicator footprint ≈ 26px in a 35px card → leaves 9px
+   for venue ellipsis. */
+.sblock.narrow.tier-micro .sblock-type-badge,
+.sblock.narrow.tier-tiny  .sblock-type-badge {
+  font-size: 5px;
+  padding: 0 1px;
+  bottom: 1px;
+  right: 1px;
+  line-height: 1.5;
+}
+/* NEW-FU-407 (Phase 47): the Phase 46 override that shrunk delete-X
+   to 11×11 at narrow+tier-micro/tiny was rejected by the user — they
+   want a CONSISTENTLY clickable X at every tier. The per-tier rule
+   above already sets tier-micro=16×16 and tier-tiny=14×14, which fit
+   alongside the shrunken narrow+tier-micro badge (~14px wide) within
+   a 35px card: 16 + 14 = 30 → 5px gap. We only need the tighter
+   corner offsets here, not the size override. */
+.sblock.narrow.tier-micro .sblock-delete-row,
+.sblock.narrow.tier-tiny  .sblock-delete-row {
+  bottom: 1px;
+  left: 1px;
+}
+
+/* NEW-FU-406 (Phase 46): at tier-micro and tier-tiny, force time and
+   instructor to single-line rendering so the content stack fits within
+   the (card_height - padding_top - padding_bottom_indicator_zone)
+   budget. Without this, the 3-span time element wraps to 3 lines at
+   narrow widths (one span per line because each has white-space:nowrap),
+   pushing venue down into the indicator zone. Clipping the start/end
+   time to a single line is acceptable here — the popover shows full
+   range on hover, and the user can resize to see more. */
+.sblock.tier-micro .sblock-time,
+.sblock.tier-tiny  .sblock-time {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+}
+/* NEW-FU-138 (Phase 41) → NEW-FU-297 (Phase 59): the Phase 41 design
+   forced tier-micro and tier-tiny instructor names to single-line
+   `nowrap + ellipsis`. The trade-off was "lose the full name visually,
+   recover via popover hover." Phase 59's useFitText hook can now
+   shrink the font enough that 2-line wrapping fits in the card's
+   vertical room (~22 px at tier-micro × 5 px font × 1.05 line-height
+   ≈ 10.5 px for 2 lines, well under 22). Switching to 2-line clamp
+   with `overflow-wrap: anywhere` (inherited from the NEW-FU-296 rule
+   earlier in this file) lets a 7-char name show as "KHA\nLID" instead
+   of "KH…". Display reverts to `-webkit-box` so the clamp engages. */
+.sblock.tier-micro .sblock-instr,
+.sblock.tier-tiny  .sblock-instr {
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow: hidden;
+  text-overflow: clip;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+}
+/* NEW-FU-406 (Phase 46): venue at tier-micro/tiny needs ZERO horizontal
+   margin because the indicators sit in a dedicated padding-bottom:14px
+   strip below the content area. But the `.sblock.narrow .sblock-venue`
+   rule (defined later in this file) sets margin-right/left to 28/20 —
+   which exceeds the 23px content width of a 35px card and collapses
+   venue to 0 width. The compound selector below (specificity 0,3,1)
+   wins over the 2-class narrow rule, restoring full venue width at
+   the densest tier+narrow combo. */
+.sblock.narrow.tier-micro .sblock-venue,
+.sblock.narrow.tier-tiny  .sblock-venue {
+  margin-left: 0;
+  margin-right: 0;
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   NEW-FU-303 (Phase 62): layout-flex at narrow tiers.
+
+   Phase 62's product rule: "full text always renders." The Phase 61
+   strategy was producing initials (`K.A.`, `M.N.`) because card content
+   width was too small for full names. Phase 62 removes abbreviation
+   from the strategy ladder — but to give full text a chance to fit,
+   we now also flex EVERY OTHER layout dimension at the extreme tiers:
+
+     • zero the card padding (3 → 0 px) so content area = lane width
+     • hide secondary chrome (§F-XX chip, LEC/LAB badge, delete-×)
+     • tighten letter-spacing on monospace tokens
+     • drop the space in the course code ("SWE 316" → "SWE316")
+
+   Each of these recovers ~3-8 px of horizontal room. Combined, they
+   add up to ~20 px — the difference between "K.A." in initials-only
+   mode and "KHALID\nALJASSER" in tiny-font full-text mode.
+
+   Tier-tiny is the most extreme; tier-micro gets a slightly milder
+   treatment because its cards are typically less crammed.
+   ─────────────────────────────────────────────────────────────────── */
+
+/* Zero padding so the content area = lane width. tier-tiny + tier-micro
+   inherit the base 6 px padding; this override claims it back. */
+.sblock.tier-tiny,
+.sblock.tier-micro {
+  padding: 1px;
+}
+
+/* Hide the absolute-positioned section chip at the narrowest tier —
+   §F-XX is recoverable via the sidebar's section list and the card's
+   hover tooltip. Removing it gives ~16-20 px of horizontal room back
+   to .sblock-code (the chip was sitting at top-right, displacing the
+   course code via .sblock-header padding-right). */
+/* NEW-FU-307 (Phase 65): hide chip at tier-minimal, tier-micro, AND
+   tier-tiny. The Phase 65 pill chrome made the chip ~25 px wide;
+   tier-minimal (cards in the 60-90 px lane range) doesn't have
+   reliable clearance after browser zoom < 100% proportionally
+   shrinks the chrome. Hiding the chip at the three narrowest tiers
+   is the only fix that holds across every zoom level. Info still
+   reachable via sidebar list + hover tooltip. */
+.sblock.tier-tiny .sblock-section,
+.sblock.tier-micro .sblock-section,
+.sblock.tier-minimal .sblock-section {
+  display: none;
+}
+
+/* Hide the LEC/LAB badge at the narrowest tier — the card's color
+   band already encodes type (existing per-tier border treatment).
+   The badge is redundant chrome at this density. */
+.sblock.tier-tiny .sblock-type-badge {
+  display: none;
+}
+
+/* Hide the delete-× button at narrow tiers — deletion is still
+   reachable via the section modal's delete button (Phase 53) and
+   the sidebar's per-section × button. The button at tier-tiny
+   was bigger than the course code's character cell at 3 px font. */
+.sblock.tier-tiny .sblock-delete-row,
+.sblock.tier-micro .sblock-delete-row {
+  display: none;
+}
+
+/* Sidebar of the card-header that was reserving space for the now-
+   hidden chip: zero the padding-right too, otherwise we keep
+   ghost reservation. Phase 58 R3 had tier-tiny padding-right at
+   22 px (designed around the §F-XX badge); now that the badge is
+   gone at tier-tiny, the entire 22 px is reclaimable. */
+.sblock.tier-tiny .sblock-header {
+  padding-right: 0;
+}
+/* Tier-micro keeps SOME padding-right since the chip is still visible
+   (just smaller); 8 px clears the 5-px-font chip. */
+.sblock.tier-micro .sblock-header {
+  padding-right: 8px;
+}
+
+/* Tighten letter-spacing at narrow tiers — packs more characters
+   per line at the same font size. Monospace fonts have padding
+   built into each character cell; -0.04em removes ~4% of that. */
+.sblock.tier-tiny .sblock-code,
+.sblock.tier-tiny .sblock-time,
+.sblock.tier-tiny .sblock-instr,
+.sblock.tier-tiny .sblock-venue,
+.sblock.tier-micro .sblock-code,
+.sblock.tier-micro .sblock-time,
+.sblock.tier-micro .sblock-instr,
+.sblock.tier-micro .sblock-venue {
+  letter-spacing: -0.04em;
+}
+
+/* Multi-line wrap: allow more lines at the narrowest tier so full
+   text gets vertical room. tier-tiny base was 1 line; Phase 59
+   bumped to 2; Phase 62 bumps to 4 to handle 15-char names at 3
+   px font wrapping to 4 lines. */
+.sblock.tier-tiny .sblock-instr,
+.sblock.tier-tiny .sblock-venue {
+  -webkit-line-clamp: 4;
+}
+.sblock.tier-micro .sblock-instr,
+.sblock.tier-micro .sblock-venue {
+  -webkit-line-clamp: 3;
+}
+
+/* Reduce line-height at narrow tiers so 4 lines of 3px font fit
+   in a 20-25 px card height. */
+.sblock.tier-tiny .sblock-instr,
+.sblock.tier-tiny .sblock-venue {
+  line-height: 1.0;
 }

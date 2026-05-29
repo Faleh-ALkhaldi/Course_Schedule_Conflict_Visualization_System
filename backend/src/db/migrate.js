@@ -46,6 +46,24 @@ async function migrate(direction = 'up') {
     } else {
       // Apply all pending migrations
       const applied = (await client.query('SELECT name FROM _migrations')).rows.map(r => r.name);
+
+      // NEW-FU-62: detect previously-applied migration files that no longer
+      // exist on disk. This is almost always a deployment-integrity error
+      // (someone removed a migration file from the repo without dropping
+      // its row from _migrations). Fail loudly instead of silently skipping
+      // it — subsequent migrations could depend on the deleted one and
+      // produce confusing FK / schema errors at runtime.
+      const onDisk = new Set(files);
+      const missing = applied.filter(name => !onDisk.has(name));
+      if (missing.length > 0) {
+        console.error(
+          `Migration integrity error: ${missing.length} previously-applied ` +
+          `migration(s) are no longer present on disk: ${missing.join(', ')}.`
+        );
+        console.error('Restore the missing files OR remove their rows from _migrations and re-apply downstream migrations as appropriate.');
+        process.exit(1);
+      }
+
       const pending = files.filter(f => !applied.includes(f));
 
       if (pending.length === 0) {
@@ -65,12 +83,29 @@ async function migrate(direction = 'up') {
     }
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
+    // NEW-FU-48: pass err so pg destroys a partially-broken migration
+    // connection. Wrapped in try/catch because client comes from raw
+    // pool.connect() here (no M-11 wrapper) — calling release twice on
+    // the raw client throws.
+    try { client.release(err); } catch { /* ignore */ }
     console.error('Migration failed:', err.message);
-    process.exit(1);
+    // NEW-FU-88: set exitCode + return instead of process.exit(1) so the
+    // finally clause's `await pool.end()` runs to completion before Node
+    // terminates. process.exit() is synchronous and can preempt the async
+    // pool drain, occasionally producing "unfinished pool" warnings on
+    // failed migrations. Cooperative exit keeps cleanup deterministic.
+    process.exitCode = 1;
+    return;
   } finally {
-    client.release();
+    try { client.release(); } catch { /* already released via catch path */ }
     await pool.end();
   }
 }
 
-migrate(process.argv[2] === 'rollback' ? 'rollback' : 'up');
+// NEW-FU-58: catch rejections from `pool.connect()` so we surface a clean
+// error rather than an unhandled-promise warning (the inner try/catch only
+// covers the body after connect succeeds).
+migrate(process.argv[2] === 'rollback' ? 'rollback' : 'up').catch(err => {
+  console.error('Migration failed (before tx started):', err.message);
+  process.exit(1);
+});

@@ -1,12 +1,21 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import './SoftConflictModal.css';
 
 export default function SoftConflictModal({ conflicts, onConfirm, onCancel }) {
+  // M-6: Escape key closes the modal (dismiss = go back, same as onCancel)
+  useEffect(() => {
+    function onKeyDown(e) { if (e.key === 'Escape') onCancel(); }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [onCancel]);
+
   if (!conflicts || conflicts.length === 0) return null;
 
   return (
+    // M-6: Clicking the backdrop also cancels (same behaviour as other modals)
     <div className="modal-overlay" role="dialog" aria-modal="true"
-         aria-labelledby="modal-title">
+         aria-labelledby="modal-title"
+         onClick={e => e.target === e.currentTarget && onCancel()}>
       <div className="modal-card">
         <div className="modal-icon">⚠️</div>
 

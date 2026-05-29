@@ -1,7 +1,16 @@
 /**
  * ConflictEngine
  *
- * Evaluates a single section change against all scheduling rules R-01 to R-06.
+ * Evaluates a single section change against rules R-01, R-02, R-04, R-05, R-06.
+ * Single-section advisory rules are produced separately by
+ * ScheduleService.revalidateSchedule:
+ *   - R-09 (no instructor)                  — SectionRepository.validateOneInstructor
+ *   - R-10 (no venue)                       — SectionRepository.validateOneVenue   [NEW-FU-91]
+ *   - R-11 (Lab section in non-Lab venue)   — inline in _evaluateSchedule          [NEW-FU-97]
+ *   - R-12 (Lec section in Lab venue)       — inline in _evaluateSchedule          [NEW-FU-98]
+ *   - R-13 (instructor has no office hours) — inline in _evaluateSchedule          [NEW-FU-99]
+ *   - R-14 (has_lab course missing Lec/Lab) — inline in _evaluateSchedule          [NEW-FU-107]
+ * Rules R-07 and R-08 are auto-suggest-only structural rules enforced in SuggestService.
  * Each rule is an independent strategy; adding a new rule means adding one file
  * and registering it here — no other changes required.
  *
@@ -28,7 +37,14 @@ class ConflictEngine {
    */
   evaluate(changed, allSections, officeHours = []) {
     const result = new ConflictResult();
-    const others = allSections.filter(s => s.id !== changed.id);
+    // NEW-FU-275 (Phase 52 #5): external sections (SWE 399 internship)
+    // are off-campus by design — instructor, venue, schedule, and even
+    // the time-window check (R-06) don't apply. Short-circuit before any
+    // rule runs.
+    if (changed.isExternal) return result;
+    // Also strip external siblings from the comparison set so a non-
+    // external section doesn't fire R-01/R-02/R-04/R-05 against them.
+    const others = allSections.filter(s => s.id !== changed.id && !s.isExternal);
 
     // R-06 first: if the time window itself is wrong, flag immediately
     for (const c of R06Rule.evaluate(changed)) result.add(c);
@@ -80,10 +96,24 @@ class ConflictEngine {
           ? `${secB.courseId}|${secB.sectionNumber}`
           : (c.sectionBId ?? 'none');
 
-        // For two-section conflicts sort so A|B and B|A produce same key
+        // NEW-FU-54: for R-04 single-section conflicts (OH overlaps), each
+        // OH the section overlaps is a distinct problem; the prior key
+        // `idA + '|' + ruleId` collapsed them all into one entry, hiding
+        // the second-and-onward OH overlaps. We include the description as
+        // a per-OH discriminator ONLY for R-04 — for other single-section
+        // rules (R-06, R-09) the conflict is a single group-level violation
+        // (e.g., "this whole STT group is scheduled after 17:00 — UG must
+        // be before 17:00") and the existing canonical-ID dedup correctly
+        // collapses sibling days into one user-visible message.
+        //
+        // For two-section conflicts, the [idA, idB].sort() already gives
+        // good dedup since pair semantics hold; no description needed.
+        const isR04OhOverlap = c.ruleId === 'R-04' && !c.sectionBId;
         const key = c.sectionBId
           ? [idA, idB].sort().join('||') + '|' + c.ruleId
-          : idA + '|' + c.ruleId;
+          : isR04OhOverlap
+            ? idA + '|' + c.ruleId + '|' + (c.description ?? '')
+            : idA + '|' + c.ruleId;
 
         if (!seen.has(key)) {
           seen.add(key);

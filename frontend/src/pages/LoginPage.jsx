@@ -37,7 +37,10 @@ export default function LoginPage() {
               type="text"
               value={username}
               onChange={e => setUsername(e.target.value)}
-              placeholder="scheduler1"
+              /* NEW-FU-5: don't broadcast the seed username via placeholder
+                 in production builds (M19 already hid the credentials hint
+                 but the placeholder was leaking the same info). */
+              placeholder={import.meta.env.DEV ? 'scheduler1' : 'Username'}
               autoComplete="username"
               required
             />
@@ -61,7 +64,12 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <p className="login-hint">Default: <code>scheduler1</code> / <code>password123</code></p>
+        {/* NEW-M19: only show the dev seed credentials in dev builds. The
+            production hint is generic so deployed instances don't broadcast
+            their test-user password to every visitor. */}
+        {import.meta.env.DEV && (
+          <p className="login-hint">Default: <code>scheduler1</code> / <code>password123</code></p>
+        )}
       </div>
     </div>
   );

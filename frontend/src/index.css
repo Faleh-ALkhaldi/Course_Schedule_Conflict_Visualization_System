@@ -1,4 +1,7 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,400&display=swap');
+/* Typography: uses the system font stack across the app for one consistent,
+   well-rendered look on every OS. No external font imports — works offline.
+   Replaces the previous Syne / DM Sans / DM Mono mix; Syne had unusual
+   descender geometry that clipped the "g" in headings. */
 
 /* ── Design tokens ──────────────────────────────────────────────────────────── */
 :root {
@@ -26,10 +29,17 @@
   --slate-500: #64748b;
   --slate-600: #475569;
 
-  /* Typography */
-  --font-display: 'Syne', sans-serif;
-  --font-body:    'DM Sans', sans-serif;
-  --font-mono:    'DM Mono', monospace;
+  /* Typography — single system font stack for everything except mono fields */
+  --font-system: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+  --font-display: var(--font-system);
+  --font-body:    var(--font-system);
+  --font-mono:    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* Semantic text colors — every text use should reference one of these.
+     All pass WCAG AA on white. */
+  --text-primary:   var(--navy-900);   /* #0d1b2a — body, headings, course codes */
+  --text-secondary: var(--slate-600);  /* #475569 — time/instructor/room lines */
+  --text-muted:     var(--slate-500);  /* #64748b — helper / hints (still AA) */
 
   /* Spacing */
   --header-h: 56px;
@@ -50,13 +60,16 @@
 
 /* ── Reset ───────────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { font-size: 14px; }
+html { font-size: 15px; }       /* base bumped 14→15 so all rem text scales up */
 body {
   font-family: var(--font-body);
+  font-size: 0.95rem;            /* ~14.25px default body text */
+  line-height: 1.45;
   background: var(--slate-100);
-  color: var(--navy-900);
+  color: var(--text-primary);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* ── Scrollbar ───────────────────────────────────────────────────────────────── */

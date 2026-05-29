@@ -1,19 +1,29 @@
 import React from 'react';
 import { useDraggable } from '@dnd-kit/core';
+import { useApp } from '../../context/AppContext.jsx';
 import './OfficeHourBlock.css';
 
-export default function OfficeHourBlock({ officeHour, height, onClick }) {
+export default function OfficeHourBlock({ officeHour, height, onClick, draggable = true }) {
   const id    = `oh-${officeHour.id}`;
   const start = (officeHour.start_time ?? officeHour.startTime ?? '').substring(0, 5);
   const end   = (officeHour.end_time   ?? officeHour.endTime   ?? '').substring(0, 5);
 
+  // NEW-FU-207: archived schedules disable OH drag. Click still fires —
+  // it opens the OH modal in read-only mode (FU-206), so admins can see
+  // OH details on historical terms without dragging them somewhere new.
+  const { schedule } = useApp();
+  const isArchived = Boolean(schedule?.archived_at);
+
+  // NEW-L16: callers in non-teacher views can opt out of drag — defends
+  // against the OH block accidentally hijacking pointer events anywhere
+  // it might be rendered outside Teacher View in the future.
   const { attributes, listeners, setNodeRef, transform, isDragging } =
-    useDraggable({ id, data: { type: 'officeHour', officeHour } });
+    useDraggable({ id, disabled: !draggable || isArchived, data: { type: 'officeHour', officeHour } });
 
   const style = {
     transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined,
     opacity:   isDragging ? 0.4 : 1,
-    cursor:    'grab',
+    cursor:    isArchived ? 'pointer' : 'grab',
     height:    height ? `${height}px` : '100%',
   };
 
@@ -22,7 +32,9 @@ export default function OfficeHourBlock({ officeHour, height, onClick }) {
       ref={setNodeRef}
       className="oh-block"
       style={style}
-      title={`Office Hours: ${start}–${end}  —  click to edit, drag to move`}
+      title={isArchived
+        ? `Office Hours: ${start}–${end}  —  click to view (term is archived)`
+        : `Office Hours: ${start}–${end}  —  click to edit, drag to move`}
       onClick={e => { e.stopPropagation(); onClick && onClick(); }}
       aria-label={`Office Hours ${start} to ${end}`}
       {...listeners}

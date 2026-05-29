@@ -9,10 +9,18 @@ backend/.env
 
 # Build output
 frontend/build/
+frontend/dist/
 
 # Logs
 *.log
 npm-debug.log*
+
+# Screenshot / verification evidence (kept on disk, not in git history)
+screenshots/
+cscvs-screenshots/
+backend/cscvs-screenshots/
+scripts/phase47-evidence/
+scripts/phase48-evidence/
 
 # OS
 .DS_Store

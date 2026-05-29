@@ -3,9 +3,13 @@
   "version": "1.0.0",
   "description": "Course Schedule Conflict Visualization System – Backend API",
   "main": "src/index.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
+    "dev:fresh": "lsof -ti:${PORT:-4000} | xargs -r kill -9 ; npm run dev",
     "test": "jest --runInBand --forceExit",
     "test:unit": "jest tests/unit --runInBand --forceExit",
     "test:int": "jest tests/integration --runInBand --forceExit",
@@ -16,17 +20,18 @@
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
+    "docx": "^9.7.0",
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
     "express": "^4.18.3",
-    "express-validator": "^7.0.1",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.12.0",
     "morgan": "^1.10.0",
     "multer": "^2.1.1",
-    "pg": "^8.11.5",
-    "scheduler-app": "file:..",
-    "uuid": "^9.0.1"
+    "pdf-parse": "^2.4.5",
+    "pdfkit": "^0.18.0",
+    "pg": "^8.11.5"
   },
   "devDependencies": {
     "jest": "^29.7.0",

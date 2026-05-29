@@ -10,14 +10,16 @@
 
 .sm-card {
   background: var(--white);
-  border-radius: 14px;
+  border-radius: 12px;
   width: 520px;
   max-width: 95vw;
-  max-height: 90vh;
+  max-height: 80vh;
   overflow-y: auto;
   box-shadow: 0 12px 40px rgba(0,0,0,.25);
   animation: card-in .2s cubic-bezier(.16,1,.3,1);
   border-top: 4px solid var(--teal-500);
+  display: flex;
+  flex-direction: column;
 }
 @keyframes card-in {
   from { opacity:0; transform:scale(.95) translateY(12px); }
@@ -30,8 +32,9 @@
 }
 .sm-title {
   font-family: var(--font-display);
-  font-size: 1.1rem; font-weight: 700;
-  color: var(--navy-900); letter-spacing: -.02em;
+  font-size: 18px; font-weight: 700;
+  color: var(--text-primary); letter-spacing: -.01em;
+  line-height: 1.4;
 }
 .sm-close {
   background: none; border: none; font-size: 22px;
@@ -47,11 +50,11 @@
 
 .sm-field { display: flex; flex-direction: column; gap: 5px; }
 .sm-field label {
-  font-size: .75rem; font-weight: 600;
+  font-size: 12px; font-weight: 700;
   text-transform: uppercase; letter-spacing: .05em;
-  color: var(--slate-500);
+  color: var(--text-secondary);
 }
-.sm-optional { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--slate-400); font-size: .7rem; }
+.sm-optional { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-muted); font-size: 11.5px; }
 
 .sm-field input,
 .sm-field select {
@@ -59,8 +62,8 @@
   border: 1.5px solid var(--slate-200);
   border-radius: 7px;
   font-family: var(--font-body);
-  font-size: .88rem;
-  color: var(--navy-900);
+  font-size: 14px;
+  color: var(--text-primary);
   background: var(--slate-50);
   outline: none;
   transition: border-color .15s;
@@ -99,9 +102,10 @@
 }
 .sm-btn-cancel, .sm-btn-save, .sm-btn-delete {
   padding: 9px 18px; border-radius: 8px;
-  font-size: .86rem; font-weight: 500;
+  font-size: 13.5px; font-weight: 600;
   cursor: pointer; border: 1.5px solid transparent;
   transition: all .15s;
+  line-height: 1.4;
 }
 .sm-btn-cancel {
   background: var(--slate-100); color: var(--slate-600);
@@ -166,12 +170,77 @@
   border-radius: 8px;
   cursor: pointer;
   transition: border-color .12s, background .12s;
+  width: 100%;
+  box-sizing: border-box;
 }
 .exp-option:has(input:checked) {
   border-color: var(--teal-500);
   background: rgba(13,148,136,.05);
 }
-.exp-option input { margin-top: 3px; accent-color: var(--teal-500); }
-.exp-label { display: flex; flex-direction: column; gap: 2px; }
-.exp-title { font-size: .88rem; font-weight: 500; color: var(--navy-900); }
-.exp-desc  { font-size: .76rem; color: var(--slate-500); }
+/* Reset .sm-field input styles for radio inputs inside export options.
+   Without this, .sm-field input { width:100%; padding:8px 10px; border:1.5px solid; ... }
+   forces the radio to claim the full row width, squashing the label into a
+   narrow column where text wraps one character per line. */
+.exp-option input[type="radio"] {
+  width: auto;
+  padding: 0;
+  margin: 0;
+  margin-top: 3px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  accent-color: var(--teal-500);
+  flex-shrink: 0;
+  flex-grow: 0;
+  flex-basis: auto;
+}
+.exp-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.exp-title {
+  font-size: .9rem;
+  font-weight: 600;
+  color: var(--navy-900);
+  display: block;
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: normal;
+  line-height: 1.3;
+}
+.exp-desc {
+  font-size: .78rem;
+  color: var(--slate-500);
+  display: block;
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: normal;
+  line-height: 1.4;
+}
+
+/* NEW-FU-279 (Phase 55): same exact bug pattern as the export-option
+   radios above — `.sm-field input { width: 100%; padding: 8px; border: ... }`
+   applies to the Add Course modal's flag-row checkboxes too, stretching
+   each checkbox to the full row width and squashing the description
+   <span> into a column where text wraps one word per line.
+
+   Reset every property the generic .sm-field input rule sets so the
+   checkbox renders at its native ~16px size and the flex <span> next
+   to it gets the rest of the row. */
+.acm-flag-row input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  margin: 0;
+  margin-top: 3px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  accent-color: var(--teal-500);
+  flex-shrink: 0;
+  flex-grow: 0;
+  flex-basis: auto;
+}
+

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# .githooks/pre-push
+#
+# Runs the smoke-test suite before allowing a push so the bugs fixed during
+# the Features Showcase session don't sneak back into main.
+#
+# Behavior:
+#   - If frontend + backend dev servers are reachable → run `npm run smoke`
+#       · all tests pass → push proceeds
+#       · any test fails → push is BLOCKED (exit non-zero)
+#   - If either server is NOT reachable → warn and SKIP (do not block).
+#     The smoke suite needs live servers to be meaningful, and blocking a
+#     legitimate push because dev servers happen to be down would be hostile.
+#
+# Escape hatches:
+#   SKIP_SMOKE=1 git push    — bypass via env var (useful for CI / scripts)
+#   git push --no-verify     — git's built-in bypass for any hook
+
+set -u
+
+# ── Opt-out env var ─────────────────────────────────────────────────────────
+if [ -n "${SKIP_SMOKE:-}" ]; then
+  echo "[pre-push] SKIP_SMOKE set — skipping smoke tests" >&2
+  exit 0
+fi
+
+# ── Locate the repo root (the hook may run from a subdir) ───────────────────
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$REPO_ROOT" ]; then
+  echo "[pre-push] Could not find git repo root — skipping" >&2
+  exit 0
+fi
+cd "$REPO_ROOT"
+
+APP_URL="${APP_URL:-http://localhost:3000}"
+API_URL="${API_URL:-http://localhost:4000/api/v1}"
+
+# ── Reachability check ──────────────────────────────────────────────────────
+# A 200 from the frontend index and any response (even 401) from the auth
+# endpoint mean both servers are alive. We use --max-time so the hook never
+# hangs the push for more than a couple of seconds in the unreachable case.
+if ! curl -fs -o /dev/null --max-time 2 "$APP_URL"; then
+  echo "[pre-push] ⚠ Frontend not reachable at $APP_URL — skipping smoke tests." >&2
+  echo "[pre-push]   Start dev servers (npm run dev:backend & npm run dev:frontend) and push again to run them." >&2
+  exit 0
+fi
+if ! curl -s -o /dev/null --max-time 2 "$API_URL/auth/login"; then
+  echo "[pre-push] ⚠ Backend not reachable at $API_URL — skipping smoke tests." >&2
+  exit 0
+fi
+
+# ── Run the suite ───────────────────────────────────────────────────────────
+echo "[pre-push] Running smoke tests…"
+if npm run --silent smoke; then
+  echo "[pre-push] ✓ Smoke tests passed — proceeding with push."
+  exit 0
+fi
+
+echo "" >&2
+echo "[pre-push] ✗ Smoke tests FAILED — push aborted." >&2
+echo "[pre-push]   Fix the failures above, or push with --no-verify to bypass." >&2
+exit 1

@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect } from 'react';
+import { sectionLabel } from '../../context/AppContext.jsx';
 import './SectionModal.css';
 
 const DAY_GROUPS = {
@@ -10,13 +11,30 @@ const GROUP_INFO = {
   MW:  { label:'Mon / Wed',       days:2, duration:75 },
 };
 
-export default function GroupChangeModal({ sec, newDay, newStartTime, onConfirm, onCancel }) {
+export default function GroupChangeModal({ sec, newDay, newStartTime, actualSiblingCount, onConfirm, onCancel }) {
+  // NEW-L13: Escape closes the modal (same as Cancel) — matches the
+  // dismiss-on-Escape behaviour the other modals already have.
+  useEffect(() => {
+    function onKeyDown(e) { if (e.key === 'Escape') onCancel(); }
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [onCancel]);
+
   const courseCode  = sec?.courseCode   ?? sec?.course_code   ?? '';
-  const secNum      = sec?.sectionNumber ?? sec?.section_number ?? '';
+  // NEW-FU-282 (Phase 56): use sectionLabel so "F-01" sections render
+  // as "§F-01" instead of "§01" in the day-group change warning.
+  const secLbl      = sectionLabel(sec);
   const origGroup   = DAY_GROUPS[sec?.day] ?? 'single';
   const newGroup    = DAY_GROUPS[newDay]   ?? 'single';
   const origInfo    = GROUP_INFO[origGroup];
   const newInfo     = GROUP_INFO[newGroup];
+  // NEW-FU-73: the prior copy used origInfo.days (a constant: 3 for STT,
+  // 2 for MW) even when the actual schedule had fewer siblings (e.g., user
+  // manually deleted one day). Now we use the parent-supplied actual count,
+  // falling back to the constant when no count was supplied (defensive).
+  const realOrigDays = typeof actualSiblingCount === 'number' && actualSiblingCount > 0
+    ? actualSiblingCount
+    : (origInfo?.days ?? 1);
 
   return (
     <div className="sm-overlay" onClick={e => e.target===e.currentTarget && onCancel()}>
@@ -32,15 +50,19 @@ export default function GroupChangeModal({ sec, newDay, newStartTime, onConfirm,
             borderRadius:8, padding:'12px 14px', marginBottom:16,
             fontSize:'.88rem', lineHeight:1.6, color:'var(--navy-900)'
           }}>
-            <strong>{courseCode} §{secNum}</strong> is currently a{' '}
-            <strong>{origInfo ? `${origInfo.label} group (${origInfo.days} days × ${origInfo.duration} min)` : 'single-day'}</strong> section.
+            <strong>{courseCode} {secLbl}</strong> is currently a{' '}
+            <strong>{origInfo ? `${origInfo.label} group (${realOrigDays} day${realOrigDays>1?'s':''} × ${origInfo.duration} min)` : 'single-day'}</strong> section.
             <br /><br />
             You dropped it on <strong>{newDay}</strong>, which belongs to the{' '}
             <strong>{newInfo ? `${newInfo.label} group (${newInfo.days} days × ${newInfo.duration} min)` : 'single-day'}</strong> schedule.
             <br /><br />
             {newInfo && origInfo ? (
               <>
-                This will <strong>delete all {origInfo.days} current day-sections</strong> and{' '}
+                {/* NEW-FU-73: realOrigDays reflects the actual sibling count
+                    in the schedule (passed from SchedulerPage), not the
+                    group constant — so a partially-deleted STT group says
+                    "delete all 2 current day-sections" if only 2 exist. */}
+                This will <strong>delete all {realOrigDays} current day-section{realOrigDays>1?'s':''}</strong> and{' '}
                 create <strong>{newInfo.days} new sections</strong> ({newInfo.label}) at <strong>{newStartTime}</strong>.
               </>
             ) : (

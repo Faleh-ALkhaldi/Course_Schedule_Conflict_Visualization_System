@@ -1,0 +1,303 @@
+[
+  {
+    "code": "SWE205",
+    "title": "Introduction to Software Engineering",
+    "credits": "3 - 0 - 3",
+    "description": "Introduction to software engineering and software processes. Construction techniques and principals. Concepts of Programming Languages: Syntax and semantics. Analysis and Design Modes. Ethical and professional responsibilities. Prerequisites: ICS 102",
+    "prereqs": "ICS 102 Or ICS 101 Or ICS 103"
+  },
+  {
+    "code": "SWE206",
+    "title": "Introduction to Software Engineering",
+    "credits": "2 - 3 - 3",
+    "description": "Introduction to software engineering discipline, software process, requirements analysis and design models. Understanding of ethical and professional issues of software engineering discipline",
+    "prereqs": "ICS 108"
+  },
+  {
+    "code": "SWE214",
+    "title": "Introduction to Software Engineering",
+    "credits": "3 - 3 - 4",
+    "description": "Study of software engineering process models, requirements engineering process, and system models. Methods, tools, notations, and verification and validation techniques for the analysis and specification of software requirements. Introduction to the principles of project management. Students participate in a group project on software requirements.",
+    "prereqs": "ICS 201"
+  },
+  {
+    "code": "SWE215",
+    "title": "Software Requirements Engineering",
+    "credits": "2 - 3 - 3",
+    "description": "Requirements engineering process. Methods, tools and techniques for eliciting , organizing and documenting software requirements . Analysis and validation techniques, including need, goal, and use case analysis. Requirements documentation standards. Traceability. Requirements management. Handling requirements changes. Students participate in a group project on software requirements. Prerequisites: ICS 201 and SWE 205",
+    "prereqs": "ICS 201 And SWE 205"
+  },
+  {
+    "code": "SWE216",
+    "title": "Software Requirements Engineering",
+    "credits": "3 - 0 - 3",
+    "description": "Requirements engineering process. Methods, tools and techniques for eliciting, organizing and documenting software requirements. Analysis and validation techniques, including need, goal, and use case analysis. Requirements documentation standards. Traceability. Requirements management. Handling requirements changes. Capturing usability requirements and developing UI prototypes based on requirements. Students participate in a group project on software requirements.",
+    "prereqs": "SWE 206"
+  },
+  {
+    "code": "SWE302",
+    "title": "Game Programming",
+    "credits": "3 - 0 - 3",
+    "description": "Introduction to games; Game programming principles; Game development engines: PyGame and Unity3D; Game data structures; Game intelligence; Simulation; Graphics and animation; Collision detection; Strategy games; Action games; Games research; Application of games to other domains.",
+    "prereqs": "SWE 206"
+  },
+  {
+    "code": "SWE311",
+    "title": "Principes of Software Engineering",
+    "credits": "3 - 3 - 4",
+    "description": "History and overview of software engineering. Software processes. Software project management. Software requirements and specification. Software design. Software testing and validation. Software metrics. Software quality assurance. Software evolution. Using APIs. Software tools and environments. Prerequisite: ICS 202 Note: SWE 311 cannot be taken by SWE students.",
+    "prereqs": "ICS 202"
+  },
+  {
+    "code": "SWE312",
+    "title": "User-Interface Design",
+    "credits": "3 - 0 - 3",
+    "description": "Study of both theoretical and practical issues in human-computer interfaces. Principles of user interface design, development, and programming. Topics include user psychology and cognitive science, adaptive user interfaces, icon and window design, media design, command language design, user guidance systems, and collaborative working.",
+    "prereqs": "SWE 205"
+  },
+  {
+    "code": "SWE316",
+    "title": "Software Design and Construction",
+    "credits": "3 - 0 - 3",
+    "description": "Study of design concepts and notations. Architecture, construction and design patterns. Designing for different qualities criteria. Design evolution processes and activities.",
+    "prereqs": "SWE 206"
+  },
+  {
+    "code": "SWE321",
+    "title": "Formal Methods and Models in Software Engineering",
+    "credits": "3 - 0 - 3",
+    "description": "Mathematical foundations for formal methods. Formal languages and techniques for specification and design, including specifying syntax using grammars and finite state machines. Analysis and verification of specifications and designs. Use of assertions and proofs. Automated program and design transformation.",
+    "prereqs": "ICS 202 And ICS 253"
+  },
+  {
+    "code": "SWE322",
+    "title": "Principles of Concurrent Software Systems",
+    "credits": "3 - 0 - 3",
+    "description": "Study of issues related to the development of concurrent software systems. Topics include the basics of synchronization and coordination techniques, concurrent programming languages and constructs and the specification, design, verification,and validation of concurrent programs. Students are required to solve concurrent programming problems and to check their solutions by using verification, testing,and debugging tools.",
+    "prereqs": "ICS 202"
+  },
+  {
+    "code": "SWE326",
+    "title": "Software Testing",
+    "credits": "3 - 0 - 3",
+    "description": "Practical ways to design high quality tests during all phases of software development. Test Planning. Test design. Test coverage criteria. Test automation. Concept of static analysis. Reviews. Walkthroughs. Inspections.",
+    "prereqs": "SWE 206 And (ICS 253 Or MATH 210)"
+  },
+  {
+    "code": "SWE344",
+    "title": "Internet Protocols and Client-Server Programming",
+    "credits": "2 - 3 - 3",
+    "description": "Principles of Internet work architecture and communication protocols. Open systems and interoperability. Wide area connectivity through interconnection of autonomous networks. Case studies of particular protocols from network layer and above. Selected examples of networked client-server applications such as e-mail, news, file-transfer, HTTP. Socket programming. Programming Project(s).",
+    "prereqs": "ICS 202"
+  },
+  {
+    "code": "SWE363",
+    "title": "Web Engineering & Development",
+    "credits": "3 - 0 - 3",
+    "description": "Fundamentals of web and mobile applications and how they impact people’s lives; Building responsive front-end web and mobile apps; Back-end programming of dynamic and data-driven websites; Development frameworks for web and mobile apps; Security issues of web applications; Practical applications to real-world problems.",
+    "prereqs": ""
+  },
+  {
+    "code": "SWE387",
+    "title": "Software Project Management",
+    "credits": "3 - 0 - 3",
+    "description": "Introduction to project management concepts, managing time, cost, change, risk, quality, communication and people; development and management standards and managing software development projects.",
+    "prereqs": ""
+  },
+  {
+    "code": "SWE399",
+    "title": "Summer Training",
+    "credits": "0 - 0 - 1",
+    "description": "A summer period of 8 weeks spent as a trainee in industry, business, or government agencies for the purpose of familiarizing the student with the real job world and enabling him to apply and relate his academic knowledge to a real work environment. The student is required to participate in software engineering related activities and use his time to get acquainted with the software engineering related functions and resources used by his employing organization. Besides progress reports, the student is required to submit a final report and do a presentation on his experience and the knowledge he gained during his summer training program. Prerequisites: SWE 363, ENGL 214 and Department Approval",
+    "prereqs": "SWE 363 And ENGL 214"
+  },
+  {
+    "code": "SWE402",
+    "title": "Game Programming",
+    "credits": "3 - 0 - 3",
+    "description": "Introduction to Games and Interactive Media; Core Game Programming Principles; Modern Game Development Engines and Tools; Advanced Real-Time Graphics and Rendering; Physics Simulation and Collision Detection; Artificial Intelligence and Procedural Content Generation; Multiplayer and Networked Game Development; Emerging Technologies and Immersive Experiences; Performance Optimization and Debugging Techniques; Game Production and Industry Practices; Game Development Project.",
+    "prereqs": "ICS 108"
+  },
+  {
+    "code": "SWE411",
+    "title": "Software Engineering Project I",
+    "credits": "1 - 6 - 3",
+    "description": "This is the first part of a two-semester senior-year capstone project. Student teams employ knowledge gained from courses throughout the program such as development of requirements, design, implementation, and quality assurance to develop a software solution to a real-world problem from conception to completion. In this part, students develop project plan and software requirements specification. Next, students’ teams can either develop complete design document or follow agile like methodology to develop design document and implementation for 30% of system features.",
+    "prereqs": "SWE 316 And SWE 387"
+  },
+  {
+    "code": "SWE412",
+    "title": "Software Engineering Project II",
+    "credits": "0 - 6 - 2",
+    "description": "This is the second part of a two-semester senior-year capstone project. Student teams employ knowledge gained from courses throughout the program to develop a software solution to a real-world problem from conception to completion. In this part, students review and refine documents prepared in SWE 411; finalize design, complete implementation of the application, test their code, and evaluate their final product.",
+    "prereqs": "SWE 326 And SWE 411"
+  },
+  {
+    "code": "SWE413",
+    "title": "Senior Design Project I",
+    "credits": "0 - 1 - 0",
+    "description": "This is the first of two courses for the multidisciplinary, capstone project. Multidisciplinary teams will be formed, projects will be defined, and project management discussed.",
+    "prereqs": "SWE 316 And SWE 387"
+  },
+  {
+    "code": "SWE414",
+    "title": "Senior Project II",
+    "credits": "0 - 6 - 3",
+    "description": "This is the second of two courses for the multidisciplinary, capstone project. After the multidisciplinary team was formed and the project and its management were defined and detailed, the students embark on executing their tasks going through the project's software development lifecycle in order to develop the prototype software solution component of the problem at hand. The senior project offers the opportunity to integrate the knowledge acquired in preceding courses, as well as promote and instill communication skills, writing skills, and lifelong self-learning.",
+    "prereqs": "SWE 413"
+  },
+  {
+    "code": "SWE415",
+    "title": "Software Testing and Quality Assurance",
+    "credits": "3 - 0 - 3",
+    "description": "Concept of software quality, software metrics, & Total Quality Management. SQA planning & implementation. Validation & verification. Reviews, walkthroughs & inspections. Automatic and manual techniques for generating and validating test data. Static vs. dynamic analysis, functional testing, inspections, and reliability assessment. Students participate in a group project on software validation and verification.",
+    "prereqs": "(ICS 252 Or ICS 253) And SWE 316 And (STAT 319 Or STAT 201)"
+  },
+  {
+    "code": "SWE416",
+    "title": "Software Architecture",
+    "credits": "3 - 0 - 3",
+    "description": "Study the concepts, principles, methods, and best practices in software architecture. Different architectural styles, patterns and product lines are presented and compared. Methods to analyze, evaluate and document software architectures are also discussed. Students participate in a group project on software architecture design.",
+    "prereqs": "SWE 316"
+  },
+  {
+    "code": "SWE417",
+    "title": "Software Engineering Project I",
+    "credits": "1 - 6 - 3",
+    "description": "This is the first part of a two-semester senior-year capstone project. Student teams employ knowledge gained from courses throughout the program such as development of requirements, design, implementation, and quality assurance to develop a software solution to a real-world problem from conception to completion. In this part students develop project plan, software requirement specification and software design document. Prerequisites: SWE 326 and SWE 387",
+    "prereqs": "SWE 316 And SWE 387"
+  },
+  {
+    "code": "SWE418",
+    "title": "Software Engineering Project II",
+    "credits": "0 - 6 - 2",
+    "description": "This is the second part of a two-semester senior-year capstone project. Student teams employ knowledge gained from courses throughout the program such as development of requirements, design, implementation, and quality assurance to develop a software solution to a real-world problem from conception to completion. In this part, students implement the design they produced in SWE 417, test their code, and evaluate their final product. Prerequisites: SWE 417",
+    "prereqs": "SWE 417 And SWE 326"
+  },
+  {
+    "code": "SWE421",
+    "title": "Principles of Information Security",
+    "credits": "3 - 0 - 3",
+    "description": "Study of security policies, models, and mechanisms for secrecy, integrity, and availability. Topics include mechanisms for mandatory and discretionary controls; data models, concepts, and mechanisms for database security; basic cryptography and its applications; security in computer networks and distributed systems; and control and prevention of viruses and other rogue programs.",
+    "prereqs": "ICS 334 Or ICS 324"
+  },
+  {
+    "code": "SWE422",
+    "title": "Usability Engineering",
+    "credits": "3 - 0 - 3",
+    "description": "Design, implement and evaluate software system interfaces with focus on usability, interaction paradigms and human computer activities. The lifecycle of an interactive human computer interface is studied from both engineering and end-user perspectives.",
+    "prereqs": "SWE 206"
+  },
+  {
+    "code": "SWE423",
+    "title": "Multimedia Systems",
+    "credits": "3 - 0 - 3",
+    "description": "Why multimedia systems? Fonts and hypertext. Digital audio. Synthesized audio & MIDI. Audio on the Internet & audio streaming. Speech recognition. Computer graphics and images. Image formats and standards. Color models in images. Image compression. Principles of animation. Digital video. Video compression. Video on the Internet & video streaming. Videoconferencing. Multimedia software tools. Issues in multimedia applications design. Multimedia programming techniques.",
+    "prereqs": ""
+  },
+  {
+    "code": "SWE436",
+    "title": "Object-Oriented Design Patterns",
+    "credits": "3 - 0 - 3",
+    "description": "A depth study of object-oriented design patterns. How design patterns solve design problems? How to select a design pattern? How to use a design pattern? Detailed study of creational patterns, structural patterns, and behavioral patterns. Case studies.",
+    "prereqs": "SWE 316"
+  },
+  {
+    "code": "SWE439",
+    "title": "Software Quality Engineering",
+    "credits": "3 - 0 - 3",
+    "description": "Overview of engineering foundations of software, basics of measurement theory, empirical experimentation in software engineering, software metrics and measuring software quality.",
+    "prereqs": "SWE 316 And (STAT 319 Or STAT 201)"
+  },
+  {
+    "code": "SWE440",
+    "title": "Information Security Management",
+    "credits": "3 - 0 - 3",
+    "description": "Introduction to information security management principles, management of threats to and vulnerabilities of information security, risk management, and to apply the knowledge of people and technical security controls. Prerequisite: Senior Standing",
+    "prereqs": ""
+  },
+  {
+    "code": "SWE444",
+    "title": "Internet and Web Applications Deveopment",
+    "credits": "3 - 0 - 3",
+    "description": "Frameworks for web-application development. Component Architectures. Multi-tier Applications. End-to-end functional building blocks and their use in adaptive and non-adaptive applications, including multimedia: coding, compression, security, and directory services. Database connectivity. Integration of media services into applications.",
+    "prereqs": ""
+  },
+  {
+    "code": "SWE445",
+    "title": "Secure Software Development",
+    "credits": "3 - 0 - 3",
+    "description": "Security in requirements engineering; Secure designs; Risk analysis; The SQUARE Process Model; Threat modeling; Defensive coding; Software protection; Fuzzing; Static analysis and security assessment; Memory leaks, buffer and heap overflow attacks, injection attacks.",
+    "prereqs": ""
+  },
+  {
+    "code": "SWE446",
+    "title": "Selected Topics on Emerging Internet Technologies",
+    "credits": "2 - 3 - 3",
+    "description": "Design and implementation of computer models of learning and adaptation in autonomous intelligent agents. E-commerce models and architectures. IP telephony and video conferencing. Designing applications to support user mobility. Emulation of virtual application specific network architectures. Trends and new directions in Internet technologies, protocols, architectures, and applications.",
+    "prereqs": "SWE 344"
+  },
+  {
+    "code": "SWE455",
+    "title": "Cloud Applications Engineering",
+    "credits": "3 - 0 - 3",
+    "description": "Cloud computing and service models. Software development for the Cloud. Software architectures: monoliths, service-oriented, microservice, and serverless. Trade-offs between architectural patterns and Cloud services. Development lifecycle for Cloud-native SaaS applications. Design patterns for SaaS applications, Cloud service level agreements, and Cloud infrastructures. Software engineering practices and tools for the Cloud: Agile. CI/CD, DevOps, ArchOps, DataOps, MLOps, and DevSecOps. Business processes to implement cloud solutions, Cloud migration processes, and issues, Case studies.",
+    "prereqs": "COE 344 Or ICS 343"
+  },
+  {
+    "code": "SWE463",
+    "title": "Mobile Application Development",
+    "credits": "3 - 0 - 3",
+    "description": "Comprehensive introduction to building mobile applications for devices based on Android and iOS operating systems, including use of standard integrated development environment: Android Studio and Xcode, as well as testing and debugging on devices and emulators/simulators. Topics cover programming language for iOS programming, and mobile platform APIs for user interface, graphics, networking, data, and web services",
+    "prereqs": "ICS 108"
+  },
+  {
+    "code": "SWE469",
+    "title": "Software Metrics",
+    "credits": "3 - 0 - 3",
+    "description": "Overview of software metrics, basics of measurement theory, goal-based framework for software measurement, empirical investigation in software engineering. Measuring internal product attributes, measuring external product attributes, measuring cost and effort, measuring software reliability, software test metrics, and object-oriented metrics. Prerequisites: SWE 316 and STAT 319",
+    "prereqs": "SWE 316 And (STAT 319 Or STAT 201)"
+  },
+  {
+    "code": "SWE487",
+    "title": "Software Processes and Process Improvements",
+    "credits": "3 - 0 - 3",
+    "description": "Software process models. Software process analysis. Life cycle process models and standards. Process implementation at various levels like organization, project, team, or individual. Measurement and analysis of software process. Process improvements.",
+    "prereqs": "SWE 387"
+  },
+  {
+    "code": "SWE490",
+    "title": "Special Topics I",
+    "credits": "3 - 0 - 3",
+    "description": "In-depth study of a selected special topic relevant to software engineering Prerequisites: Consent of the Instructor",
+    "prereqs": ""
+  },
+  {
+    "code": "SWE491",
+    "title": "Special Topics II",
+    "credits": "3 - 0 - 3",
+    "description": "In-depth study of a selected special topic relevant to software engineering Prerequisites: Consent of the Instructor",
+    "prereqs": ""
+  },
+  {
+    "code": "SWE494",
+    "title": "Undergraduate Thesis I",
+    "credits": "0 - 0 - 3",
+    "description": "This course is an independent research course for students undertaking the CX in undergraduate research. An undergraduate thesis is a substantive piece of research-oriented creative work demonstrating mastery over the discourse of one semester in professional field. A thesis requires students to formulate the main hypothesis and research questions, maintain research integrity and be aware of research misconducts, and acquire skills of identifying research gaps in literature. Students will develop their scientific writing skills to report their preliminary research findings in a research proposal. Such proposal must be planned and completed under the supervision of a faculty (advisor) and, at the advisor’s discretion and department approval, may be reviewed by an additional co-advisor. Student will have to present to a committee his/her research plan and hypothesis in the thesis proposal.",
+    "prereqs": ""
+  },
+  {
+    "code": "SWE496",
+    "title": "Undergraduate Thesis II",
+    "credits": "0 - 0 - 3",
+    "description": "This is an independent research course focused on making research contributions and presenting the results in a thesis for students undertaking the CX in undergraduate research. In this course, students will refine their thesis proposal in previous thesis course and work closely with the advisor to demonstrate their research findings over one semester in a professional field. This requires students to ensure the novelty and originality of the idea, conduct extensive research to validate the main hypothesis and research questions, and have the skills needed to write the thesis and prepare the research results for the proper venue for possible publication. Students will learn to develop their professional communication skills to defend their thesis in front of an independent scientific committee and possibly to deliver speech in a research symposia.",
+    "prereqs": "SWE 494"
+  },
+  {
+    "code": "SWE497",
+    "title": "Undergraduate Research",
+    "credits": "3 - 0 - 3",
+    "description": "The course introduces students to research. Explains the differences between different publications channels like conferences, journals, books, and book chapters. Introduces students to metrics like impact factor and H-index. Teaches how to search and locate relevant literature on a given research topic. Introduces students to research methodology, experimentation design, and ways to conduct experiments and report the results. It also teaches students on how to prepare a research article. Prerequisites: Consent of the Instructor",
+    "prereqs": ""
+  }
+]

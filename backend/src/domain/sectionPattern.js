@@ -1,0 +1,442 @@
+// NEW-FU-236: KFUPM section scheduling-pattern validator.
+//
+// The existing controller-layer validators check format-level things
+// (HH:MM time strings, day enum, section_number range by Lec/Lab).
+// This module enforces the next layer up — KFUPM's actual scheduling
+// conventions for the (credits × day-pattern × duration) triple.
+//
+// A section that passes this validator can still be REJECTED by the
+// schedule guard (FU-201 archived schedule), the section_number
+// uniqueness constraint, or the conflict engine — those are separate
+// concerns. This module ONLY answers "is this combination of
+// credits, days, and duration a legal KFUPM pattern?"
+//
+// Data structure: each row of the rule table is independent. The
+// matcher walks rows for the relevant (credits, sectionType) and
+// asks each whether the candidate section matches. First match wins.
+// No fall-through ambiguity — every legal pattern has exactly one
+// matching row.
+
+// Valid weekdays as ordered ints so we can do day-gap checks.
+const DAY_INDEX = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4 };
+const VALID_DAYS = new Set(Object.keys(DAY_INDEX));
+
+// Standard durations in minutes.
+const DUR_50  = 50;
+const DUR_75  = 75;
+const DUR_165 = 165;   // 2h 45m — lab only
+
+// Per-row helpers. Each rule has a `match` predicate that takes
+// `{ days, duration }` and returns true if the candidate fits. We
+// keep the predicates expressive (named functions) rather than tiny
+// arrow lambdas so the rule list reads like a spec.
+function sameDays(actual, expected) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+  const a = [...actual].sort();
+  const b = [...expected].sort();
+  return a.every((d, i) => d === b[i]);
+}
+function anyDay(days) {
+  return Array.isArray(days) && days.length === 1 && VALID_DAYS.has(days[0]);
+}
+function twoDayWithGap(days) {
+  // The 2-credit-50min rule and the 3-credit-75min rule both require
+  // 2 days with a 1-day gap. KFUPM's accepted combos: Sun+Tue (gap=2),
+  // Mon+Wed (gap=2), Tue+Thu (gap=2). The first and last day of the
+  // week (Sun, Thu) are 1 apart from each other only through the
+  // week — not legal here.
+  if (!Array.isArray(days) || days.length !== 2) return false;
+  if (!days.every(d => VALID_DAYS.has(d))) return false;
+  const ALLOWED_2DAY = [['Sunday','Tuesday'], ['Monday','Wednesday'], ['Tuesday','Thursday']];
+  return ALLOWED_2DAY.some(pair => sameDays(days, pair));
+}
+
+// LECTURE pattern rules, indexed by credits. The matcher iterates
+// the array for the credits value and tries each predicate.
+const LEC_RULES = {
+  1: [
+    {
+      name: '1-credit · 50 min · any single day Sun–Thu',
+      match: ({ days, duration }) => duration === DUR_50 && anyDay(days),
+    },
+  ],
+  2: [
+    {
+      name: '2-credit · 50 min · 2 days with 1-day gap (Sun+Tue, Mon+Wed, or Tue+Thu)',
+      match: ({ days, duration }) => duration === DUR_50 && twoDayWithGap(days),
+    },
+    {
+      name: '2-credit · 75 min · 1 day (any of Sun–Thu)',
+      match: ({ days, duration }) => duration === DUR_75 && anyDay(days),
+    },
+  ],
+  3: [
+    {
+      name: '3-credit · 50 min · Sun+Tue+Thu',
+      match: ({ days, duration }) =>
+        duration === DUR_50 && sameDays(days, ['Sunday','Tuesday','Thursday']),
+    },
+    {
+      name: '3-credit · 75 min · Mon+Wed',
+      match: ({ days, duration }) =>
+        duration === DUR_75 && sameDays(days, ['Monday','Wednesday']),
+    },
+    {
+      name: '3-credit · 75 min · Sun+Tue',
+      match: ({ days, duration }) =>
+        duration === DUR_75 && sameDays(days, ['Sunday','Tuesday']),
+    },
+    {
+      name: '3-credit · 75 min · Tue+Thu',
+      match: ({ days, duration }) =>
+        duration === DUR_75 && sameDays(days, ['Tuesday','Thursday']),
+    },
+    // 3-credit-with-lab alternative: 2-day 50-min lecture. The pattern
+    // is the same as the 2-credit-50-min combo, but only allowed when
+    // a lab section accompanies the course (caller passes hasLab).
+    {
+      name: '3-credit (+lab) · 50 min · 2 days with 1-day gap',
+      requiresLab: true,
+      match: ({ days, duration }) => duration === DUR_50 && twoDayWithGap(days),
+    },
+  ],
+  4: [
+    // 4-credit ALWAYS has a lab; the lecture portion follows the
+    // 3-credit lecture rules. We delegate to the LEC_RULES[3] list
+    // dynamically in matchLectureRule below to avoid duplication.
+  ],
+};
+
+// LAB rule — single rule that matches by duration AND single-day.
+const LAB_RULE = {
+  name: 'Lab · 50 / 75 / 165 min · single day Sun–Thu',
+  match: ({ days, duration }) =>
+    [DUR_50, DUR_75, DUR_165].includes(duration) && anyDay(days),
+};
+
+function durationMinutes(startTime, endTime) {
+  // Both are HH:MM strings (already validated by the controllers).
+  const [sh, sm] = startTime.split(':').map(Number);
+  const [eh, em] = endTime.split(':').map(Number);
+  return (eh * 60 + em) - (sh * 60 + sm);
+}
+
+// Choose the lecture rule list for a given (credits, hasLab) pair.
+// Returns the list of candidate rules; the validator tries each in
+// order, considering the `requiresLab` flag on rules that need it.
+function lectureRulesFor(credits, hasLab) {
+  if (credits === 4) {
+    // 4-credit = 3-credit lecture pattern + REQUIRED lab. Caller is
+    // responsible for ensuring a lab section was created separately;
+    // the pattern check itself reuses the 3-credit rules. We mark
+    // those rules as lab-required transitively since 4-credit is
+    // never lab-less.
+    return LEC_RULES[3].filter(r => !r.requiresLab || hasLab);
+  }
+  if (credits === 3 && !hasLab) {
+    // Without a lab, the 2-day-50-min lecture isn't legal — it's the
+    // pattern reserved for courses that pair lecture with a lab.
+    return LEC_RULES[3].filter(r => !r.requiresLab);
+  }
+  return LEC_RULES[credits] || [];
+}
+
+/**
+ * Validate a section against KFUPM's scheduling patterns.
+ *
+ * @param {object} input
+ * @param {number} input.credits      - 1, 2, 3, or 4. Rejected otherwise.
+ * @param {boolean} input.hasLab      - whether the course is configured to have a lab.
+ *                                       (4-credit always has a lab; some 3-credit do.)
+ * @param {'Lec'|'Lab'} input.sectionType
+ * @param {string[]} input.days       - e.g. ['Sunday','Tuesday','Thursday']
+ * @param {string} input.startTime    - 'HH:MM'
+ * @param {string} input.endTime      - 'HH:MM'
+ * @returns {{ ok: true } | { ok: false, error: string }}
+ */
+function validateSectionPattern({ credits, hasLab, sectionType, days, startTime, endTime }) {
+  // Credit cap — domain-level invariant. KFUPM has no 0 or 5+ credit
+  // courses, and 4-credit courses must have a lab. Caller is
+  // expected to enforce these at the course level too; we double-
+  // check here so a stray section can't slip through.
+  if (![1, 2, 3, 4].includes(credits)) {
+    return { ok: false, error: `Invalid credits ${credits}. Courses must be 1, 2, 3, or 4 credits.` };
+  }
+  if (credits === 4 && !hasLab) {
+    return { ok: false, error: '4-credit courses must have a lab section. Set hasLab on the course or use 3 credits.' };
+  }
+  if (!['Lec', 'Lab'].includes(sectionType)) {
+    return { ok: false, error: `Invalid sectionType "${sectionType}". Expected "Lec" or "Lab".` };
+  }
+  if (!Array.isArray(days) || days.length === 0 || !days.every(d => VALID_DAYS.has(d))) {
+    return { ok: false, error: `Invalid days ${JSON.stringify(days)}. Expected non-empty subset of Sunday–Thursday.` };
+  }
+  const duration = durationMinutes(startTime, endTime);
+  if (duration <= 0) {
+    return { ok: false, error: `endTime must be after startTime (got ${duration} min).` };
+  }
+
+  // Lab section — single rule, applies regardless of credits.
+  if (sectionType === 'Lab') {
+    if (!hasLab) {
+      return { ok: false, error: 'Lab section requested but the course is not configured to have a lab.' };
+    }
+    if (!LAB_RULE.match({ days, duration })) {
+      return {
+        ok: false,
+        error: `Lab section pattern not allowed. Lab must be 50, 75, or 165 minutes on a single day. Got ${days.join('+')} for ${duration} min.`,
+      };
+    }
+    return { ok: true };
+  }
+
+  // Lecture section — match against the credits-specific rule list.
+  const rules = lectureRulesFor(credits, hasLab);
+  for (const rule of rules) {
+    if (rule.match({ days, duration })) {
+      return { ok: true };
+    }
+  }
+  // Build a helpful error listing the allowed patterns for this credits.
+  const allowed = rules.map(r => `  • ${r.name}`).join('\n');
+  return {
+    ok: false,
+    error:
+      `Lecture pattern not allowed for ${credits}-credit course ` +
+      `${hasLab ? '(with lab) ' : ''}` +
+      `on ${days.join('+')} for ${duration} min.\nAllowed patterns:\n${allowed}`,
+  };
+}
+
+// NEW-FU-240: per-(credits, hasLab) pattern catalog used by the
+// Auto-Suggest modal and the SuggestService. Each entry is a stable
+// machine name that the suggester resolves to a {days, duration}
+// tuple via PATTERN_DEFS below.
+//
+// Naming convention: <DAY_TOKEN>_<DURATION_MIN>. DAY_TOKEN encodes
+// the days; for single-day patterns the suggester iterates over the
+// 5-day window to let the greedy phase pick the conflict-minimizing
+// day, so we use ONE_DAY_* as a synthetic token.
+//
+// IMPORTANT: this enum is mirrored on the frontend (SuggestModal).
+// Adding a value here means updating the frontend mirror. The
+// validator (validateSectionPattern above) doesn't care about these
+// names — it operates on the raw (days, duration) tuple, which is
+// what the SuggestService passes through.
+const PATTERN_DEFS = {
+  STT_50:     { days: ['Sunday','Tuesday','Thursday'], duration: DUR_50 },
+  MW_75:      { days: ['Monday','Wednesday'],           duration: DUR_75 },
+  ST_75:      { days: ['Sunday','Tuesday'],             duration: DUR_75 },
+  TT_75:      { days: ['Tuesday','Thursday'],           duration: DUR_75 },
+  ST_50:      { days: ['Sunday','Tuesday'],             duration: DUR_50 },
+  MW_50:      { days: ['Monday','Wednesday'],           duration: DUR_50 },
+  TT_50:      { days: ['Tuesday','Thursday'],           duration: DUR_50 },
+  // ONE_DAY_* — synthetic. The suggester expands these into 5
+  // (one-day combos × time-range) candidates so the greedy phase
+  // picks the best day. Modal shows them as a single "Any day" entry.
+  ONE_DAY_50: { days: '__ANY__', duration: DUR_50 },
+  ONE_DAY_75: { days: '__ANY__', duration: DUR_75 },
+};
+const PATTERN_LABELS = {
+  STT_50:     { label: 'Sun / Tue / Thu', note: '50 min/class' },
+  MW_75:      { label: 'Mon / Wed',       note: '75 min/class' },
+  ST_75:      { label: 'Sun / Tue',       note: '75 min/class' },
+  TT_75:      { label: 'Tue / Thu',       note: '75 min/class' },
+  ST_50:      { label: 'Sun / Tue',       note: '50 min/class' },
+  MW_50:      { label: 'Mon / Wed',       note: '50 min/class' },
+  TT_50:      { label: 'Tue / Thu',       note: '50 min/class' },
+  ONE_DAY_50: { label: 'Any day',         note: '50 min/class' },
+  ONE_DAY_75: { label: 'Any day',         note: '75 min/class' },
+};
+
+// NEW-FU-247: two-axis pattern model. The single-name PATTERN_DEFS
+// above bundles (days, duration) into one enum value — fine for the
+// suggester's internal lookups but mismatched with the modal UX, where
+// the user thinks "I want a 75min class" and THEN "which days?".
+// DAY_TEMPLATES below carries just the day combinations; durations
+// are a separate axis the modal lets the user choose explicitly.
+//
+// Naming: every value in PATTERN_DEFS is "<TEMPLATE>_<DURATION>" so
+// each legacy enum entry decomposes cleanly:
+//   STT_50    → { template: 'STT', duration: 50 }
+//   ONE_DAY_75 → { template: 'ONE_DAY', duration: 75 }
+// resolvePattern() accepts EITHER shape so the new {dayPattern, duration}
+// payload from the modal AND the legacy single-name from older callers
+// both produce the same dayCombos/duration output.
+const DAY_TEMPLATES = {
+  STT:     ['Sunday', 'Tuesday', 'Thursday'],
+  MW:      ['Monday', 'Wednesday'],
+  ST:      ['Sunday', 'Tuesday'],
+  TT:      ['Tuesday', 'Thursday'],
+  ONE_DAY: '__ANY__',
+};
+const DAY_TEMPLATE_LABELS = {
+  STT:     'Sun / Tue / Thu',
+  MW:      'Mon / Wed',
+  ST:      'Sun / Tue',
+  TT:      'Tue / Thu',
+  ONE_DAY: 'Any day',
+};
+
+// The legal duration set per (credits, hasLab). Mirrors the
+// validator's rule table.
+function legalDurationsForCourse({ credits, hasLab }) {
+  const c = Number(credits);
+  if (c === 1) return [DUR_50];
+  if (c === 2) return [DUR_50, DUR_75];
+  if (c === 3) return [DUR_50, DUR_75];
+  if (c === 4) return [DUR_50, DUR_75];
+  return [];
+}
+
+// The legal day-templates per (credits, hasLab, duration). Renders
+// the second-step buttons in the modal once duration is chosen.
+//
+// Key per-credit rules:
+//   1-cr · 50  → ONE_DAY only
+//   2-cr · 50  → 3 two-day combos (ST/MW/TT)
+//   2-cr · 75  → ONE_DAY
+//   3-cr · 50  → STT always; ST/MW/TT only when hasLab (matches
+//                FU-236 "2-day 50min lecture requires lab" rule)
+//   3-cr · 75  → MW, ST, TT
+//   4-cr · 50  → STT + ST/MW/TT (always has lab)
+//   4-cr · 75  → MW, ST, TT
+function legalDayTemplatesForCourse({ credits, hasLab, duration }) {
+  const c = Number(credits);
+  const d = Number(duration);
+  if (c === 1 && d === DUR_50) return ['ONE_DAY'];
+  if (c === 2 && d === DUR_50) return ['ST', 'MW', 'TT'];
+  if (c === 2 && d === DUR_75) return ['ONE_DAY'];
+  if (c === 3 && d === DUR_50) return hasLab ? ['STT', 'ST', 'MW', 'TT'] : ['STT'];
+  if (c === 3 && d === DUR_75) return ['MW', 'ST', 'TT'];
+  if (c === 4 && d === DUR_50) return ['STT', 'ST', 'MW', 'TT'];
+  if (c === 4 && d === DUR_75) return ['MW', 'ST', 'TT'];
+  return [];
+}
+
+// Decompose a legacy single-name pattern into the (template, duration)
+// pair so the rest of the new code path doesn't branch on the input
+// shape. STT_50 → { template:'STT', duration:50 }; ONE_DAY_75 →
+// { template:'ONE_DAY', duration:75 }. Falls back to null for unknown.
+function decomposeLegacyName(name) {
+  if (name === 'STT') return { template: 'STT', duration: DUR_50 };
+  if (name === 'MW')  return { template: 'MW',  duration: DUR_75 };
+  const def = PATTERN_DEFS[name];
+  if (!def) return null;
+  // The PATTERN_DEFS keys are <TEMPLATE>_<DURATION>. Splitting on the
+  // last `_` separates ONE_DAY_50 → ['ONE_DAY', '50']. Defensive:
+  // confirm the parsed template exists in DAY_TEMPLATES.
+  const idx = name.lastIndexOf('_');
+  const tpl = name.slice(0, idx);
+  if (!Object.prototype.hasOwnProperty.call(DAY_TEMPLATES, tpl)) return null;
+  return { template: tpl, duration: def.duration };
+}
+
+/**
+ * Return the legal lecture-pattern set for a course's (credits, hasLab)
+ * combo. Drives the Suggest modal's per-row button rendering AND the
+ * suggester's pattern-acceptance check.
+ *
+ * Behavior per the FU-236 rule table:
+ *   • 1-credit → single-day 50min (any day)
+ *   • 2-credit → 2-day-with-gap 50min (3 combos) OR 1-day 75min
+ *   • 3-credit (no lab) → STT 50, MW 75, ST 75, TT 75
+ *   • 3-credit (+lab)   → above + 2-day 50min alternatives
+ *   • 4-credit          → same as 3+lab (always has lab — caller's
+ *                         responsibility to enforce that elsewhere)
+ *   • Invalid credits   → []
+ *
+ * @returns Array<{ value, label, note, days, duration }>
+ */
+function legalPatternsForCourse({ credits, hasLab }) {
+  const c = Number(credits);
+  const wrap = (name) => ({
+    value: name,
+    label: PATTERN_LABELS[name].label,
+    note:  PATTERN_LABELS[name].note,
+    days:     PATTERN_DEFS[name].days,
+    duration: PATTERN_DEFS[name].duration,
+  });
+
+  if (c === 1) return [wrap('ONE_DAY_50')];
+  if (c === 2) return ['ST_50', 'MW_50', 'TT_50', 'ONE_DAY_75'].map(wrap);
+  if (c === 3 && !hasLab) return ['STT_50', 'MW_75', 'ST_75', 'TT_75'].map(wrap);
+  if (c === 3 &&  hasLab) return ['STT_50', 'MW_75', 'ST_75', 'TT_75',
+                                  'ST_50', 'MW_50', 'TT_50'].map(wrap);
+  // 4-credit ALWAYS has a lab (validateSectionPattern enforces this);
+  // the lecture pattern set matches the 3+lab case.
+  if (c === 4) return ['STT_50', 'MW_75', 'ST_75', 'TT_75',
+                       'ST_50', 'MW_50', 'TT_50'].map(wrap);
+  return [];
+}
+
+/**
+ * Resolve a pattern into its (dayCombos, duration) tuple. Accepts two
+ * shapes:
+ *   • Legacy single name: 'STT_50', 'MW_75', 'ONE_DAY_50', 'STT' (alias)
+ *   • New two-axis form:  { dayPattern: 'STT', duration: 50 }
+ *
+ * For ONE_DAY templates `dayCombos` expands to 5 single-day arrays so
+ * the suggester iterates over each — same behavior as before.
+ *
+ * @returns null if the pattern is unknown / malformed.
+ */
+function resolvePattern(input) {
+  // NEW-FU-247: accept the two-axis object directly so the controller
+  // can pass new-shape payloads without re-stringifying them.
+  // NEW-FU-252: also accept an optional `day` field that constrains
+  // ONE_DAY templates to a specific weekday. If present, the
+  // suggester sees exactly one dayCombo instead of all 5 — the user
+  // has committed to a day, no greedy-picks-best-day expansion.
+  if (input && typeof input === 'object' && input.dayPattern) {
+    const tpl = input.dayPattern;
+    const dur = Number(input.duration);
+    if (!Object.prototype.hasOwnProperty.call(DAY_TEMPLATES, tpl)) return null;
+    if (![DUR_50, DUR_75].includes(dur)) return null;
+    const days = DAY_TEMPLATES[tpl];
+    if (days === '__ANY__') {
+      // Single-day template. Honor `day` if supplied; else expand
+      // to all 5 weekdays for the greedy phase to choose.
+      if (typeof input.day === 'string') {
+        if (!VALID_DAYS.has(input.day)) return null;
+        return { dayCombos: [[input.day]], duration: dur };
+      }
+      return {
+        dayCombos: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'].map(d => [d]),
+        duration: dur,
+      };
+    }
+    return { dayCombos: [days], duration: dur };
+  }
+
+  // Legacy single-name path. Treat as string from here on.
+  let name = input;
+  if (typeof name !== 'string') return null;
+  // Legacy aliases — kept so old client payloads still work.
+  if (name === 'STT') name = 'STT_50';
+  if (name === 'MW')  name = 'MW_75';
+  const def = PATTERN_DEFS[name];
+  if (!def) return null;
+  if (def.days === '__ANY__') {
+    return {
+      dayCombos: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday']
+        .map(d => [d]),
+      duration: def.duration,
+    };
+  }
+  return { dayCombos: [def.days], duration: def.duration };
+}
+
+module.exports = {
+  validateSectionPattern,
+  // Exported for tests + auto-suggester filtering.
+  LEC_RULES, LAB_RULE,
+  DUR_50, DUR_75, DUR_165,
+  // NEW-FU-240: pattern catalog
+  PATTERN_DEFS, PATTERN_LABELS, legalPatternsForCourse, resolvePattern,
+  // NEW-FU-247: two-axis pattern model — frontend uses this for the
+  // duration → day-template stepped modal layout.
+  DAY_TEMPLATES, DAY_TEMPLATE_LABELS,
+  legalDurationsForCourse, legalDayTemplatesForCourse,
+  decomposeLegacyName,
+};
