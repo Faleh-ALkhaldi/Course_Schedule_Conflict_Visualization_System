@@ -18,10 +18,29 @@ function getHourMarks() {
 }
 const HOUR_MARKS = getHourMarks();
 
-const ROW_H_DEFAULT = 48;
-const ROW_H_MIN     = 22;
-const ROW_H_MAX     = 96;
-const ROW_H_STEP    = 8;
+// NEW-FU-313 (Phase 68): vertical room expansion. Measurement showed
+// the grid is already ~98% width-utilized (the thin dense lanes come
+// from time-overlap splitting, not unused grid width), so the real
+// headroom is vertical.
+//   • DEFAULT 48 → 56: taller cards out of the box → more room for the
+//     2-D fit to render text larger before any shrink is needed.
+//   • MAX 96 → 132: a much higher zoom-in ceiling so a detail view can
+//     make any card big and fully readable.
+//   • MIN 22 → 20: at max zoom-out the full 07:00–22:00 (30 half-hour
+//     rows) is 30×20 = 600px + header ≈ 660px, fitting without scroll
+//     even on shorter (≈720px-tall) screens.
+// NEW-FU-204 (Phase 81): with the in-app zoom feature removed, only two row-height
+// bounds remain meaningful, and they're the CLAMP on the single fit-to-viewport
+// level (see the fit effect):
+//   • ROW_H_DEFAULT 64 — the UPPER clamp + first-paint fallback before the fit
+//     effect measures. A very tall window won't balloon rows past this.
+//   • ROW_H_MIN 20 — the LOWER clamp, the Phase-68-R2-proven floor at which the
+//     full 07:00–22:00 (30 half-hour rows = 600px + header) still fits with zero
+//     vertical scroll on short (~720px) screens.
+// ROW_H_MAX / ROW_H_STEP (the old zoom-in ceiling + step) are gone — there is no
+// longer a zoom range to step through, just the one fitted level.
+const ROW_H_DEFAULT = 64;
+const ROW_H_MIN     = 20;
 
 // NEW-FU-133 + FU-138 + FU-139: density tier thresholds. The grid fits
 // all 5 days within `availableW` via proportional flex-grow, so per-lane
@@ -106,21 +125,82 @@ function layoutSectionsForDay(sections) {
     }
   }
 
-  return meta.map(({ sec, start, end, laneIndex }) => {
-    let maxLane = laneIndex;
-    for (const o of meta) {
-      if (o.sec === sec) continue;
-      if (start < o.end && o.start < end && o.laneIndex > maxLane) {
-        maxLane = o.laneIndex;
-      }
+  // NEW-FU-140 (Phase 69): per-CLUSTER uniform column count.
+  //
+  // BUG (pre-69): laneTotal was computed independently per card as
+  // (max overlapping laneIndex) + 1. Two cards in the SAME visual cluster
+  // could therefore disagree on how many columns the cluster has — a wide
+  // card that reaches lane 2 computes laneTotal 3 and places itself in the
+  // middle third (left 33%–66%), while a narrower neighbour that only sees
+  // lanes 0–1 computes laneTotal 2 and places itself in the left half
+  // (left 0%–50%). 33% < 50%, so the two boxes intrude on each other and one
+  // is painted partly over the other (the SWE 439 / SWE 326 collision).
+  //
+  // FIX: every card in one connected component of the time-overlap graph
+  // must share ONE column count. The greedy colouring above already gives
+  // overlapping cards distinct laneIndexes and (because interval graphs are
+  // perfect, so greedy-by-start is an optimal colouring) uses exactly the
+  // cluster's peak concurrency many lanes. So the cluster's column count is
+  // (max laneIndex in the cluster) + 1; with that SHARED denominator every
+  // overlapping pair maps to distinct, adjacent, non-overlapping column
+  // ranges — provably zero overlap, for partial overlaps and overlap chains
+  // alike. (We intentionally do NOT expand a card into trailing empty
+  // columns: uniform per-cluster width is the simplest provably-safe layout,
+  // and width is already reclaimed globally by proportional flex sizing.)
+  //
+  // Components are found with union-find over every (i<j) time-overlapping
+  // pair. Overlap is half-open [start,end): cards that merely touch at an
+  // edge (one ends exactly when the next begins) do NOT overlap — consistent
+  // with the `start >= colEnds[ci]` reuse test in the greedy pass above.
+  const parent = meta.map((_, i) => i);
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; };
+  for (let i = 0; i < meta.length; i++) {
+    for (let j = i + 1; j < meta.length; j++) {
+      if (meta[i].start < meta[j].end && meta[j].start < meta[i].end) union(i, j);
     }
-    return { sec, laneIndex, laneTotal: maxLane + 1 };
-  });
+  }
+  const clusterMaxLane = new Map();   // component root → max laneIndex in it
+  for (let i = 0; i < meta.length; i++) {
+    const root = find(i);
+    const cur = clusterMaxLane.get(root) ?? 0;
+    // NEW-FU-142 (Phase 70): ALWAYS record the root's max lane. The Phase 69
+    // form `if (laneIndex > cur) set(...)` never wrote an entry for a cluster
+    // whose max laneIndex is 0 — i.e. every singleton / non-overlapping card.
+    // Those roots then read back `undefined` below, so laneTotal became
+    // `undefined + 1 = NaN`, the wrapper's `width: calc(NaN% - 4px)` was
+    // dropped by the DOM, and the absolute wrapper fell back to width:auto
+    // (content-sized). A content-sized card whose width straddles the
+    // `.narrow` 120px threshold then oscillated (narrow ⇄ not-narrow →
+    // padding/font change → width change → …): the Phase 70 flicker.
+    // Math.max + unconditional set guarantees every root has an entry, so
+    // laneTotal is always an integer ≥ 1 (singleton → 1 → full lane width,
+    // exactly as before Phase 69).
+    clusterMaxLane.set(root, Math.max(cur, meta[i].laneIndex));
+  }
+  return meta.map(({ sec, laneIndex }, i) => ({
+    sec,
+    laneIndex,
+    // `?? laneIndex` is defensive — with the unconditional set above the
+    // root is always present, but this guarantees a finite laneTotal even
+    // if the map ever misses, so `width: calc()` can never go NaN again.
+    laneTotal: (clusterMaxLane.get(find(i)) ?? laneIndex) + 1,
+  }));
 }
 
 export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete }) {
   const { sections, officeHours, conflicts } = useApp();
   const [dropHighlight, setDropHighlight]    = useState(null);
+  // NEW-FU-204 (Phase 81): SINGLE-LEVEL grid. The in-app zoom feature is removed.
+  // The grid renders ONLY at the fit-to-viewport level — the same level the old
+  // "max zoom-out" produced — so the whole 07:00–22:00 day + all day columns are
+  // visible with no vertical scroll, and there is exactly ONE rendering target to
+  // tune card typography against (Phases 66–80 thrashed because each in-app zoom
+  // level was a separate geometry regime; collapsing to one ends that class of
+  // cross-level regressions). `rowH` is now driven SOLELY by the fit effect below
+  // — no manual rowH state, no atFloorRef, no min/max/step. Users who want a
+  // closer look use the browser's native zoom (Cmd +/−), which is unaffected.
+  // ROW_H_DEFAULT is only the first-paint fallback until the fit effect measures.
   const [rowH, setRowH] = useState(ROW_H_DEFAULT);
   const pxPerMin  = rowH / 30;
 
@@ -178,6 +258,37 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete 
     return () => obs.disconnect();
   }, []);
 
+  // NEW-FU-204 (Phase 81): the SOLE zoom driver. Measures the vertical space
+  // available to the grid body (top of the day-cols → bottom of viewport, minus
+  // a small margin) and divides by the 30 half-hour rows so the full 07:00–22:00
+  // EXACTLY fills the height with no vertical scroll — i.e. the old "max zoom-out"
+  // level, now the ONLY level. Clamped to [ROW_H_MIN, ROW_H_DEFAULT]: never below
+  // the proven dense floor (20), never above the default (so a very tall window
+  // doesn't balloon the rows). Re-measured on every viewport resize so the grid
+  // always re-fits — the fit-to-viewport behaviour the Phase-81 prompt asked to
+  // preserve. `rowH` is set DIRECTLY here (no separate floor state / atFloor
+  // bookkeeping); this effect is the single source of truth for the zoom level.
+  //
+  // NEW-FU-155 (Phase 73 R3): floor to 0.1px (not whole px) so the 30 rows fill
+  // the height to within ~3px instead of leaving up to ~29px of integer-rounding
+  // slack. floor (not round) still guarantees 30·rowH ≤ avail → never overflows
+  // into a scroll. Fractional rowH is safe: pxPerMin = rowH/30 already produces
+  // fractional card tops/heights, and useFitCard measures the REAL rendered box.
+  const ROWS = (DISPLAY_END - DISPLAY_START) / 30; // 30 half-hour rows
+  useEffect(() => {
+    const compute = () => {
+      const el = dayColsRef.current;
+      if (!el) return;
+      const top = el.getBoundingClientRect().top;
+      const avail = window.innerHeight - top - 4; // 4px bottom breathing margin
+      const fit = Math.max(ROW_H_MIN, Math.min(ROW_H_DEFAULT, Math.floor(avail / ROWS * 10) / 10));
+      setRowH(prev => (prev !== fit ? fit : prev));
+    };
+    compute();
+    window.addEventListener('resize', compute);
+    return () => window.removeEventListener('resize', compute);
+  }, [ROWS]);
+
   // NEW-FU-133 + FU-139: per-lane width AND shortest card height drive the
   // tier. The tier is GLOBAL — every day has the same per-lane width via
   // proportional flex. Shortest card height = the min slot duration in
@@ -227,21 +338,9 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete 
 
   return (
     <div className="sg-root" style={{ '--row-height': `${rowH}px` }}>
-      <div className="sg-zoom-controls">
-        <button
-          className="sg-zoom-btn"
-          onClick={() => setRowH(h => Math.min(h + ROW_H_STEP, ROW_H_MAX))}
-          disabled={rowH >= ROW_H_MAX}
-          title="Zoom in"
-        >＋</button>
-        <button
-          className="sg-zoom-btn"
-          onClick={() => setRowH(h => Math.max(h - ROW_H_STEP, ROW_H_MIN))}
-          disabled={rowH <= ROW_H_MIN}
-          title="Zoom out"
-        >－</button>
-      </div>
-
+      {/* NEW-FU-204 (Phase 81): the in-app zoom +/− controls were removed. The
+          grid is locked to the single fit-to-viewport level (see the fit effect
+          above). Browser-native zoom (Cmd +/−) remains available for close-ups. */}
       <div className="sg-left-col">
         <div className="sg-time-spacer" />
         <div className="sg-time-col" style={{ height: GRID_HEIGHT }}>
@@ -264,7 +363,11 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete 
           {DAYS.map(day => (
             <div key={day} className="sg-day-header" style={{
               flex: `${maxLanesPerDay[day]} 1 0`,
-              minWidth: 0,
+              // NEW-FU-162 (Phase 75 R3): MIN width = lanes × MIN_LANE_PX so a
+              // dense day never squeezes its lanes below readable width; the
+              // grid scrolls horizontally instead. Matches the day-col min so
+              // header and body stay aligned when scrolled.
+              minWidth: maxLanesPerDay[day] * MIN_LANE_PX,
             }}>{day}</div>
           ))}
         </div>
@@ -294,6 +397,15 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete 
 
 const DROP_STEP = 15;
 
+// NEW-FU-162 (Phase 75 R3): minimum per-lane width (CSS px). A lane this wide
+// holds "11:00–11:50" at a readable mono size with padding. At default zoom the
+// flex layout already gives lanes ≥ this, so the min never binds (no horizontal
+// scroll). At high browser zoom the effective width shrinks below it, the min
+// holds, and the grid scrolls horizontally — keeping text un-clipped. 46px is
+// the empirical floor where the densest term's total still fits the viewport at
+// default zoom (no scroll regression) while binding at ~1.4× zoom and beyond.
+const MIN_LANE_PX = 46;
+
 function DayColumn({ day, height, maxLanes, layouts, officeHours, conflictMap, onBlockClick, onOHClick, onSectionDelete, pxPerMin, pixelOffsetAt, tier }) {
   const dropZones = [];
   for (let m = DISPLAY_START; m < DISPLAY_END; m += DROP_STEP) dropZones.push(m);
@@ -302,7 +414,16 @@ function DayColumn({ day, height, maxLanes, layouts, officeHours, conflictMap, o
     <div className="sg-day-col" style={{
       height,
       flex: `${maxLanes} 1 0`,
-      minWidth: 0,
+      // NEW-FU-190 (Phase 77): floor the card-column body width at
+      // maxLanes × MIN_LANE_PX — the SAME floor Phase 75 put on the day HEADER
+      // (line ~464). The body kept minWidth:0, so on a dense day (term 262's
+      // 6-lane clusters) the column compressed and each lane fell to ~30px —
+      // narrower than a single glyph, which no font/scale can fill (the residual
+      // clips). Matching the header floor forces a dense column wide enough for
+      // every lane to be ≥46px; .sg-root overflow:auto already supplies the
+      // horizontal scroll. Sparse terms (251) stay under the viewport, so the
+      // floor doesn't bind and no scrollbar appears there.
+      minWidth: maxLanes * MIN_LANE_PX,
     }}>
       {HOUR_MARKS.map(mark => {
         const top = pixelOffsetAt(toMinutes(mark));

@@ -8,12 +8,16 @@
      so all 4 info elements (code, time, instructor, venue) remain
      visible at every density tier and at every zoom level. */
   border: 1.5px solid;
-  border-radius: 5px;
+  /* NEW-FU-141 (Phase 69): 5 → 6px for a softer, modern card silhouette. */
+  border-radius: 6px;
   padding: 6px 10px;
   font-size: 13px;
   line-height: 1.25;
   color: var(--text-primary);
-  box-shadow: 0 1px 3px rgba(0,0,0,.1);
+  /* NEW-FU-141 (Phase 69): single hard shadow → a softer two-layer
+     elevation (the standard high-end card treatment — a tight contact
+     shadow plus a wider ambient one). Same overall darkness, less harsh. */
+  box-shadow: 0 1px 2px rgba(0,0,0,.06), 0 2px 4px rgba(0,0,0,.07);
   overflow: hidden;
   transition: box-shadow .12s, opacity .1s;
   position: relative;
@@ -80,7 +84,28 @@
    leave course-code text colliding with the absolute-positioned chip
    ("SWE" + "§F-86" reading as "SWF-86" in the user's screenshot).
    Each tier's reserve bumped by ~10px to fully clear the wider chip. */
-.sblock-header { display:flex; justify-content:flex-start; align-items:baseline; gap:3px; padding-right: 32px; }
+/* NEW-FU-146 (Phase 71): header centers its in-flow content (the course
+   code). The §-chip is no longer a corner element (it's the in-flow
+   .sblock-secnum eyebrow above), and the LEC/LAB badge + delete-✕ are both
+   absolute, so the code span is the only in-flow child — justify-content:
+   center centers it. padding-right dropped from 32px → 0 (the old reserve
+   for the corner chip would push the centered code left). */
+/* NEW-FU-147 (Phase 72): symmetric horizontal reserve so the CENTERED course
+   code never runs under the top-right §-chip (or the top-left conflict dots).
+   The reserve scales with the code px so it's proportional at every density:
+   ~2.4× code px each side ≈ room for a 5-char "§F-04" chip. Symmetric so the
+   code stays visually centred (Phase 71) while clearing both corners. */
+.sblock-header {
+  display:flex; justify-content:center; align-items:baseline; gap:3px;
+  /* NEW-FU-152 (Phase 72): cap the §-reserve at 12% of the card width so it
+     can never starve the header on ultra-dense cards. min() picks the
+     font-based reserve normally, but the 12% (resolved against the card —
+     a fit input, not the font) binds on dense lanes, guaranteeing the code
+     always keeps ≥76% of the header → it shrinks-to-whole instead of
+     clipping. (Percentage padding resolves against the containing block's
+     width, i.e. the card content box.) */
+  padding: 0 min(calc(var(--sb-code-px, 11px) * 1.55), 12%);
+}
 /* NEW-FU-142 + FU-155: text colors INHERIT from .sblock (`color: colors.text`
    set inline — per-level dark text). FU-155 bumped sub-field weights
    600 → 700 (lever B) for uniform stroke body at small sizes, added
@@ -113,28 +138,9 @@
 /* NEW-FU-306 (Phase 64): word-break:keep-all + overflow-wrap:normal
    added explicitly to every text token. The Phase 63 rule (no mid-word
    break ever) must apply uniformly — not just to instructor/venue. */
-.sblock-code   { font-family:var(--font-mono); font-size:13px; font-weight:700; letter-spacing:.01em;
+.sblock-code   { font-family:var(--font-mono); font-size:14px; font-weight:800; letter-spacing:.025em;
                  white-space:nowrap; overflow:hidden; text-overflow:clip; min-width:0;
                  word-break:keep-all; overflow-wrap:normal; }
-/* NEW-FU-307 (Phase 65): section chip becomes a subtle pill. Before,
-   the chip was glyph-only — at certain zoom levels the eye merged it
-   with the trailing digit of the course code ("SWE 326⁰¹" reading as
-   one cluster). The pill chrome (background + 1px ring) crosses a
-   visual boundary that the eye reads as "different token." The 1px
-   ring is the same `box-shadow: 0 0 0 1px` pattern used by
-   .sblock-type-badge for design-language consistency. */
-/* NEW-FU-307 (Phase 65): trim the pill's horizontal padding from
-   `1px 5px` to `1px 3px` — that's 4 px saved on width (2 each side).
-   The header padding-right (32 px) was sized for the pre-pill chip;
-   the pill added 10 px of padding without bumping the header
-   reserve. At zoom < 100%, proportional scaling tightened the gap
-   below the safety margin. Shrinking the pill puts us back in
-   the clearance budget at every zoom level. The pill is still
-   visually distinct (background + ring still apply). */
-.sblock-section{ position:absolute; top:4px; right:5px; font-family:var(--font-mono); font-size:11px; font-weight:700; letter-spacing:.01em; pointer-events:none;
-                 white-space:nowrap; word-break:keep-all; overflow-wrap:normal;
-                 padding:1px 3px; border-radius:3px; background:rgba(255,255,255,0.7);
-                 box-shadow:0 0 0 1px rgba(0,0,0,0.08); line-height:1.4; }
 /* NEW-FU-402 (Phase 42): time uses a wrap-at-children pattern. Parent
    is white-space: normal so a line break can happen between the start
    and end span; each child span is white-space: nowrap so HH:MM never
@@ -150,7 +156,10 @@
    browser was rendering only 1 line and clipping "11:50". */
 .sblock-time   { font-family:var(--font-mono); font-size:12px; font-weight:700; letter-spacing:.01em; margin-top:1px;
                  white-space:normal; overflow:hidden; word-break:keep-all; overflow-wrap:normal; line-height:1.15;
-                 display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+                 /* NEW-FU-146 (Phase 71): -webkit-box-align:center centers the
+                    wrapped time line(s) horizontally inside the box (text-align
+                    alone doesn't position -webkit-box lines on the cross axis). */
+                 display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; -webkit-box-align:center; }
 .sblock-time > span         { white-space: nowrap; word-break: keep-all; }
 .sblock-time .sblock-time-dash { display:inline; }
 /* NEW-FU-402: instructor uses native word-wrap (break at spaces) with
@@ -195,7 +204,7 @@
    NEW-FU-292 (Phase 58): clamp bumped 2 → 3 for parity with the
    .sblock-instr bump above; gives "76-1024-A" room to wrap to 3 lines
    at the narrowest tiers without the trailing `-` orphan looking weird. */
-.sblock-venue  { font-family:var(--font-mono); font-size:12px; font-weight:700; letter-spacing:.01em;
+.sblock-venue  { font-family:var(--font-mono); font-size:11.5px; font-weight:700; letter-spacing:.01em;
                  margin-right: 32px; margin-left: 24px;
                  white-space: normal;
                  overflow: hidden;
@@ -290,7 +299,6 @@
   line-height: 1.22;
 }
 .sblock.tier-compact .sblock-code   { font-size: 12px; }
-.sblock.tier-compact .sblock-section{ font-size: 10px; top: 4px; right: 6px; }
 .sblock.tier-compact .sblock-time,
 .sblock.tier-compact .sblock-instr,
 /* NEW-FU-406 (Phase 46): venue margin-right/margin-left inherited from
@@ -315,7 +323,6 @@
    show "07:00-08:1" (chopped tail) at this density — losing the end time
    was identification loss the user rejected. */
 .sblock.tier-tight .sblock-code   { font-size: 11.5px; }
-.sblock.tier-tight .sblock-section{ font-size: 9px; top: 3px; right: 5px; }
 .sblock.tier-tight .sblock-time   { font-size: 9.5px; margin-top: 0; letter-spacing: -0.02em; }
 .sblock.tier-tight .sblock-instr  { font-size: 10.5px; margin-top: 0; }
 /* NEW-FU-406 (Phase 46): tier-tight venue keeps base margins (32/24)
@@ -335,10 +342,6 @@
 /* NEW-FU-401 (Phase 41): tier-minimal time also shrunk + letter-spacing
    tightened so the full "HH:MM–HH:MM" range fits without clipping. */
 .sblock.tier-minimal .sblock-code   { font-size: 9px; }
-/* NEW-FU-404 (Phase 44): top:4 keeps the §X badge BELOW the new
-   3px top-edge type stripe. Previously top:1 collided with the
-   stripe; the user's screenshot confirmed visual obscuring. */
-.sblock.tier-minimal .sblock-section{ font-size: 7px; top: 4px; right: 3px; font-weight: 700; }
 .sblock.tier-minimal .sblock-time   { font-size: 7.5px; margin-top: 0; letter-spacing: -0.03em; }
 .sblock.tier-minimal .sblock-instr,
 /* NEW-FU-405 (Phase 45): margin-right (NOT padding-right) reserves
@@ -455,8 +458,6 @@
   font-size: 7px;
 }
 .sblock.tier-micro .sblock-code   { font-size: 8px; }
-/* NEW-FU-404 (Phase 44): top:3 keeps §X below the 2px stripe at tier-micro. */
-.sblock.tier-micro .sblock-section{ font-size: 6px; top: 3px; right: 2px; font-weight: 700; }
 .sblock.tier-micro .sblock-time,
 .sblock.tier-micro .sblock-instr,
 /* NEW-FU-405 (Phase 45): margin-right (not padding-right) — shrinks
@@ -497,17 +498,6 @@
   letter-spacing: -0.05em;        /* squeeze the mono "SWE301" tighter */
   font-stretch: condensed;
   font-weight: 800;
-}
-/* Section badge: digit-only at this tier (drop the § glyph for room). */
-.sblock.tier-tiny .sblock-section {
-  font-size: 6px;
-  /* NEW-FU-404 (Phase 44): top:3 — below the 2px stripe. Previously
-     top:0 collided with the stripe; the §X text rendered ON TOP of
-     the colored stripe and was unreadable against the saturated bg. */
-  top: 3px;
-  right: 2px;
-  font-weight: 800;
-  letter-spacing: -0.05em;
 }
 .sblock.tier-tiny .sblock-time   { font-size: 6px; letter-spacing: -0.06em; line-height: 1.0; margin-top: 0; }
 .sblock.tier-tiny .sblock-instr  { font-size: 6px; line-height: 1.0; -webkit-line-clamp: 1; }
@@ -759,17 +749,6 @@
   overflow: visible;
   text-overflow: clip;
 }
-/* NEW-FU-403 (Phase 43): the Phase 27 rule that HID the section
-   badge at .narrow was rejected by the user. Phase 43 keeps the
-   badge visible at every tier; it just shrinks at narrow. The ✕
-   button it used to compete with is already display:none at
-   .narrow (Phase 41), so no horizontal collision. */
-.sblock.narrow .sblock-section {
-  font-size: 8px;
-  /* NEW-FU-404 (Phase 44): top:4 — clears the 3px stripe with 1px gap. */
-  top: 4px;
-  right: 4px;
-}
 .sblock.narrow .sblock-type-badge {
   font-size: 8px;
   padding: 0 3px;
@@ -957,39 +936,27 @@
   padding: 1px;
 }
 
-/* Hide the absolute-positioned section chip at the narrowest tier —
-   §F-XX is recoverable via the sidebar's section list and the card's
-   hover tooltip. Removing it gives ~16-20 px of horizontal room back
-   to .sblock-code (the chip was sitting at top-right, displacing the
-   course code via .sblock-header padding-right). */
-/* NEW-FU-307 (Phase 65): hide chip at tier-minimal, tier-micro, AND
-   tier-tiny. The Phase 65 pill chrome made the chip ~25 px wide;
-   tier-minimal (cards in the 60-90 px lane range) doesn't have
-   reliable clearance after browser zoom < 100% proportionally
-   shrinks the chrome. Hiding the chip at the three narrowest tiers
-   is the only fix that holds across every zoom level. Info still
-   reachable via sidebar list + hover tooltip. */
-.sblock.tier-tiny .sblock-section,
-.sblock.tier-micro .sblock-section,
-.sblock.tier-minimal .sblock-section {
-  display: none;
-}
-
-/* Hide the LEC/LAB badge at the narrowest tier — the card's color
-   band already encodes type (existing per-tier border treatment).
-   The badge is redundant chrome at this density. */
+/* NEW-FU-192 (Phase 78 Rule 3): legacy tier-tiny badge-hide NEUTRALISED. This
+   rule pre-dates the Phase-77 transform-scale redesign: it hid the LEC/LAB badge
+   on any card carrying the old density class `tier-tiny`, which ScheduleGrid
+   still applies based on LANE WIDTH — so a roomy 312×338 card in a narrow lane
+   wrongly lost its badge (9 such cards measured in term 262). Tag visibility is
+   now governed SOLELY by `.sb-tiny` (genuine px-smallness, set by useFitCard);
+   the legacy tier classes must not hide tags. Re-enabled to display:flex so the
+   badge shows on every non-tiny card. (sb-tiny still hides it — see below.) */
 .sblock.tier-tiny .sblock-type-badge {
-  display: none;
+  display: inline-flex;
 }
 
-/* Hide the delete-× button at narrow tiers — deletion is still
-   reachable via the section modal's delete button (Phase 53) and
-   the sidebar's per-section × button. The button at tier-tiny
-   was bigger than the course code's character cell at 3 px font. */
-.sblock.tier-tiny .sblock-delete-row,
-.sblock.tier-micro .sblock-delete-row {
-  display: none;
-}
+/* NEW-FU-143 (Phase 70): the delete-✕ is RESTORED at every tier. The
+   Phase 62 rule here hid it at tier-micro / tier-tiny — but since the tier
+   is globally micro, that hid it on EVERY card (the user's "✕ disappeared"
+   regression). The button is absolutely positioned (zero flex cost) and
+   hover-revealed (opacity 0 at rest, NEW-FU-408), so it is never intrusive
+   at rest and only appears as a deliberate action on hover — there is no
+   width at which it needs hiding. The per-tier size rules above already
+   shrink it (tier-micro 16px, tier-tiny 14px) so it stays proportional on
+   dense cards. (Hide rule intentionally removed.) */
 
 /* Sidebar of the card-header that was reserving space for the now-
    hidden chip: zero the padding-right too, otherwise we keep
@@ -1038,3 +1005,640 @@
 .sblock.tier-tiny .sblock-venue {
   line-height: 1.0;
 }
+
+/* ───────────────────────────────────────────────────────────────────────
+   NEW-FU-309 (Phase 66): authoritative NO-CLAMP rule for instructor +
+   venue, superseding every `-webkit-line-clamp` accumulated across
+   Phases 58-64. Rationale: useFitCard now shrinks the whole card's
+   font until the stacked content fits the card's HEIGHT — so a line
+   clamp can only RE-CLIP content the fit already accommodated (the
+   "venue 59-1003 → 59" bug). `display: block` disables the -webkit-box
+   clamp mechanism at every tier; `!important` overrides the
+   higher-specificity per-tier rules without hand-editing each one.
+
+   Wrapping behaviour (white-space: normal) and the no-mid-word-break
+   guarantee (word-break/overflow-wrap from the base rules) are NOT
+   touched — instructor/venue still wrap only at spaces/hyphens and the
+   card's own `overflow: hidden` is the sole (rarely-reached) clip. */
+.sblock-instr,
+.sblock-venue {
+  display: block !important;
+  -webkit-line-clamp: none !important;
+  text-overflow: clip !important;
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   NEW-FU-311 (Phase 67): card is a vertically-centering flex column.
+   Fixes the roomy-card "void": block children stacked from the top and
+   left the slack at the bottom (text clumped top-left). As a flex column
+   with justify-content:center, the four in-flow text tokens (header/
+   code, time, instructor, venue) distribute around the card's vertical
+   center, so a tall 75-min slot reads as intentionally laid out rather
+   than abandoned at the top. The absolute-positioned chrome (section
+   chip, LEC/LAB badge, delete-✕, conflict dots) is out of flex flow and
+   stays pinned to its corner. `gap` gives a minimal base line rhythm;
+   useFitCard grows the font (and thus the proportional line spacing)
+   when the card has room. */
+.sblock {
+  display: flex;
+  flex-direction: column;
+  /* NEW-FU-184 (Phase 77): space-evenly, not center. The Phase-76 "blank space"
+     on tall/large cards was MIS-DISTRIBUTED space, not small font: `center`
+     huddles the 4 correctly-sized rows in the middle, leaving a void above and
+     below. space-evenly spreads the rows to fill the card's vertical free space
+     with the SAME font (so it cannot clip — only positions change). It is safe
+     by construction: flexbox space-evenly only distributes POSITIVE free space;
+     on a tight/overflowing card (free space ≤ 0) it collapses to center behavior
+     — identical to before — so dense/short/tiny cards are provably unchanged.
+     The win lands exactly where there is room, nowhere else. */
+  justify-content: space-evenly;
+  /* NEW-FU-146 (Phase 71): horizontal centering via text-align, NOT
+     align-items:center. align-items:center would make the in-flow tokens
+     shrink-to-content on the cross axis, so their clientWidth would track
+     the font size and useFitCard's width gate (longestWord·fontPx·RATIO ≤
+     clientWidth) would go circular and stop constraining → clipping. Keeping
+     tokens full-width (block / width:100%) and centering their TEXT gives the
+     same balanced look while leaving clientWidth a fixed constraint. */
+  text-align: center;
+  gap: 1px;
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   NEW-FU-141 (Phase 69): typographic hierarchy polish. Phases 56-68 made
+   every token render whole at weight 700 — correct, but visually FLAT:
+   code, time, instructor and venue all read at the same weight and nearly
+   the same size, so a card looked like an undifferentiated data dump.
+
+   This refinement establishes a clear three-level hierarchy WITHOUT
+   weakening any word-integrity guarantee. No change here can clip a word:
+   the mono tokens' advance is weight-invariant, the only proportional
+   token (instructor) is NOT widened, the code's extra 0.025em tracking
+   stays inside useFitCard's CHAR_RATIO headroom, and useFitCard still owns
+   the final per-card fit.
+
+     1. course code  — the identity. 13 → 14px + 0.025em tracking at the
+        base/spacious tier so it reads as a deliberate title. (Dense tiers
+        keep their own smaller overrides.) Weight bumped 700 → 800: a mono
+        glyph's advance is weight-invariant, so a bolder title costs ZERO
+        width and can never clip — and heavier strokes only read crisper at
+        small sizes (consistent with FU-155).
+     2. instructor   — the human content. Full opacity, unchanged size.
+     3. time + venue — supporting metadata. Slightly smaller (11.5px base)
+        and softened to 85% opacity so the eye leads with the bold code and
+        the full-strength instructor. 0.85 is deliberately gentle: even on
+        the densest ~5px cards the muted text stays contrast-safe on every
+        pastel + conflict background, while on roomy cards it reads as a
+        clean, designed recession.
+
+   Why a flat opacity and not a CSS-tier scope: the grid tier is GLOBAL,
+   and dense overlap clusters pin the whole board to tier-micro — so a
+   "spacious / compact only" scope would never fire on real data. Since
+   useFitCard (Phase 66+) now owns the final size, the CSS tier name no
+   longer reflects rendered size; expressing hierarchy through weight +
+   opacity (both layout-free and scale-invariant) is the robust way to
+   get it at the tier that actually renders, at every zoom and width.
+
+   Net: the primary facts (which course, who teaches it) gain prominence —
+   the card is MORE readable at a glance — while secondary facts recede
+   into a refined, deliberately-designed supporting role. */
+.sblock-time,
+.sblock-venue {
+  opacity: 0.85;
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   NEW-FU-144 (Phase 70 R3): harmonise the §-chip size on cards with room.
+   The global tier-micro pin (see NEW-FU-141) left the §-chip frozen at 6px
+   even on a roomy 250px card — tiny and unbalanced beside the weight-800
+   course code. On NON-narrow cards (real width ≥ 120px, where the chip is
+   shown per NEW-FU-143) render it at 10px with a matching header reserve so
+   the code can never run under it.
+
+   Why exactly 10px and why the badge is NOT enlarged to match: the binding
+   case is the SHORTEST non-narrow card — a 50-min slot at maximum zoom-out
+   is ≈ 33px tall, and the §-chip (top-anchored) must clear the LEC/LAB
+   badge (bottom-anchored) at the shared right edge. At 10px the §-chip is
+   ~16px tall (top:5 → ends ~21px); the compact micro badge's top sits at
+   ~24px → a 3px gap. Enlarging the badge too would close that gap, so the
+   badge keeps its micro size. Narrow/dense cards are unaffected (chip
+   hidden, micro sizing retained). useFitCard still owns the in-flow fit, so
+   none of this can clip a word. */
+/* NEW-FU-145 (Phase 71): the Phase 70 R2/R3 corner-chip rules (the
+   `:not(.narrow) .sblock-section` sizing and the matching `.sblock-header`
+   padding-right:24px reserve) are removed. The §-number is now the in-flow
+   .sblock-secnum eyebrow (sized by useFitCard), so there is no corner chip
+   to size and no reserve to keep — and that padding-right would have pushed
+   the now-centered course code off-centre. */
+
+/* ───────────────────────────────────────────────────────────────────────
+   NEW-FU-145 (Phase 71): section number as a DYNAMIC, IN-FLOW eyebrow.
+
+   Replaces the absolute corner chip (.sblock-section, now dead). As a
+   full-width block its clientWidth = the card's content width — a FIXED
+   constraint — so useFitCard (which now lists .sblock-secnum in
+   TOKEN_SELECTOR) sizes it with the same uniform scale as the code/time/
+   instructor/venue: it shrinks-to-whole on dense cards and grows
+   proportionately on roomy ones, and it shows on EVERY card (no tier/width
+   hide). Centered so it sits as a small label above the bold course code;
+   word-break:keep-all keeps "§F-04" whole; overflow:hidden lets useFitCard
+   detect any residual overflow exactly as it does for the other tokens.
+   Rendered slightly muted (0.72) so the code stays the visual lead. */
+/* NEW-FU-147 (Phase 72): section number BACK in the top-right corner
+   (absolute), but DYNAMICALLY sized. font-size = 0.72 × the card's resolved
+   course-code px (published by useFitCard as --sb-code-px), so it tracks the
+   card's typography at every density/zoom — never hardcoded, never larger
+   than the code it labels, never frozen tiny on a roomy card. The 0.72
+   factor keeps it subordinate (no hierarchy inversion). Pill chrome marks it
+   as a distinct token; pointer-events:none so it never blocks card clicks.
+   The fallback (11px) only applies for the first paint before the var is set. */
+.sblock-secnum {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  z-index: 2;
+  font-family: var(--font-mono);
+  font-size: calc(var(--sb-code-px, 11px) * 0.72);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  opacity: 0.8;
+  white-space: nowrap;
+  word-break: keep-all;
+  overflow-wrap: normal;
+  pointer-events: none;
+  /* subtle pill so the §-number reads as its own token, not a stray digit
+     beside the code; padding scales with the font so it never overwhelms a
+     dense card. */
+  padding: 0 calc(var(--sb-code-px, 11px) * 0.18);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06);
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   NEW-FU-148 (Phase 72): DYNAMIC LEC/LAB badge + delete-✕ sizing.
+
+   Both were hardcoded per-tier px (badge .62rem→5.5px across tiers; ✕
+   26→14px). Since the board is globally pinned to tier-micro, those small
+   fixed sizes applied to EVERY card regardless of how roomy it actually is.
+   Now both derive from --sb-code-px (the card's resolved course-code font px,
+   published by useFitCard), so they scale with the card's real typography:
+   small on a dense lane, comfortable on a roomy card — never hardcoded.
+
+   Authoritative trailing rules: the originals live at (0,3,0)/(0,4,0)
+   specificity scattered across the tier blocks. We re-state every tier +
+   `.narrow.*` compound selector here, last in source order, so the calc()
+   wins the cascade in every density/zoom combination without hand-editing
+   each original.
+
+   Badge: 0.62 × code px (subordinate to the code, matches the §-eyebrow
+   weight); proportional horizontal padding. ✕: box 1.7 × code px, glyph
+   1.0 × code px — clamped to [9px, 26px] box / [6px, 16px] glyph as pure
+   GUARDS (a 4px button on a sub-floor lane would be unclickable; a 16px-code
+   max-zoom-in card would otherwise grow it past the old 26px comfort size).
+   The clamp middle term is the live dynamic value; the bounds only bind at
+   the extremes. */
+.sblock .sblock-type-badge,
+.sblock.tier-spacious .sblock-type-badge,
+.sblock.tier-compact  .sblock-type-badge,
+.sblock.tier-tight    .sblock-type-badge,
+.sblock.tier-minimal  .sblock-type-badge,
+.sblock.tier-micro    .sblock-type-badge,
+.sblock.tier-tiny     .sblock-type-badge,
+.sblock.narrow        .sblock-type-badge,
+.sblock.narrow.tier-micro .sblock-type-badge,
+.sblock.narrow.tier-tiny  .sblock-type-badge {
+  font-size: calc(var(--sb-code-px, 11px) * 0.62);
+  padding: 0 calc(var(--sb-code-px, 11px) * 0.30);
+  line-height: 1.5;
+}
+
+/* NEW-FU-201 (Phase 79 Rule 1): BIGGER tags on the RED cards. The § and LEC/LAB
+   badge already scale with --sb-code-px, so enlarging the red code (above) grows
+   them proportionally — but the user asked for the tags themselves to read bigger,
+   so bump their factor too (§ 0.72→0.80, badge 0.62→0.70) on every red card
+   (.sb-wide that is NOT the green .sb-bigsq). The widelarge lectures (587/503) are
+   cap-bound with slack, so the bigger tag adds no text shrink; on the width-bound
+   wideAR cards (316/101) the measured gutter grows a hair, costing <0.3px of code —
+   imperceptible. Green (.sb-bigsq, SWE 412) is excluded: its tags stay as-is per
+   the user's "green: smaller TYPE, tags unchanged". */
+/* NEW-FU-203 (Phase 80): SMALL §/badge on RED lecture cards. This round the user
+   wants the red CODE bigger (typography), not the tags. A big § actually FOUGHT
+   the big code: the fit reserves a vertical band = §-height + gap, and on a short
+   max-zoom-out card (72px) a tall § ate the height, forcing the code height-bound
+   AND grazing the text (the 262 chrome:2 collision). Capping the red tags small
+   (≤7px / ≤6px) shrinks that band so the code grows to fill, and the small § no
+   longer reaches the text. Code is the priority; §/LEC stay legible-small. */
+.sblock.sb-red .sblock-secnum {
+  font-size: clamp(5px, calc(var(--sb-code-px, 11px) * 0.45), 7px);
+}
+.sblock.sb-red .sblock-type-badge {
+  font-size: clamp(5px, calc(var(--sb-code-px, 11px) * 0.40), 6px);
+}
+/* NEW-FU-203 (Phase 80): make the RED course code read ~50% bigger. The transform
+   fit scales the whole content block to fill the card; the SECONDARY rows
+   (time/instructor/venue) usually bind that scale (their long text is the widest /
+   tallest part). Shrinking their NATURAL size lets the shared scale grow, so the
+   course code — the row the user cares about — renders much larger, while the
+   secondary rows stay legible (8px × the bigger scale). !important to beat the
+   base .sblock-fit row sizing. */
+.sblock.sb-red .sblock-fit .sblock-time,
+.sblock.sb-red .sblock-fit .sblock-instr,
+.sblock.sb-red .sblock-fit .sblock-venue {
+  font-size: 8px !important;
+}
+.sblock.sb-red .sblock-fit .sblock-no-instr {
+  font-size: 7px !important;
+}
+
+.sblock .sblock-delete-row,
+.sblock.narrow        .sblock-delete-row,
+.sblock.tier-tight    .sblock-delete-row,
+.sblock.tier-minimal  .sblock-delete-row,
+.sblock.tier-micro    .sblock-delete-row,
+.sblock.tier-tiny     .sblock-delete-row,
+.sblock.narrow.tier-micro .sblock-delete-row,
+.sblock.narrow.tier-tiny  .sblock-delete-row {
+  /* NEW-FU-158 (Phase 74): the ✕ is a SQUARE sized to the unified chrome band
+     (--sb-chrome-px, published by useFitCard from card height). The band is
+     exactly what's reserved as bottom padding, so the ✕ can never overlap the
+     centered text — on a short card both shrink together. Glyph ~62% of the
+     box. min() with the old code-derived value keeps it from exceeding the
+     band even when the code font is large on a short-but-wide card. */
+  /* NEW-FU-198 (Phase 78 cont. Rule 4): ✕ box enlarged modestly. The enlargement
+     is BOUNDED by --sb-chrome-px (published by useFitCard from card height, capped
+     24) so on a SHORT dense card it stays small and can't reach the text — the
+     code-px×1.9 term only widens it on cards that already have a tall chrome band.
+     (Measured regression: a flat ×2.1 + chrome-26 overlapped text on 59×33 dense
+     lanes; pulling the code multiplier to 1.9 and letting the chrome band be the
+     real ceiling fixes it while still giving a bigger button on roomy cards.) */
+  width:  min(var(--sb-chrome-px, 22px), calc(var(--sb-code-px, 11px) * 1.9));
+  height: min(var(--sb-chrome-px, 22px), calc(var(--sb-code-px, 11px) * 1.9));
+  font-size: clamp(7px, calc(min(var(--sb-chrome-px, 22px), calc(var(--sb-code-px, 11px) * 1.9)) * 0.6), 17px);
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   NEW-FU-147 (Phase 72): the per-tier header rules carry hardcoded px
+   padding-right (compact 28 / tight 26 / minimal 30 / micro 18 / tiny 22) at
+   (0,3,0) specificity, which would override the base symmetric reserve. With
+   the §-number back in the top-right corner the header again needs a reserve
+   — but a PROPORTIONAL, SYMMETRIC one (so the centered code clears the corner
+   AND stays centred). Re-assert the base's var-driven symmetric padding here
+   at matching specificity so it wins on every tier (the board is globally
+   tier-micro). Replaces the Phase-71 zeroing (which was correct only while §
+   was the in-flow eyebrow). */
+.sblock.tier-compact .sblock-header,
+.sblock.tier-tight   .sblock-header,
+.sblock.tier-minimal .sblock-header,
+.sblock.tier-micro   .sblock-header,
+.sblock.tier-tiny    .sblock-header,
+.sblock.narrow       .sblock-header {
+  padding-right: min(calc(var(--sb-code-px, 11px) * 1.55), 12%);
+  padding-left:  min(calc(var(--sb-code-px, 11px) * 1.55), 12%);
+}
+
+/* ───────────────────────────────────────────────────────────────────────
+   NEW-FU-159 (Phase 74 R3): tiny-card mode. useFitCard adds `.sb-tiny` to a
+   card shorter than 46px (≈ max grid zoom-out), where whole centered text
+   cannot coexist with both corner tags. Hide the §-chip and the LEC/LAB
+   badge there (info still in the hover tooltip + sidebar list) so the text
+   gets the full height, stays whole, and stays centered. The header's
+   §-reserve padding is also dropped here since the chip is gone, giving the
+   centered code the full width. */
+.sblock.sb-tiny .sblock-secnum,
+.sblock.sb-tiny .sblock-type-badge {
+  display: none;
+}
+.sblock.sb-tiny .sblock-header {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* NEW-FU-199 (Phase 78) + NEW-FU-202 (Phase 79 Rule 3): hide the ✕ on EVERY tiny
+   card. On a ~33-50px card the fit-transform centers the text to ~fill the box, so
+   the hover-revealed ✕ (bottom-left) sits inside the text — and now that pinned
+   tags show on these small cards too (.sb-narrowtall generalised to squares), the
+   bottom-left ✕ would also collide with the bottom-centre badge. A card this small
+   has no free corner for a ✕, so — exactly like the § and badge on plain-tiny —
+   the ✕ is hidden on all tiny cards (the earlier `:not(.sb-narrowtall)` exception
+   is dropped: narrow-tall cards are narrow dense lanes where a ✕ is unclickable
+   anyway). Recoverable by zooming in one step: the card grows past tiny and the ✕
+   returns in a real corner band. Display-only; per-day delete still works. */
+.sblock.sb-tiny .sblock-delete-row {
+  display: none;
+}
+
+/* NEW-FU-192 (Phase 78 Rule 4): NARROW-TALL tag recovery. A narrow dense lane
+   (≈39px wide) is `.sb-tiny` (so its centred text owns the full width), but if
+   it is also TALL (`.sb-narrowtall`, set by useFitCard at H≥90) it has vertical
+   room to show its tags. Re-show the § and LEC/LAB badge as small CENTERED pills
+   pinned to the very top and very bottom edges — they use the card's HEIGHT, not
+   its width, so they never collide with the horizontally-centred scaled text
+   (which sits in the vertical middle). full-width + centered + a hairline inset.
+   Font is a fixed small px (not --sb-code-px) so it stays legible on a 39px lane
+   regardless of the scaled content size. */
+.sblock.sb-narrowtall .sblock-secnum,
+.sblock.sb-narrowtall .sblock-type-badge {
+  display: block;
+  left: 1px;
+  right: 1px;
+  width: auto;
+  text-align: center;
+  /* NEW-FU-203 (Phase 80): PROPORTIONAL pinned tags — scale with the card's own
+     tiny code px (clamped 4–7px) so they stay VISIBLE but never larger than the
+     text they label (fixes the user's "tags oversizing them" at max zoom-out). */
+  font-size: clamp(4px, calc(var(--sb-code-px, 7px) * 0.85), 7px);
+  line-height: 1.2;
+  padding: 0 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+}
+.sblock.sb-narrowtall .sblock-secnum {
+  top: 1px;
+  bottom: auto;
+}
+.sblock.sb-narrowtall .sblock-type-badge {
+  bottom: 1px;
+  top: auto;
+}
+
+/* NEW-FU-202 (Phase 79 Rule 3): the SHORTEST pinned-tag cards (.sb-pintiny, H<40px
+   — the squarest yellow cards at absolute max zoom-out) cannot fit the 4 text rows
+   between the top § and bottom badge even at MIN_S. Show the COURSE CODE only — the
+   card's identity — so the § and LEC/LAB the user asked for stay visible with the
+   code between them; time / instructor / venue (illegible specks at this size) drop
+   to the hover tooltip. useFitCard then measures a code-only natural box, so the
+   scale-to-fit gives the code a legible size in the band-reserved middle. */
+.sblock.sb-pintiny .sblock-fit .sblock-time,
+.sblock.sb-pintiny .sblock-fit .sblock-instr,
+.sblock.sb-pintiny .sblock-fit .sblock-venue,
+.sblock.sb-pintiny .sblock-fit .sblock-no-instr {
+  /* !important: the base `.sblock-fit .sblock-instr/.sblock-venue { display:block }`
+     and the tier line-clamp rules (`display:-webkit-box`) otherwise won the cascade
+     at runtime for instr/venue (only .sblock-time hid), leaving 3 rows that overflow
+     the band-reserved middle and let the § graze the code on 33px cards. Forcing it
+     guarantees the code-only fit regardless of the tier display rules. */
+  display: none !important;
+}
+/* NEW-FU-202 (Phase 79 Rule 3): smaller pinned § / badge (→ 6px) on the
+   .sb-pintiny squares so the ~8px pill leaves a clean gap above/below the code in
+   the 13px band useFitCard reserves. !important is REQUIRED: the badge's dynamic
+   size lives in `.sblock.narrow.tier-tiny .sblock-type-badge` (specificity 0,4,0,
+   = --sb-code-px*0.62 ≈ 8px), which outranks a plain class selector — without
+   !important the badge stayed 8px (12px tall) and grazed the code on the 59×37
+   squares. Forcing 6px is what makes the band clearance hold. */
+.sblock.sb-pintiny .sblock-secnum,
+.sblock.sb-pintiny .sblock-type-badge {
+  font-size: 6px !important;
+}
+
+/* NEW-FU-172 (Phase 76 R3): NARROW-card declutter. useFitCard adds `.sb-narrow`
+   to a card under ~95px wide. On such a card the horizontally-centered text spans
+   nearly the full width and collides with the top-right § chip / bottom-right
+   LEC-LAB badge — exactly the user's "small square cards fighting / missing their
+   tags," and the R3 per-card grow makes it worse by enlarging the text. Hide the
+   chip + badge (recoverable via the hover tooltip + the sidebar section list,
+   identical to the sb-tiny treatment) so the narrow card's text owns the full
+   width with zero corner collision, and reclaim the header's §-reserve padding so
+   the centered code truly uses the whole width. */
+.sblock.sb-narrow .sblock-secnum,
+.sblock.sb-narrow .sblock-type-badge {
+  display: none;
+}
+.sblock.sb-narrow .sblock-header {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   NEW-FU-161 (Phase 75 R2): CSS-OWNED FONT BASELINE (the root-cause fix).
+   Phases 71-74 sized every token via useFitCard's JS estimate
+   (longestWord × fontPx × CHAR_RATIO). Investigation proved that estimate
+   disagrees with the browser's real sub-pixel layout at FRACTIONAL device-
+   pixel ratios (Safari browser-zoom): 91 of 145 clipping tokens had the gate
+   saying "fits." A linear ratio cannot match a fractional rasterizer and it
+   diverges per engine — Chromium passed, Safari broke.
+
+   Correct-by-construction baseline: the card is a SIZE CONTAINER and each
+   token's font is a fraction of the card's OWN rendered size via
+   min(<n>cqh, <n>cqw), clamped to [5px floor, refined cap]. The browser
+   computes this at TRUE scale in every engine and at every zoom — no JS, no
+   estimate, nothing to desync. The clamp ceiling is the no-billboard cap
+   (code 16px). min(cqh,cqw) tracks whichever dimension binds, so a short
+   card sizes by height and a narrow lane by width.
+
+   useFitCard (NEW-FU-163, Phase 76) is SHRINK-ONLY and Range-measured: it
+   clears inline on cards that fit (CSS owns + re-resolves on zoom by itself)
+   and only applies a downward inline override on the rare long-word-in-narrow
+   lane.
+
+   NEW-FU-164 (Phase 76): TWO CHANGES that finally make this baseline actually
+   apply.
+   1. !important. ROOT CAUSE of the 6-phase "tiny text in big cards" void: ~6
+      phases of legacy per-tier rules (`.sblock.tier-micro .sblock-code{font-
+      size:8px}`, specificity 0,2,0) silently OVERRODE this base rule (0,1,0).
+      The board is globally tier-micro, so the clamp NEVER applied — only the
+      legacy 8px tier value (or the JS inline) was ever live. Proven: removing
+      the tier class jumped SWE 412 code 8px→15.75px. !important makes the
+      clamp beat every legacy tier font-size in one stroke (debt neutralised,
+      not deleted piecemeal). The JS shrink correspondingly sets its inline
+      font with priority 'important' (useFitCard applyScale) so inline-important
+      still wins over css-important when a word must shrink — deterministic
+      two-layer ownership: CSS clamp baseline, JS shrink override.
+   2. Moderate ceilings + reach. Cap raised 16→19px (code) — "moderate," per
+      the user — and the cqh/cqw coefficients raised so a genuinely big card
+      REACHES the cap instead of stalling low. Computed from the real SWE 412
+      box (container 241×300): 8cqw = 19.3 → cap 19 (was 6cqw = 14.5, and even
+      that was discarded by the tier rule). Dense narrow lanes still resolve to
+      the 5px floor (their cqw is tiny) and the JS net shrinks below if needed.
+      min(cqh,cqw) keeps it whichever-dimension-binds, so short-wide cards size
+      by height (11cqh) and tall-narrow by width (8cqw). */
+/* NEW-FU-168 (Phase 76 R2): inline-size (NOT size). The `cqh` height unit under
+   `container-type: size` resolves against the CONTENT box (card height minus
+   padding); useFitCard reserves a large vertical chrome band as padding on
+   short cards, collapsing that box and starving the font (the cross-engine
+   void — reproduced in Chromium too, not WebKit-only). We keep cqw (width works
+   correctly) via inline-size, and feed the HEIGHT term from JS as --sb-h
+   (card.clientHeight, padding-split-invariant). See the font rules below. */
+.sblock { container-type: inline-size; }
+/* NEW-FU-165 (Phase 76 R1): option B — MODERATE ceilings (user's choice). The
+   clamp() form IS the continuously-proportional model requested: floor →
+   min(cqh,cqw) (font = a fraction of the card's own size, so it grows/shrinks
+   smoothly WITH the card) → ceiling (the refined "max so it never billboards").
+   Verified proportional curve at this setting: tiny cards ≈5px, small ≈7-8px,
+   medium ≈11-13px, the big SWE 412 ≈20px — smooth across the whole size range.
+   Small/dense lanes resolve far below the ceiling (their cqw/cqh are small) and
+   the JS Range-measured net shrinks any long word that would still clip. Each
+   token's ceiling is proportional to the code so the hierarchy (code > time/
+   instr/venue > no-instr) holds at every card size. */
+/* NEW-FU-168 (Phase 76 R2): height term = calc(var(--sb-h) * k), where --sb-h is
+   the card's clientHeight published by useFitCard. Coefficients calibrated so a
+   full-height fraction reproduces the tall-card sizing that always worked
+   (0.13·contentbox ≈ 0.13·0.84·H ≈ 0.11·H) while FIXING short cards (the box is
+   no longer the padding-shrunk content box). Verified: 4-row stack fits the
+   post-chrome content box at every height (≈3px margin on the worst 104px case),
+   so no vertical overflow despite the width-only JS net. min(heightTerm, cqw)
+   keeps 2-D proportionality: short-wide cards bind on height, tall-narrow on
+   width. Fallback 900px = "size by width until JS publishes height" (set in a
+   layout effect → no flash). Ceilings unchanged (option B). */
+/* NEW-FU-170 (Phase 76 R3): FILL + ANTI-BILLBOARD tuning. Measurement at the
+   zoomed-out floor showed fillV ≈ 0.40 on every archetype — text occupied only
+   ~40% of the card, the "blank unused space, small text" the user reported. Two
+   compounding causes, both fixed here + in useFitCard:
+     1. The height coefficient (0.11) was over-conservative → font small by
+        construction. Raised so the 4-row stack fills ~0.60 of the card.
+        code 0.11→0.13, time/instr/venue 0.092→0.11, no-instr 0.075→0.09.
+     2. (in useFitCard NEW-FU-170) the chrome padding reserve was cut from
+        0.20·H+5 to 0.15·H+3 per side, returning the blank band to the text.
+   ANTI-BILLBOARD: the ceiling is lowered code 20→18, others 17→16. The "absurd
+   large" cards were medium-SQUARE cards whose height term beat the old 20px cap;
+   18 reads as a confident-not-shouting title. (This revisits the R1 "moderate
+   20" pick in light of the new billboard feedback — easy to nudge back up.)
+   The cqw width term is unchanged (still the engine-stable WIDTH guard), and the
+   ceilings are calibrated so on a tall default-zoom card the font caps at the
+   ceiling (proportionality holds) while short/dense cards bind on height or cqw.
+   Verified: no vertical overflow at this fill level (4-row stack < content box
+   on the worst short cards) — see the matrix in the R3 report. */
+/* NEW-FU-175 (Phase 76 R3 REVERT): coefficients + ceilings back to the R2 values
+   the user confirmed good. R3 raised them (0.13/0.11, ceiling 18/16) to push
+   fill; combined with the now-disabled grow path that clipped text in Safari, so
+   reverted. code 0.11/ceil 20, others 0.092/ceil 17, no-instr 0.075/ceil 15. */
+/* NEW-FU-176 (Phase 76 R4): cqw nudge tried and BACKED OUT — measured no-op
+   (wide cards are height-bound so min() ignores the width term; narrow cards are
+   floored or width-shrunk). Restored to the proven R2 values. Wide-card fill
+   requires a height-side, aspect-aware lever (see useFitCard arithmetic plan),
+   not a width coefficient. */
+/* NEW-FU-181 (Phase 76 R5b): coefficients RESTORED to proven R2 values. The R5
+   raise (0.13/0.11) only helped floor-zoom (height-bound) cards and no-op'd on
+   tall default-zoom cards (capped by the 20px ceiling), while the height
+   shrink-net it required misfired on wrapped cards. Net: no safe font win
+   available — reverted so nothing is worse than the R2 state the user approved.
+   useFitCard is back to width-only shrink (NEW-FU-181). */
+/* NEW-FU-186 (Phase 77 REDESIGN): the clamp()/--sb-h/cqw per-token font system
+   is REMOVED. Font size is now FIXED-natural inside .sblock-fit, and the whole
+   wrapper is transform:scale()'d to fit by useFitCard. See the .sblock-fit
+   block at the end of this file. */
+
+/* ═══════════════════════════════════════════════════════════════════════
+   NEW-FU-185 (Phase 77): WIDE-SHORT font fill. useFitCard adds .sb-wide to cards
+   ≥200px wide AND ≤95px tall (SWE 587/503 264×58 etc.) and reclaims their chrome
+   padding (the reserve was ~55% of a 58px card for corner tags the centered text
+   never reaches on a wide card). With that height freed, these height-bound cards
+   can carry a larger font via a higher --sb-h coefficient. Bounds chosen so 4
+   single-line rows provably fit the reclaimed content box at the shortest wide
+   height (~47px) WITHOUT a JS height net: at 47px, code 0.17 + 3×0.15 tokens, ×
+   line-height 1.15, ≈ 33.5px < ~39px content box — comfortable margin, no
+   vertical clip. On a 58px card the code rises ~6.4px → ~9.9px (+55%). cqw width
+   terms are unchanged (won't bind — wide cards have width to spare) and the
+   width shrink-net still guards horizontal clips. Specificity .sblock.sb-wide
+   .sblock-code (0,2,0) !important beats the base baseline (0,1,0) !important. */
+/* NEW-FU-186 (Phase 77 REDESIGN): the .sb-wide clamp font rules are REMOVED —
+   wide cards now reflow into a 2×2 grid inside .sblock-fit (end of file) and the
+   shared transform:scale() enlarges them to fill the width. */
+
+/* NEW-FU-183 (Phase 76 R6 REVERT): .sb-wide grid-layout rules removed — the
+   2-column layout made wide-short cards worse (2.4px font), so the whole approach
+   was backed out. Stable R2 (single-column flex, CSS clamp baseline, width-only
+   JS shrink) is the final state. */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   NEW-FU-186 (Phase 77 REDESIGN): TRANSFORM-SCALE 2-D AUTO-FIT.
+   All in-flow text lives in .sblock-fit, laid out at a FIXED natural font size.
+   useFitCard measures its natural box (offsetWidth/Height — WebKit-reliable) and
+   sets transform: translate(-50%,-50%) scale(S), S = min(availW/natW, availH/natH)
+   clamped to [0.3, 1.7]. Provably: never clips (S ≤ both ratios), never billboards
+   (S ≤ 1.7 → code ≤ ~22px), fills the binding axis. No cqh/cqw, no scrollHeight,
+   no --sb-h: nothing engine-divergent, so Chromium == Safari.
+   ═══════════════════════════════════════════════════════════════════════════ */
+.sblock-fit {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(1);
+  transform-origin: center center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: max-content;
+  /* NEW-FU-189 (Phase 77): natural width is bounded by a FIXED px ceiling (not
+     card-relative). A name longer than 150px wraps; everything else is its own
+     width. Constant bound ⇒ the measured natural box is deterministic and
+     independent of the card ⇒ measure and render agree ⇒ no clip. */
+  max-width: 150px;
+  text-align: center;
+  gap: 1px;
+  pointer-events: none;   /* clicks fall through to the card */
+}
+/* Fixed NATURAL sizes (scale does the rest). nowrap + block + no line-clamp so
+   each row is ONE whole line and the measured natural width is deterministic;
+   these override the wrapping/clamp base rules for tokens inside the wrapper. */
+.sblock-fit .sblock-header   { display: block; padding: 0; margin: 0; }
+/* NEW-FU-189 (Phase 77): ALL rows nowrap + a fixed natural max-width in PX (not
+   cqw). The transform-scale architecture REQUIRES a fixed, self-contained
+   natural box: content size must NOT depend on the card (cqw made natW relative
+   → feedback loop → the wrap regression: 251 0→30 clips). So instructor/venue
+   wrap only against a constant 150px ceiling — a fixed bound, independent of the
+   card — which caps a very long name's natural width so the scale can fit it,
+   while keeping the measured box deterministic. code/time stay strictly nowrap
+   (atomic identity tokens). word-break:keep-all = never mid-word. */
+.sblock-fit .sblock-code     { font-size: 13px !important; white-space: nowrap; display: block; overflow: visible; }
+.sblock-fit .sblock-time     { font-size: 11px !important; white-space: nowrap; display: block; overflow: visible; margin: 0; }
+.sblock-fit .sblock-time > span { white-space: nowrap; }
+.sblock-fit .sblock-instr,
+.sblock-fit .sblock-venue,
+.sblock-fit .sblock-no-instr {
+  font-size: 11px !important;
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: keep-all;
+  display: block;
+  overflow: visible;
+  text-align: center;
+  margin: 0;
+  max-width: 150px;      /* FIXED px ceiling — constant, not card-relative */
+}
+.sblock-fit .sblock-no-instr { font-size: 10px !important; }
+
+/* WIDE-SHORT cards: reflow the 4 rows into a 2×2 grid so the content's SHAPE is
+   wide (matching the box) — the shared scale-to-fit then enlarges it to fill the
+   width, killing the "empty left & right". code|time on row 1, instr|venue row 2.
+   NEW-FU-200 (Phase 79 Rule 1): EXCLUDE .sb-widelarge (the red short evening
+   lectures SWE 587/503). On their taller boxes a 2-column spread is WIDER than the
+   card so the scale stayed width-bound and small (~12.6px); dropping them to the
+   default 1-column flex stack makes the content narrower, so the shared
+   scale-to-fit + the higher MAX_S_REDLARGE cap enlarges them to ~18.9px. The green
+   long card (.sb-bigsq, SWE 412) STAYS 2-column here so its smaller type still
+   fills the width instead of floating as a void. */
+.sblock.sb-wide .sblock-fit {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  justify-items: center;
+  column-gap: 10px;
+  row-gap: 1px;
+  /* NEW-FU-195 (Phase 78 cont. Rule 1): wide 2-column cards FILL their width.
+     The base .sblock-fit caps natural width at 150px (needed for 1-column cards
+     to keep a deterministic natural box). On a WIDE card the card is far wider
+     than 150px, so a 150px-capped content block left huge horizontal blank
+     (measured fillW 0.19 on a 268px card) — and because these cards are short,
+     HEIGHT bound the scale before width could ever fill. Raising the wide-card
+     cap to 360px lets the two columns spread across the card so the content's
+     natural width tracks the card width, the scale-to-fit then fills horizontally,
+     and the columns sit further apart (more readable). Still a FIXED px bound
+     (not card-relative) so the natural box stays deterministic — no feedback
+     loop / no clip. Wider column-gap scales the visual separation with it. */
+  max-width: 360px;
+  /* NEW-FU-201 (Phase 79 Rule 1): gap tightened 18 → 12. The red §/badge bump
+     widens the measured gutter a hair on the width-bound wideAR cards (SWE
+     316/101), which had nudged their code DOWN 0.3px; a narrower 2-col gap shrinks
+     the content's natural width so the scale-to-fit grows the code back UP past its
+     original size — net BIGGER red type, as asked, with the bigger tags kept. */
+  column-gap: 12px;
+}
+.sblock.sb-wide .sblock-fit .sblock-header     { grid-column: 1; grid-row: 1; }
+.sblock.sb-wide .sblock-fit .sblock-time       { grid-column: 2; grid-row: 1; }
+.sblock.sb-wide .sblock-fit .sblock-instr,
+.sblock.sb-wide .sblock-fit .sblock-no-instr   { grid-column: 1; grid-row: 2; }
+.sblock.sb-wide .sblock-fit .sblock-venue      { grid-column: 2; grid-row: 2; }

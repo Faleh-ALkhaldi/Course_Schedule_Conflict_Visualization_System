@@ -2,17 +2,15 @@ import React, { useRef, useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useDraggable } from '@dnd-kit/core';
 import { LEVEL_COLORS, HARD_CONFLICT_BG, SOFT_CONFLICT_BG, useApp, sectionLabel } from '../../context/AppContext.jsx';
-// NEW-FU-295 (Phase 59): per-element font-size auto-fit. Each card's
-// three text tokens (course code, instructor, venue) measure their own
-// rendered width vs container width on every resize and shrink the
-// font until the content fits — the tier classes give a coarse start
-// point, this hook refines per content length.
-import { useFitText } from '../../hooks/useFitText.js';
-// NEW-FU-298 (Phase 60): content-aware rendering strategy. Runs
-// BEFORE useFitText: picks the best string variant ("KHALID ALJASSER"
-// → "KHALID\nALJASSER" → "K. ALJASSER" → "K.A.") for the current
-// container size, then useFitText sizes whatever was picked.
-import { useRenderStrategy } from '../../hooks/useRenderStrategy.js';
+// NEW-FU-309 (Phase 66): card-level TWO-DIMENSIONAL auto-fit. Replaces
+// the Phase 59-64 per-element useFitText + Phase 60 useRenderStrategy
+// wrap-injection in the grid. A single hook shrinks every in-flow token
+// uniformly until the whole card fits both its height and width — fixing
+// the vertical clipping (venue "59-1003" → "59") that width-only fitting
+// caused. CSS now handles wrapping naturally (white-space: normal), so
+// shrinking collapses 2-line wraps back to one line when they fit.
+// (useFitText / useRenderStrategy remain in use by the sidebar.)
+import { useFitCard } from '../../hooks/useFitCard.js';
 import './SectionBlock.css';
 
 // NEW-FU-144 + FU-148: smart viewport-aware popover positioner. Tries
@@ -72,42 +70,13 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
   const cardRef = useRef(null);
   const popoverRef = useRef(null);
 
-  // NEW-FU-295 (Phase 59): one ref per auto-fit target. Each text
-  // element measures itself and shrinks its own font as needed; the
-  // three are independent so a long instructor name doesn't drag the
-  // course code or venue along for the shrink.
-  const codeRef  = useRef(null);
-  const instrRef = useRef(null);
-  const venueRef = useRef(null);
-  // NEW-FU-305 (Phase 63): floors lowered further to support
-  // "no mid-word break ever." Long single words at narrow lanes
-  // need the font to shrink as much as physics allows.
-  //   Course code: 4 → 3 px.
-  //   Instructor + venue: 3 → 2 px.
-  // Below these floors the CSS clip-at-card-edge handles any
-  // remaining overflow — strictly better than mid-word break.
-  useFitText(codeRef,  { minPx: 3 });
-  useFitText(instrRef, { minPx: 2 });
-  useFitText(venueRef, { minPx: 2 });
-  // NEW-FU-306 (Phase 64): every other text token gets the same
-  // auto-fit treatment. Time floor 2 px (compact `HH:MM–HH:MM`),
-  // section + badge floor 3 px (short tokens that should stay
-  // distinguishable). Without these the time field was wrapping
-  // at the dash, line-clamp clipping line 2, leaving "11:00-1" with
-  // the rest hidden.
-  const timeRef    = useRef(null);
-  const sectionRef = useRef(null);
-  const badgeRef   = useRef(null);
-  useFitText(timeRef,    { minPx: 2 });
-  useFitText(sectionRef, { minPx: 3 });
-  useFitText(badgeRef,   { minPx: 3 });
-  // NEW-FU-298 (Phase 60): per-token content strategy. Runs against
-  // each text element's measured width — different from useFitText's
-  // role (font shrink). The hook returns the transformed display
-  // string ("KHALID ALJASSER" → "KHALID\nALJASSER" → "K. ALJASSER"
-  // → "K.A."), and useFitText then sizes whatever was picked.
-  // Both hooks share the same ref — they're observing the same
-  // DOM node from two different angles.
+  // NEW-FU-309 (Phase 66): a single card-level fit replaces the six
+  // per-element useFitText hooks (code/time/instr/venue/section/badge)
+  // and the useRenderStrategy wrap-injection. It shrinks every in-flow
+  // token uniformly until the card fits both height and width. Tokens
+  // are queried by class inside the hook, so no per-element refs are
+  // needed — just the card ref.
+  useFitCard(cardRef);
 
   const positionPopover = useCallback(() => {
     if (activeDragging) return;
@@ -206,19 +175,28 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
   const secLblAria = sectionLabel(section, { withSection: false });
   const instrName  = section.instructorName ?? section.instructor_name ?? '';
   const venueName  = section.venueName      ?? section.venue_name      ?? '';
-  // NEW-FU-298 (Phase 60) → NEW-FU-299 (Phase 61): per-token rendering
-  // strategy. The Phase 60 constant font-hint was a flawed proxy for
-  // the actual rendered font (real font lives in the cascade-resolved
-  // computed style, varying by tier). The hook now reads
-  // `getComputedStyle(el).fontSize` internally and feeds the TRUTH to
-  // the picker — no more caller hints to mistune.
-  const displayInstr = useRenderStrategy(instrName, instrRef, 'instructor');
-  const displayVenue = useRenderStrategy(venueName, venueRef, 'venue');
-  const displayCode  = useRenderStrategy(courseCode, codeRef, 'code');
+  // NEW-FU-309 (Phase 66): render the raw full strings. The Phase 60-61
+  // useRenderStrategy wrap-injection is retired in the grid — CSS now
+  // wraps naturally (white-space: normal, word-break: keep-all) and
+  // useFitCard shrinks the font until the whole card fits. Full text is
+  // always in the DOM; CSS decides where (if anywhere) it wraps.
   const level      = section.academicLevel  ?? section.academic_level  ?? 'Freshman';
   const startTime  = (section.startTime ?? section.start_time ?? '').substring(0,5);
   const endTime    = (section.endTime   ?? section.end_time   ?? '').substring(0,5);
   const secType    = section.sectionType ?? section.section_type ?? 'Lec';
+
+  // NEW-FU-200 (Phase 79): publish the meeting DURATION in minutes so useFitCard
+  // can split "large near-square" cards into GREEN (long classes — SWE 412 is
+  // 160min, capped smaller so the big card reads refined) vs RED (short evening
+  // lectures — SWE 587/503 are 75min, enlarged + 1-column). Duration is
+  // ZOOM-INVARIANT, so the split is identical at every zoom — unlike pixel aspect
+  // ratio, which drifts as the grid's px-per-minute changes and would flip the
+  // cards' classification at deep zoom-in / zoom-out.
+  const durMin = (() => {
+    const p = (t) => { const [h, m] = String(t).split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+    const d = p(endTime) - p(startTime);
+    return Number.isFinite(d) && d > 0 ? d : 0;
+  })();
 
   const hasHard    = conflicts.some(c => c.severity === 'Hard');
   const hasSoft    = conflicts.some(c => c.severity === 'Soft');
@@ -255,13 +233,10 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
   // Course / Teacher / Venue views.
   const badgeText = String(secType).toUpperCase();
 
-  // NEW-FU-306 (Phase 27) → NEW-FU-298 (Phase 60): the abbreviation
-  // decision moved out of SectionBlock entirely. The Phase 60
-  // useRenderStrategy hook computes the displayInstr / displayVenue
-  // strings above based on container width — passing through the
-  // full strategy ladder (full → wrap → abbreviate → initials). The
-  // old `displayInstrName = instrName` passthrough is no longer
-  // needed.
+  // NEW-FU-309 (Phase 66): instructor/venue render as raw full strings.
+  // No abbreviation (removed Phase 62), no JS wrap-injection (removed
+  // Phase 66). CSS wraps; useFitCard sizes. The full name is always in
+  // the DOM and the hover tooltip carries it verbatim.
 
   // NEW-FU-144: combine the dnd-kit ref with our local cardRef so we can
   // measure the card for popover positioning.
@@ -319,66 +294,70 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
          yellow = Lab, preserving the original color encoding. */
       data-section-type={secType}
       data-section-num={secNum}
+      /* NEW-FU-200 (Phase 79): zoom-invariant meeting duration (minutes) read by
+         useFitCard to split green (long) vs red (short) large near-square cards. */
+      data-dur-min={durMin}
       {...listeners}
       {...attributes}
     >
-      <div className="sblock-header">
-        <span className="sblock-code" ref={codeRef}>{displayCode}</span>
-        <span className="sblock-section" ref={sectionRef}>{secLbl}</span>
-        <span className="sblock-type-badge" ref={badgeRef} style={{
-          background: secType === 'Lab' ? '#fde68a' : '#dbeafe',
-          color:      secType === 'Lab' ? '#78350f' : '#1e3a8a',
-        }}>{badgeText}</span>
-        {/* NEW-FU-272: per-day quick-delete (✕). Removes ONLY this meeting
-            row, leaving the rest of the section group intact. Disabled
-            on archived schedules (mutations blocked upstream). Hidden by
-            CSS at tier-micro/tiny where there's no room for the affordance
-            without overlapping the header text. */}
-        {onDelete && !isArchived && (
-          <button
-            type="button"
-            className="sblock-delete-row"
-            title="Delete this meeting day (leaves rest of section)"
-            onClick={(e) => {
-              e.stopPropagation();
-              // NEW-FU-301 (Phase 26): hide popover synchronously (single
-              // hidePopover variant — the debounced/immediate split went
-              // away with the popover button).
-              hidePopover();
-              onDelete(section, 'row');
-            }}
-            // Block dnd-kit pointer listeners on the button — without this,
-            // clicking ✕ also starts a drag.
-            onPointerDown={(e) => e.stopPropagation()}
-          >×</button>
+      {/* NEW-FU-147 (Phase 72): section number in the absolute top-right
+          corner, DYNAMICALLY sized from --sb-code-px (published by useFitCard)
+          so it scales with the card's typography at every density. Rendered on
+          EVERY card; the symmetric header reserve keeps the centered code
+          clear of it. */}
+      <div className="sblock-secnum">{secLbl}</div>
+      {/* NEW-FU-186 (Phase 77 REDESIGN): corner chrome (§ / LEC-LAB badge / ✕)
+          are DIRECT children of the card, OUTSIDE the .sblock-fit wrapper, so the
+          transform:scale() applied to .sblock-fit never distorts them. They are
+          absolutely positioned in the corners (CSS) and sized from --sb-code-px /
+          --sb-chrome-px published by useFitCard. */}
+      <span className="sblock-type-badge" style={{
+        background: secType === 'Lab' ? '#fde68a' : '#dbeafe',
+        color:      secType === 'Lab' ? '#78350f' : '#1e3a8a',
+      }}>{badgeText}</span>
+      {/* NEW-FU-272: per-day quick-delete (✕). Removes ONLY this meeting row,
+          leaving the rest of the section group intact. Disabled on archived
+          schedules (mutations blocked upstream). Hover-revealed via CSS. */}
+      {onDelete && !isArchived && (
+        <button
+          type="button"
+          className="sblock-delete-row"
+          title="Delete this meeting day (leaves rest of section)"
+          onClick={(e) => {
+            e.stopPropagation();
+            hidePopover();
+            onDelete(section, 'row');
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >×</button>
+      )}
+      {/* NEW-FU-186 (Phase 77 REDESIGN): all in-flow text lives in ONE wrapper
+          that useFitCard measures (offsetWidth/Height — WebKit-reliable) and
+          scales via transform to fit the card on both axes. scale = min(availW/
+          natW, availH/natH) cannot clip; capped at MAX_S so it cannot billboard;
+          grows to the binding edge so it fills the card. The wrapper is
+          width:max-content + nowrap rows (CSS), so each row stays whole and the
+          measured box is the content's true natural size. .sb-wide reflows these
+          into a 2×2 grid (code|time / instr|venue) so wide cards' content is wide,
+          not a tall narrow column — fixing the "empty left & right". */}
+      <div className="sblock-fit">
+        <div className="sblock-header">
+          <span className="sblock-code">{courseCode}</span>
+        </div>
+        <div className="sblock-time">
+          <span>{startTime}</span>
+          <span className="sblock-time-dash">–</span>
+          <span>{endTime}</span>
+        </div>
+        {instrName && (
+          <div className="sblock-instr">{instrName}</div>
         )}
+        {venueName && (
+          <div className="sblock-venue">{venueName}</div>
+        )}
+        {!instrName && <div className="sblock-no-instr">⚠ No instructor</div>}
+        {!venueName && <div className="sblock-no-instr">⚠ No venue</div>}
       </div>
-      {/* NEW-FU-402 (Phase 42): render time as two atomic spans
-          separated by an en-dash. The parent div has white-space:
-          normal; each span has white-space: nowrap. This lets the
-          browser break between spans (or at the dash) when the
-          card is narrow — but NEVER mid-HH:MM (so "09:50" never
-          becomes "09" + clipped). At wide cards, both spans flow
-          on one line; at narrow cards, they wrap to two lines. */}
-      <div className="sblock-time" ref={timeRef}>
-        <span>{startTime}</span>
-        <span className="sblock-time-dash">–</span>
-        <span>{endTime}</span>
-      </div>
-      {/* NEW-FU-298 (Phase 60): white-space:pre-line so the "\n" the
-          strategy may emit ("KHALID\nALJASSER") renders as a real
-          line break. The existing CSS rules use white-space:normal,
-          which collapses \n into a space — we'd lose the wrap. */}
-      {instrName && (
-        <div className="sblock-instr" ref={instrRef}
-          style={{ whiteSpace: 'pre-line' }}>{displayInstr}</div>
-      )}
-      {venueName && (
-        <div className="sblock-venue" ref={venueRef}
-          style={{ whiteSpace: 'pre-line' }}>{displayVenue}</div>
-      )}
-      {!instrName && <div className="sblock-no-instr">⚠ No instructor</div>}
-      {!venueName && <div className="sblock-no-instr">⚠ No venue</div>}
       {hasConflict && (
         <div className="sblock-dots">
           {hasHard && <div className="sblock-dot hard" title="Hard conflict" />}

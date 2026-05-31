@@ -29,3 +29,6 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# local tooling state
+.checkpoints/
