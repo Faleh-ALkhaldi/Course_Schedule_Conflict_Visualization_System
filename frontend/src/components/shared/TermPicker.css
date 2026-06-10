@@ -68,7 +68,11 @@
   font-weight: 700;
   letter-spacing: 0.02em;
   padding: 2px 7px;
-  background: rgba(255, 255, 255, 0.18);
+  /* A dark inset (not a white one) on the teal-700 chip: the white tint used to
+     lighten the pill toward the near-white code text, dropping it to 3.7:1. The
+     dark tint darkens the field under the light code -> AA in both themes. The
+     light border keeps the inset edge. */
+  background: rgba(0, 0, 0, 0.22);
   border: 1px solid rgba(255, 255, 255, 0.28);
   border-radius: 6px;
   color: #f0fdfa;
