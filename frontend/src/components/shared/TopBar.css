@@ -188,3 +188,14 @@
   outline: 2px solid var(--teal-300);
   outline-offset: 2px;
 }
+
+/* Responsive: phones — let the fixed bar scroll horizontally instead of clipping
+   its controls; drop the rigid min-widths so brand/actions size to content. */
+@media (max-width: 768px) {
+  .topbar { overflow-x: auto; overflow-y: hidden; padding: 0 12px; gap: 12px; scrollbar-width: none; }
+  .topbar::-webkit-scrollbar { display: none; }
+  /* Keep each control at its natural width so the bar scrolls horizontally
+     instead of compressing the items on top of one another. */
+  .topbar > * { flex-shrink: 0; }
+  .topbar-views { flex: 0 0 auto; justify-content: flex-start; }
+}

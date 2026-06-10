@@ -153,3 +153,13 @@
    info/error pills — slightly darker amber so it stays distinct from
    success-green and doesn't get mistaken for an error. */
 .toast-warn    { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+
+/* ── Responsive: desktop primary, phones secondary (graceful) ─────────────────
+   Gated behind a narrow-width query so the desktop layout above is unchanged.
+   On phones the sidebar stacks above the grid and the page scrolls vertically;
+   the dense weekly grid keeps its geometry and scrolls inside its own container. */
+@media (max-width: 768px) {
+  .scheduler-root { height: auto; min-height: 100vh; overflow: visible; }
+  .scheduler-body { flex-direction: column; height: auto; overflow: visible; }
+  .scheduler-main { overflow: visible; }
+}
