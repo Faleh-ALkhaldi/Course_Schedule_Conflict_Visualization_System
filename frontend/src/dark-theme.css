@@ -76,3 +76,26 @@
 /* Sidebar add/delete glyphs — lift onto the dark background. */
 [data-theme="dark"] .sp-add-btn { color: #a5b4fc; border-color: #818cf8; }
 [data-theme="dark"] .sp-del-btn { color: #9aa8c0; }
+
+/* Venue type tags — translucent light-tint chips with dark text in light mode.
+   In dark the tint is dark, so the text (hall used the remapped --navy-700;
+   lab/multi used literal dark hues) must go light to stay readable. */
+[data-theme="dark"] .sp-venue-tag.hall  { color: #7fb1ea; }
+[data-theme="dark"] .sp-venue-tag.lab   { color: #5eead4; }
+[data-theme="dark"] .sp-venue-tag.multi { color: #c5a6e9; }
+
+/* Blast radius: --navy-800/900 used as primary/strong TEXT (it was "dark text on
+   a light surface") goes dark-on-dark once those surfaces are themed. These are
+   all heading/strong/code text on modal + sidebar dark surfaces → light them.
+   (navy stays a dark BACKGROUND for the Save button / Suggest header, untouched.) */
+[data-theme="dark"] .sm-end-preview strong,
+[data-theme="dark"] .sm-conflict-list strong,
+[data-theme="dark"] .sm-confirm-text strong,
+[data-theme="dark"] .sm-secnum-prefix,
+[data-theme="dark"] .exp-title,
+[data-theme="dark"] .suggest-code,
+[data-theme="dark"] .suggest-num-input,
+[data-theme="dark"] .suggest-autochoose-label strong,
+[data-theme="dark"] .modal-title,
+[data-theme="dark"] .modal-question,
+[data-theme="dark"] .sp-course-code { color: var(--fg); }
