@@ -191,7 +191,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                       </select>
                       {!instrId && (
                         <div style={{
-                          marginTop:4, fontSize:'.72rem', color:'#b45309', fontWeight:500,
+                          marginTop:4, fontSize:'.72rem', color:'var(--warn-fg)', fontWeight:500,
                         }}>
                           Required — pick an instructor to enable the download.
                         </div>
@@ -231,7 +231,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                       </select>
                       {!venueId && (
                         <div style={{
-                          marginTop:4, fontSize:'.72rem', color:'#b45309', fontWeight:500,
+                          marginTop:4, fontSize:'.72rem', color:'var(--warn-fg)', fontWeight:500,
                         }}>
                           Required — pick a venue to enable the download.
                         </div>
@@ -337,14 +337,14 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                     {stagedFormat === 'image' && (
                       <span style={{
                         marginLeft:8, padding:'1px 8px', borderRadius:10,
-                        background:'#fee2e2', color:'#b91c1c',
+                        background:'var(--danger-bg)', color:'var(--danger-fg)',
                         fontSize:'.72rem', fontWeight:600,
                       }}>NOT IMPORTABLE</span>
                     )}
                     {stagedFormat === null && (
                       <span style={{
                         marginLeft:8, padding:'1px 8px', borderRadius:10,
-                        background:'#fef3c7', color:'#92400e',
+                        background:'var(--warn-bg)', color:'var(--warn-fg)',
                         fontSize:'.72rem', fontWeight:600,
                       }}>UNSUPPORTED TYPE</span>
                     )}

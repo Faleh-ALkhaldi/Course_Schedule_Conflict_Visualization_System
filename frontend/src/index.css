@@ -90,6 +90,12 @@
   --lvl-se-bg:#e8e0f5; --lvl-se-bd:#6b3fa0; --lvl-se-tx:#3b1f5e;
   --lvl-gr-bg:#EADDC1; --lvl-gr-bd:#6B3FA0; --lvl-gr-tx:#3d0f21;
   --conflict-soft-bg:#fffacd; --conflict-hard-bg:#ffd5d5;
+
+  /* Semantic status chip tokens — used by inline-styled badges that can't reach
+     a class-based dark override (e.g. the export staged-file badges). Light
+     values equal the original literals, so light mode is byte-identical. */
+  --warn-bg:#fef3c7; --warn-fg:#92400e;
+  --danger-bg:#fee2e2; --danger-fg:#b91c1c;
 }
 
 /* ── Dark theme ──────────────────────────────────────────────────────────────
@@ -159,6 +165,8 @@
   --lvl-se-bg:#241a3a; --lvl-se-bd:#ad8ee2; --lvl-se-tx:#d9c7f5;
   --lvl-gr-bg:#2e2416; --lvl-gr-bd:#b08a55; --lvl-gr-tx:#ead8b8;
   --conflict-soft-bg:#33280a; --conflict-hard-bg:#3a1a1a;
+  --warn-bg:#2a2410; --warn-fg:#fcd34d;
+  --danger-bg:#3a1a1a; --danger-fg:#fca5a5;
 }
 
 /* ── Reset ───────────────────────────────────────────────────────────────────── */
