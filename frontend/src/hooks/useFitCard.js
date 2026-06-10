@@ -691,7 +691,11 @@ export function useFitCard(cardRef) {
     // metrics, so the swap can't leave stale sizing or a clip. Guarded for SSR /
     // browsers without the Font Loading API.
     if (typeof document !== 'undefined' && document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(() => { if (card.isConnected) schedule(); });
+      document.fonts.ready.then(() => { if (card.isConnected) schedule(); })
+      // NEW-FU-508 (Phase 123): the Font Loading API may reject (e.g. document
+      // teardown mid-load) — swallow it so it never surfaces as an unhandled
+      // promise rejection; the observers still drive re-fits regardless.
+      .catch(() => {});
     }
 
     return () => {

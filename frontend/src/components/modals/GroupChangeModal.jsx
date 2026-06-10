@@ -1,4 +1,6 @@
 import React, { useEffect } from 'react';
+// NEW-FU-503 (Phase 123): SVG icon replaces the ⚠️ emoji in the title.
+import Ico from '../shared/Icons.jsx';
 import { sectionLabel } from '../../context/AppContext.jsx';
 import './SectionModal.css';
 
@@ -40,7 +42,7 @@ export default function GroupChangeModal({ sec, newDay, newStartTime, actualSibl
     <div className="sm-overlay" onClick={e => e.target===e.currentTarget && onCancel()}>
       <div className="sm-card" style={{ maxWidth:460, borderTopColor:'var(--amber-500)' }}>
         <div className="sm-header">
-          <h2 className="sm-title">⚠️ Change Day Group?</h2>
+          <h2 className="sm-title"><Ico name="alert" /> Change Day Group?</h2>
           <button className="sm-close" onClick={onCancel}>×</button>
         </div>
 

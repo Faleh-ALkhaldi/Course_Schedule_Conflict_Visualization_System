@@ -261,7 +261,7 @@ The system exports schedules to Excel (`.xlsx`) in three user-facing formats:
 | Venue Grid     | Visual weekly grid for a selected lecture hall or laboratory.                        |
 
 Visual-grid exports use 5-minute time slots from 07:00 to 22:00 (the in-app grid uses
-30-minute slots with 5-minute drag-snap).
+30-minute slots with 15-minute drag-snap).
 
 ---
 

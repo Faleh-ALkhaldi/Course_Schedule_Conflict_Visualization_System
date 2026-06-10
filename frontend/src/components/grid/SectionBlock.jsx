@@ -1,4 +1,6 @@
 import React, { useRef, useCallback, useEffect, useState } from 'react';
+// NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
+import Ico from '../shared/Icons.jsx';
 import { createPortal } from 'react-dom';
 import { useDraggable } from '@dnd-kit/core';
 import { LEVEL_COLORS, HARD_CONFLICT_BG, SOFT_CONFLICT_BG, useApp, sectionLabel } from '../../context/AppContext.jsx';
@@ -407,9 +409,9 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
           <div className="sblock-popover-title">
             {courseCode} {secLbl} <span className="sblock-popover-type">{badgeText}</span>
           </div>
-          <div className="sblock-popover-row">⏱ {startTime}–{endTime}</div>
-          <div className="sblock-popover-row">👤 {instrName || '— no instructor —'}</div>
-          <div className="sblock-popover-row">🏛 {venueName || '— no venue —'}</div>
+          <div className="sblock-popover-row"><Ico name="clock" /> {startTime}–{endTime}</div>
+          <div className="sblock-popover-row"><Ico name="user" /> {instrName || '— no instructor —'}</div>
+          <div className="sblock-popover-row"><Ico name="pin" /> {venueName || '— no venue —'}</div>
           {/* NEW-FU-301 (Phase 26): the "Delete entire section" button
               that used to live here is gone. Whole-section deletion is
               now exclusively the side panel's ✕ button. Card's ✕ is

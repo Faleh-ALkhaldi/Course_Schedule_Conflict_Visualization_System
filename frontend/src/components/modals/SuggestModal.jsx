@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+// NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
+import Ico from '../shared/Icons.jsx';
 import { useApp, LEVEL_COLORS } from '../../context/AppContext.jsx';
 import { suggestRecommend, getCourses } from '../../api/index.js';
 import './SectionModal.css';
@@ -555,7 +557,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
     <div className="sm-overlay" onClick={e => e.target===e.currentTarget && onClose()}>
       <div className="sm-card suggest-card">
         <div className="sm-header">
-          <h2 className="sm-title">✦ Auto-Suggest Schedule</h2>
+          <h2 className="sm-title"><Ico name="sparkles" /> Auto-Suggest Schedule</h2>
           <button className="sm-close" onClick={onClose}>×</button>
         </div>
 
@@ -567,7 +569,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
               defaults sometimes "felt off" — now they know the system
               picked them. */}
           {!loading && !recommendError && capacityWarnings.length === 0 && (
-            <span className="suggest-recommend-badge">✦ Recommendations pre-filled</span>
+            <span className="suggest-recommend-badge"><Ico name="sparkles" /> Recommendations pre-filled</span>
           )}
         </p>
 
@@ -593,7 +595,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
             className="suggest-autochoose-help"
             tabIndex={0}
             title="Auto-choose keeps the rest of each course's settings optimal as you edit. When ON, changing a course's section count auto-adjusts its duration / day-pattern to avoid clashes. When OFF, nothing changes unless you change it."
-          >ⓘ</span>
+          ><Ico name="info" /></span>
         </div>
 
         {/* NEW-FU-264: pre-flight banners. Loading is brief (one DB
@@ -601,7 +603,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
             inline pill rather than a full-screen spinner. */}
         {loading && (
           <div className="suggest-banner suggest-banner-info">
-            ⏳ Computing recommendations…
+            Computing recommendations…
           </div>
         )}
         {/* NEW-FU-312 (Phase 28): EADDRINUSE-aware build-mismatch banner.
@@ -613,7 +615,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
         {buildMismatch && (
           <div className="suggest-banner suggest-banner-warn">
             <div>
-              ⚠️ The backend on port 4000 is running an older build than this page.
+              <Ico name="alert" /> The backend on port 4000 is running an older build than this page.
               Your previous <code>npm run dev</code> likely hit <code>EADDRINUSE</code> and
               the new process crashed without replacing the old one.
             </div>
@@ -664,7 +666,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
         {recommendError && (
           <div className="suggest-banner suggest-banner-warn">
             <div>
-              ⚠ Could not pre-compute recommendations ({recommendError}). Defaults shown — you can still run Suggest.
+              <Ico name="alert" /> Could not pre-compute recommendations ({recommendError}). Defaults shown — you can still run Suggest.
             </div>
             {/* NEW-FU-303 (Phase 27): when the failure is the "older build"
                 signature, give the user a copy-pasteable restart command
@@ -706,7 +708,7 @@ cd backend && npm run dev`}
         )}
         {!loading && capacityWarnings.length > 0 && (
           <div className="suggest-banner suggest-banner-warn">
-            ⚠ {capacityWarnings.length} course{capacityWarnings.length === 1 ? '' : 's'} could not be placed without conflicts. See per-course notes below.
+            <Ico name="alert" /> {capacityWarnings.length} course{capacityWarnings.length === 1 ? '' : 's'} could not be placed without conflicts. See per-course notes below.
           </div>
         )}
 
@@ -823,7 +825,7 @@ cd backend && npm run dev`}
                             backend ("No conflict-free slot found…"). */}
                         {warning && (
                           <div className="suggest-capacity-warning" title="From dry-run greedy pass">
-                            ⚠ {warning.message}
+                            <Ico name="alert" /> {warning.message}
                           </div>
                         )}
                         <div className="suggest-card-body">
@@ -966,7 +968,7 @@ cd backend && npm run dev`}
               will only touch N of M courses." */}
           <button className="sm-btn-save" onClick={handleSubmit}
             disabled={courses.length === 0 || loading || applyToCourseIds.size === 0}>
-            ✦ Run Suggest
+            <Ico name="sparkles" /> Run Suggest
             {applyToCourseIds.size < courses.length && courses.length > 0 && (
               <span className="suggest-apply-badge">
                 {applyToCourseIds.size} of {courses.length}

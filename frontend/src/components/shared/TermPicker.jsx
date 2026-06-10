@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+// NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
+import Ico from './Icons.jsx';
 import * as api from '../../api';
 import { AddTermModal } from './AddTermModal.jsx';
 import { DeleteTermModal } from './DeleteTermModal.jsx';
@@ -264,7 +266,7 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                     so the reader's first scan answers "which term";
                     line 2 holds date + stats + conflict badges. Actions
                     sit on the right, full row height. */}
-                <span className="tp-row-check" aria-hidden="true">{t.isActive ? '✓' : ''}</span>
+                <span className="tp-row-check" aria-hidden="true">{t.isActive ? <Ico name="check" /> : ''}</span>
                 <div className="tp-row-main">
                   <div className="tp-row-line-title">
                     <span className="tp-row-label">{t.label || `Term ${t.code}`}</span>
@@ -272,12 +274,12 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                     {/* NEW-FU-194: archived pill takes precedence over status. */}
                     {t.isArchived && (
                       <span className="tp-status-pill tp-status-archived" title={`Archived${t.archivedAt ? ` on ${new Date(t.archivedAt).toLocaleDateString()}` : ''}`}>
-                        📦 Archived
+                        <Ico name="archive" /> Archived
                       </span>
                     )}
                     {!t.isArchived && (
                       <span className={`tp-status-pill tp-status-${(t.status||'Draft').toLowerCase()}`} title={`Status: ${t.status||'Draft'}`}>
-                        {t.status === 'Finalized' ? '🔒' : ''}{(t.status||'Draft').replace(/([A-Z])/g, ' $1').trim()}
+                        {t.status === 'Finalized' ? <Ico name="lock" /> : null}{(t.status||'Draft').replace(/([A-Z])/g, ' $1').trim()}
                       </span>
                     )}
                   </div>
@@ -297,18 +299,18 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                           glance without cluttering happy-path rows. */}
                       {t.hardConflictCount > 0 && (
                         <span className="tp-conflict-pill tp-conflict-hard" title={`${t.hardConflictCount} hard conflict${t.hardConflictCount === 1 ? '' : 's'}`}>
-                          🔴 {t.hardConflictCount}
+                          ● {t.hardConflictCount}
                         </span>
                       )}
                       {t.softConflictCount > 0 && (
                         <span className="tp-conflict-pill tp-conflict-soft" title={`${t.softConflictCount} soft conflict${t.softConflictCount === 1 ? '' : 's'}`}>
-                          🟡 {t.softConflictCount}
+                          ● {t.softConflictCount}
                         </span>
                       )}
-                      <span title="Courses">📚 {t.courseCount}</span>
-                      <span title="Sections">📋 {t.sectionCount}</span>
-                      <span title="Instructors">👤 {t.instructorCount}</span>
-                      <span title="Venues">🏛 {t.venueCount}</span>
+                      <span title="Courses"><Ico name="book" /> {t.courseCount}</span>
+                      <span title="Sections"><Ico name="clipboard" /> {t.sectionCount}</span>
+                      <span title="Instructors"><Ico name="user" /> {t.instructorCount}</span>
+                      <span title="Venues"><Ico name="pin" /> {t.venueCount}</span>
                     </span>
                   </div>
                 </div>
@@ -331,7 +333,7 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                           setError(err.response?.data?.error || 'Status change failed.');
                         }
                       }}
-                    >{t.status === 'Finalized' ? '🔓' : '🔒'}</button>
+                    >{t.status === 'Finalized' ? <Ico name="unlock" /> : <Ico name="lock" />}</button>
                     {/* NEW-FU-185 + NEW-FU-227: rename. The original
                         ✎ thin-pencil glyph was the only monochrome
                         ASCII button in a cluster of colored emoji
@@ -345,7 +347,7 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                       className="tp-row-edit"
                       title="Rename this term"
                       onClick={e => { e.stopPropagation(); setRenameTarget(t); }}
-                    >🏷️</button>
+                    ><Ico name="tag" /></button>
                     {/* NEW-FU-194: archive button — single-click, idempotent
                         on the server, no confirmation dialog because
                         unarchive is one click away. Hidden on archived
@@ -371,7 +373,7 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                           setError(err.response?.data?.error || 'Archive failed.');
                         }
                       }}
-                    >📦</button>
+                    ><Ico name="archive" /></button>
                     <button
                       type="button"
                       className="tp-row-del"
@@ -383,7 +385,7 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                         if (t.isActive && !altCode(t)) { setError('Add another term before deleting the only one you’re viewing.'); return; }
                         setDelTarget(t);
                       }}
-                    >🗑</button>
+                    ><Ico name="trash" /></button>
                   </div>
                 )}
                 {isAdmin && t.isArchived && (
@@ -403,13 +405,13 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                           setError(err.response?.data?.error || 'Unarchive failed.');
                         }
                       }}
-                    >↩</button>
+                    ><Ico name="restore" /></button>
                     <button
                       type="button"
                       className="tp-row-del"
                       title="Delete this term"
                       onClick={e => { e.stopPropagation(); setDelTarget(t); }}
-                    >🗑</button>
+                    ><Ico name="trash" /></button>
                   </div>
                 )}
               </li>

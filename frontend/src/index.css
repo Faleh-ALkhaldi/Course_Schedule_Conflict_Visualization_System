@@ -87,3 +87,33 @@ body {
 /* ── Utility ─────────────────────────────────────────────────────────────────── */
 .mono { font-family: var(--font-mono); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+
+/* ── NEW-FU-503 (Phase 123): shared inline-SVG icon sizing ──────────────────── */
+/* Icons (components/shared/Icons.jsx) are 1em squares so they scale with the
+   font of the button / label they sit in; the small negative vertical-align
+   seats them on the text baseline like a glyph would. */
+.ui-ico { width: 1em; height: 1em; vertical-align: -0.125em; flex-shrink: 0; }
+
+/* ── NEW-FU-501 (Phase 123): consistent keyboard focus ──────────────────────── */
+/* One global, token-based focus ring so EVERY interactive element shows a
+   visible keyboard indicator (the TopBar tabs/buttons and grid cards had
+   none). Component-specific :focus-visible rules (SidePanel, SectionModal,
+   TermPicker) are more specific and continue to win where they exist. */
+:focus-visible { outline: 2px solid var(--teal-400); outline-offset: 2px; }
+
+/* ── NEW-FU-500 (Phase 123): reduced-motion support ─────────────────────────── */
+/* The app had 13 keyframe animations (incl. the infinite hard-conflict pulse)
+   with no prefers-reduced-motion handling — a WCAG 2.3.3 / vestibular-safety
+   gap. Standard global kill switch: animations collapse to a single instant
+   frame and transitions become effectively immediate. No information is lost:
+   conflicts keep their red border + dot + dashed encodings, toasts still
+   appear, spinners freeze but their disabled-button context still signals
+   loading. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,4 +1,6 @@
 import React, { useEffect, useRef } from 'react';
+// NEW-FU-503 (Phase 123): SVG default icon replaces the ⚠️ emoji default.
+import Ico from '../shared/Icons.jsx';
 import './SoftConflictModal.css';
 import './DecisionModal.css';
 
@@ -17,7 +19,7 @@ import './DecisionModal.css';
 // resolves to the dialog's dismissValue so the caller can treat it as
 // "cancelled".
 export default function DecisionModal({
-  icon = '⚠️',
+  icon = <Ico name="alert" />,
   title,
   lead,
   bullets = [],

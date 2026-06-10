@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext.jsx';
+// NEW-FU-503 (Phase 123): shared SVG brand icon replaces the ⊞ glyph.
+import Ico from '../components/shared/Icons.jsx';
 import './LoginPage.css';
 
 export default function LoginPage() {
@@ -23,7 +25,7 @@ export default function LoginPage() {
 
       <div className="login-card">
         <div className="login-brand">
-          <div className="login-brand-icon">⊞</div>
+          <div className="login-brand-icon"><Ico name="grid" /></div>
           <span className="login-brand-name">SchedulerSWE</span>
         </div>
 

@@ -1,6 +1,8 @@
 import React from 'react';
 import { useApp, VIEWS } from '../../context/AppContext.jsx';
 import { TermPicker } from './TermPicker.jsx';
+// NEW-FU-503 (Phase 123): shared SVG icons replace the mixed emoji glyphs.
+import Ico from './Icons.jsx';
 import './TopBar.css';
 
 // NEW-FU-165: legacy semester → term-code display map. Kept for the
@@ -53,7 +55,13 @@ export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitch
   ];
 
   const hasSoftOnly = !saveBlocked && softPending.length > 0;
-  const saveLabel   = saveBlocked ? '🔴 Conflicts' : hasSoftOnly ? '⚠️ Save' : '✓ Save';
+  // NEW-FU-503 (Phase 123): stateful label keeps its three meanings, rendered
+  // with the shared SVG icons instead of 🔴 / ⚠️ / ✓ emoji.
+  const saveLabel   = saveBlocked
+    ? <><Ico name="alert" /><span>Conflicts</span></>
+    : hasSoftOnly
+    ? <><Ico name="alert" /><span>Save</span></>
+    : <><Ico name="check" /><span>Save</span></>;
   const saveClass   = saveBlocked ? 'topbar-btn danger' : hasSoftOnly ? 'topbar-btn warn' : 'topbar-btn success';
 
   // NEW-FU-56: in teacher/venue view without a filter selected, Suggest's
@@ -67,7 +75,7 @@ export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitch
   return (
     <header className="topbar">
       <div className="topbar-brand">
-        <span className="topbar-icon">⊞</span>
+        <span className="topbar-icon"><Ico name="grid" /></span>
         <span className="topbar-title">SchedulerSWE</span>
         {/* NEW-FU-165: clickable term chip replaces the static label */}
         {schedule && (
@@ -102,12 +110,13 @@ export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitch
             : incompleteFilter ? `Select a ${view} from the sidebar first`
             : undefined
           }>
-          ✦ Suggest
+          <Ico name="sparkles" /><span>Suggest</span>
         </button>
         {isFinalized ? (
           <button className="topbar-btn warn" onClick={onUnlock}
             disabled={!schedule || loading || isArchived}
-            title="This term is saved & locked. Click to unlock it so you can edit again.">🔓 Unlock</button>
+            title="This term is saved & locked. Click to unlock it so you can edit again.">
+            <Ico name="unlock" /><span>Unlock</span></button>
         ) : (
           <button className={saveClass} onClick={onSave}
             disabled={!schedule || loading || saveBlocked || isArchived}
@@ -117,14 +126,17 @@ export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitch
             of being buried as a tab inside the Export modal. */}
         <button className="topbar-btn import" onClick={onImport}
           disabled={!schedule || isLocked}
-          title={isFinalized ? 'Term is finalized — unlock it first to import.' : isArchived ? 'Term is archived — unarchive to import.' : 'Import a schedule from Excel / Word / PDF'}>↑ Import</button>
+          title={isFinalized ? 'Term is finalized — unlock it first to import.' : isArchived ? 'Term is archived — unarchive to import.' : 'Import a schedule from Excel / Word / PDF'}>
+          <Ico name="upload" /><span>Import</span></button>
         <button className="topbar-btn export" onClick={onExport}
-          disabled={!schedule}>↓ Export</button>
+          disabled={!schedule}><Ico name="download" /><span>Export</span></button>
         <div className="topbar-user">
           <span className="topbar-username">{user?.username}</span>
           {/* NEW-FU-476 (Phase 114): confirm before logging out (onLogout asks via the
-              styled dialog); fall back to a direct logout only if no handler is wired. */}
-          <button className="topbar-logout" onClick={onLogout || doLogout} title="Sign out">⏻</button>
+              styled dialog); fall back to a direct logout only if no handler is wired.
+              NEW-FU-501 (Phase 123): icon-only button gets an explicit aria-label. */}
+          <button className="topbar-logout" onClick={onLogout || doLogout} title="Sign out"
+            aria-label="Sign out"><Ico name="power" /></button>
         </div>
       </div>
     </header>

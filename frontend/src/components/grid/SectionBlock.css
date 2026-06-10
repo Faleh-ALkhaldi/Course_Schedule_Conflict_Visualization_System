@@ -45,6 +45,15 @@
   z-index: 50;
   overflow: visible;   /* let popover escape */
 }
+/* NEW-FU-501 (Phase 123): visible keyboard focus. Cards are focusable buttons
+   with full aria-labels, but had no :focus-visible style — a keyboard user
+   tabbing the grid got no cue which card was active. Inset teal ring (an
+   outset outline would be clipped by neighbouring cards' overflow/stacking). */
+.sblock:focus-visible {
+  outline: 2px solid var(--teal-500);
+  outline-offset: -2px;
+  z-index: 50;
+}
 
 /* NEW-FU-405 (Phase 45): Replaced the Phase 44 silent colored stripe
    with the existing text "LEC"/"LAB" badge — but now ALWAYS visible

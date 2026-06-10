@@ -1,5 +1,7 @@
 import React, { useEffect } from 'react';
 import { ruleToPlain } from '../../utils/conflictText.js';
+// NEW-FU-503 (Phase 123): SVG icon replaces the ⚠️ emoji.
+import Ico from '../shared/Icons.jsx';
 import './SoftConflictModal.css';
 
 export default function SoftConflictModal({ conflicts, onConfirm, onCancel }) {
@@ -18,7 +20,7 @@ export default function SoftConflictModal({ conflicts, onConfirm, onCancel }) {
          aria-labelledby="modal-title"
          onClick={e => e.target === e.currentTarget && onCancel()}>
       <div className="modal-card">
-        <div className="modal-icon">⚠️</div>
+        <div className="modal-icon"><Ico name="alert" /></div>
 
         <h2 className="modal-title" id="modal-title">
           Scheduling Warnings

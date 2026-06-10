@@ -1,4 +1,6 @@
 import React, { useState } from 'react';
+// NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
+import Ico from '../shared/Icons.jsx';
 import { useDraggable } from '@dnd-kit/core';
 import { useApp, VIEWS, LEVEL_COLORS, DAYS, DAY_DURATION, sectionLabel } from '../../context/AppContext.jsx';
 import * as api from '../../api/index.js';
@@ -283,7 +285,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
             disabled={isArchived}
             title={isArchived ? lockedTitle : 'Open Quick Fix planner — propose a sequence of remediation ops to clear conflicts.'}
           >
-            ✦ Quick Fix conflicts
+            <Ico name="sparkles" /> Quick Fix conflicts
           </button>
         )}
         {conflicts.length > 0 && (
@@ -314,7 +316,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                     <span className="sp-conflict-severity">{conflict.severity}</span>
                     {hasFixes && !isExpanded && (
                       <span className="sp-conflict-fix-hint" title="Quick fixes available">
-                        ✦ {conflict.fixes.length}
+                        <Ico name="sparkles" /> {conflict.fixes.length}
                       </span>
                     )}
                     <span className="sp-conflict-toggle">{isExpanded ? '▲' : '▼'}</span>
@@ -367,7 +369,13 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
           </ul>
         )}
         {conflicts.length === 0 && schedule && (
-          <p className="sp-no-conflict">✓ No conflicts</p>
+          <div className="sp-no-conflict">
+            <span className="sp-no-conflict-badge"><Ico name="check" /></span>
+            <div className="sp-no-conflict-text">
+              <span className="sp-no-conflict-title">No conflicts</span>
+              <span className="sp-no-conflict-sub">All sections are clash-free.</span>
+            </div>
+          </div>
         )}
       </div>
 
@@ -421,7 +429,14 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                     <div className="sp-sec-level-header" style={{borderColor:colors.border,color:colors.border}}>
                       {level}
                     </div>
-                    {Object.entries(byCourse).map(([courseCode, courseGrps]) => (
+                    {/* NEW-FU-499 (Phase 123): sort course groups numerically.
+                        Object.entries preserved insertion order, so Senior listed
+                        422 → 413 → 412 (whatever order sections loaded in) while the
+                        Courses panel below sorts — the same numeric-aware compare
+                        makes both panels agree (412 → 413 → 422 → …). */}
+                    {Object.entries(byCourse)
+                      .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+                      .map(([courseCode, courseGrps]) => (
                       <div key={courseCode} className="sp-sec-course-group">
                         <div className="sp-sec-course-label"
                           style={{background:colors.bg, borderLeft:`3px solid ${colors.border}`}}>
@@ -540,7 +555,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   <FilterName>{instr.name}</FilterName>
                   {/* NEW-FU-425 (Phase 104 item 2): clearly label placeholder instructors. */}
                   {instr.is_dummy && <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real instructor to replace it">dummy</span>}
-                  {filterId===instr.id && <span className="sp-check">✓</span>}
+                  {filterId===instr.id && <span className="sp-check"><Ico name="check" /></span>}
                 </button>
                 <button className="sp-del-btn"
                   title={isArchived ? lockedTitle : 'Remove instructor'}
@@ -673,7 +688,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   {v.is_dummy
                     ? <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real venue to replace it">dummy</span>
                     : <span className="sp-venue-cap">cap.{v.capacity}</span>}
-                  {filterId===v.id && <span className="sp-check">✓</span>}
+                  {filterId===v.id && <span className="sp-check"><Ico name="check" /></span>}
                 </button>
                 <button className="sp-del-btn"
                   title={isArchived ? lockedTitle : 'Remove venue'}

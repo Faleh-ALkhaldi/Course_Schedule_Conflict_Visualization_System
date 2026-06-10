@@ -1,13 +1,19 @@
+/* NEW-FU-504 (Phase 123): TopBar re-skinned onto the design tokens. The old
+   bar was a flat hardcoded periwinkle (#D6DFF0) that belonged to no palette in
+   the app; the new navy-800 bar ties the chrome to the navy login screen and
+   the navy day-header band, with the existing teal as the single interactive
+   accent. Every fg/bg pair below was contrast-checked ≥7:1 (audit script,
+   Phase 123) — well past WCAG AA. Class names and markup are unchanged. */
 .topbar {
   position: fixed;
   top: 0; left: 0; right: 0;
   height: var(--header-h);
-  background: #D6DFF0;
+  background: var(--navy-800);
   display: flex;
   align-items: center;
   gap: 0;
   z-index: 100;
-  border-bottom: 1px solid #B8C4D4;
+  border-bottom: 1px solid rgba(255,255,255,.08);
   padding: 0 16px 0 20px;
 }
 
@@ -17,23 +23,23 @@
   gap: 8px;
   min-width: 200px;
 }
-.topbar-icon { font-size: 20px; color: #1A2B4A; }
+.topbar-icon { font-size: 20px; color: var(--teal-300); display: inline-flex; }
 .topbar-title {
   font-family: var(--font-display);
   font-weight: 700;
   font-size: 15px;
-  color: #0F1F3D;
+  color: var(--white);
   letter-spacing: -.01em;
 }
 .topbar-semester {
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 600;
-  background: rgba(15,31,61,.1);
-  color: #0F1F3D;
+  background: rgba(255,255,255,.10);
+  color: var(--white);
   padding: 3px 9px;
   border-radius: 4px;
-  border: 1px solid rgba(15,31,61,.22);
+  border: 1px solid rgba(255,255,255,.22);
   letter-spacing: .04em;
 }
 
@@ -51,19 +57,19 @@
   font-family: var(--font-body);
   font-size: 13.5px;
   font-weight: 600;
-  color: #2C3A55;
+  color: var(--slate-300);   /* 9.4:1 on navy-800 */
   cursor: pointer;
   transition: all .15s;
   letter-spacing: 0;
 }
 .topbar-tab:hover:not(.active) {
-  color: #0F1F3D;
-  background: rgba(15,31,61,.08);
+  color: var(--white);
+  background: rgba(255,255,255,.08);
 }
 .topbar-tab.active {
-  color: #0b7268;
-  background: rgba(13,148,136,.14);
-  border-color: rgba(13,148,136,.35);
+  color: var(--teal-300);    /* 9.5:1 on navy-800 */
+  background: rgba(20,184,166,.16);
+  border-color: rgba(94,234,212,.35);
 }
 
 .topbar-actions {
@@ -87,36 +93,41 @@
   white-space: nowrap;
   display: inline-flex;
   align-items: center;
+  /* NEW-FU-503 (Phase 123): uniform icon↔label spacing for the SVG icons. */
+  gap: 6px;
 }
 .topbar-btn:disabled { opacity: .4; cursor: not-allowed; }
 
+/* NEW-FU-504 (Phase 123): translucent chips on navy — each action keeps its
+   semantic hue (teal=suggest, green=save-ok, amber=soft-pending/unlock,
+   red=blocked, neutral=data in/out) at the -300 tint, all ≥7:1 on navy-800. */
 .topbar-btn.suggest {
-  background: rgba(13,148,136,.14);
-  border-color: rgba(13,148,136,.35);
-  color: #0b7268;
+  background: rgba(20,184,166,.16);
+  border-color: rgba(94,234,212,.40);
+  color: var(--teal-300);
 }
 .topbar-btn.suggest:hover:not(:disabled) {
-  background: rgba(13,148,136,.22);
+  background: rgba(20,184,166,.26);
 }
 
 .topbar-btn.success {
-  background: rgba(22,163,74,.14);
-  border-color: rgba(22,163,74,.35);
-  color: #14532d;
+  background: rgba(34,197,94,.16);
+  border-color: rgba(134,239,172,.40);
+  color: #86efac;   /* green-300 — 10.0:1 */
 }
-.topbar-btn.success:hover:not(:disabled) { background: rgba(22,163,74,.22); }
+.topbar-btn.success:hover:not(:disabled) { background: rgba(34,197,94,.26); }
 
 .topbar-btn.warn {
-  background: rgba(180,83,9,.14);
-  border-color: rgba(180,83,9,.32);
-  color: #78350f;
+  background: rgba(245,158,11,.16);
+  border-color: rgba(252,211,77,.40);
+  color: var(--amber-300);   /* 9.7:1 */
 }
-.topbar-btn.warn:hover:not(:disabled) { background: rgba(180,83,9,.22); }
+.topbar-btn.warn:hover:not(:disabled) { background: rgba(245,158,11,.26); }
 
 .topbar-btn.danger {
-  background: rgba(220,38,38,.12);
-  border-color: rgba(220,38,38,.32);
-  color: #991b1b;
+  background: rgba(220,38,38,.18);
+  border-color: rgba(252,165,165,.40);
+  color: var(--red-300);   /* 7.4:1 */
   cursor: not-allowed;
 }
 
@@ -124,12 +135,12 @@
    data-in / data-out pair reads as a matched set. */
 .topbar-btn.export,
 .topbar-btn.import {
-  background: rgba(15,31,61,.09);
-  border-color: rgba(15,31,61,.22);
-  color: #1F2937;
+  background: rgba(255,255,255,.08);
+  border-color: rgba(255,255,255,.20);
+  color: var(--slate-200);   /* 11.4:1 */
 }
 .topbar-btn.export:hover:not(:disabled),
-.topbar-btn.import:hover:not(:disabled) { background: rgba(15,31,61,.16); }
+.topbar-btn.import:hover:not(:disabled) { background: rgba(255,255,255,.15); }
 
 .topbar-user {
   display: flex;
@@ -137,29 +148,43 @@
   gap: 6px;
   margin-left: 4px;
   padding-left: 12px;
-  border-left: 1px solid rgba(26,43,74,.15);
+  border-left: 1px solid rgba(255,255,255,.15);
 }
 .topbar-username {
   font-size: 13px;
   font-weight: 600;
-  color: #1F2937;
+  color: var(--slate-200);
   font-family: var(--font-mono);
 }
 .topbar-logout {
   background: none;
   border: none;
-  color: #374151;
+  color: var(--slate-300);
   cursor: pointer;
   font-size: 15px;
   padding: 4px;
   border-radius: 4px;
   transition: color .15s;
+  display: inline-flex;
+  align-items: center;
 }
-.topbar-logout:hover { color: #991b1b; }
+.topbar-logout:hover { color: var(--red-300); }
 
 .topbar-btn.manage {
-  background: rgba(15,31,61,.09);
-  border-color: rgba(15,31,61,.22);
-  color: #1F2937;
+  background: rgba(255,255,255,.08);
+  border-color: rgba(255,255,255,.20);
+  color: var(--slate-200);
 }
-.topbar-btn.manage:hover:not(:disabled) { background: rgba(15,31,61,.16); color: #0F1F3D; }
+.topbar-btn.manage:hover:not(:disabled) { background: rgba(255,255,255,.15); color: var(--white); }
+
+/* NEW-FU-501 (Phase 123): keyboard focus rings. Every other surface (SidePanel,
+   SectionModal, TermPicker, view toggle) already has :focus-visible styling —
+   the TopBar tabs/buttons were the one keyboard-reachable strip without any,
+   so tabbing through the header gave no visible cue. Teal-300 ring reads
+   clearly on the dark header. */
+.topbar-tab:focus-visible,
+.topbar-btn:focus-visible,
+.topbar-logout:focus-visible {
+  outline: 2px solid var(--teal-300);
+  outline-offset: 2px;
+}

@@ -29,10 +29,15 @@
 /* NEW-FU-418 (Phase 103 item 5):
    • position: absolute + top:50% on the NON-scrolling .sp-root keeps it pinned
      to the panel's visible vertical centre at every scroll position.
-   • a vivid AMBER fill — deliberately unlike every surrounding colour (navy
-     header, light-grey panel, green accents, white) so it is instantly
-     spottable — with a near-black chevron for ~9:1 contrast.
-   • larger, tab-shaped, with a white seam + focus ring for clarity and a11y. */
+   • larger, tab-shaped, with a white seam + focus ring for clarity and a11y.
+   NEW-FU-504 (Phase 123): amber → TEAL. The vivid amber fill was the only
+   surface in the app outside the navy/teal/slate system and read as a stray
+   warning. Teal-500 is the established interactive accent (view-mode toggle,
+   active tab), so the handle now reads "control" while staying instantly
+   spottable against the grey panel + white grid — the tab shape, white seam
+   and shadow that carry discoverability are unchanged. White chevron on
+   teal-500 is 3.7:1, above the 3:1 WCAG bar for a 19px-bold glyph, and
+   matches the white-on-teal of .sg-vt-btn.active. */
 .sp-collapse-btn {
   position: absolute;
   top: 50%;
@@ -41,12 +46,12 @@
   width: 28px;
   height: 56px;
   border-radius: 0 11px 11px 0;
-  border: 1px solid #b45309;          /* amber-700 edge */
+  border: 1px solid #0f766e;          /* teal-700 edge */
   border-left: none;
   outline: 2px solid #ffffff;          /* white seam separates it from the panel */
   outline-offset: -1px;
-  background: #f59e0b;                  /* amber-500 — the distinct accent */
-  color: #1f2937;                      /* near-black chevron, high contrast on amber */
+  background: var(--teal-500);         /* on-system interactive accent */
+  color: #ffffff;                      /* white chevron — matches .sg-vt-btn.active */
   cursor: pointer;
   font-size: 19px;
   font-weight: 800;
@@ -55,12 +60,12 @@
   align-items: center;
   justify-content: center;
   z-index: 20;
-  box-shadow: 2px 0 8px rgba(180, 83, 9, 0.30);
+  box-shadow: 2px 0 8px rgba(13, 148, 136, 0.30);
   transition: background 0.15s, box-shadow 0.15s, transform 0.15s;
 }
 .sp-collapse-btn:hover {
-  background: #d97706;                  /* amber-600 */
-  box-shadow: 3px 0 12px rgba(180, 83, 9, 0.42);
+  background: #0b7268;                  /* darker teal (matches active-tab text) */
+  box-shadow: 3px 0 12px rgba(13, 148, 136, 0.42);
 }
 .sp-collapse-btn:focus-visible {
   outline: 3px solid #1d4ed8;          /* clear keyboard focus ring */
@@ -123,7 +128,20 @@
 .sp-conflict-rule { font-family:var(--font-mono); font-size:11px; font-weight:700; color:var(--text-primary); }
 .sp-conflict-desc { color:var(--text-primary); line-height:1.35; font-size:12px; }
 .sp-conflict-more { font-size:12px; color:var(--text-muted); text-align:center; padding:3px; }
-.sp-no-conflict { font-size:13px; color:#15803d; font-weight:600; padding:4px 0; }
+.sp-no-conflict {
+  display:flex; align-items:center; gap:10px;
+  padding:10px 12px; margin:2px 0 6px;
+  background:#ecfdf5; border:1px solid #bbf7d0; border-radius:8px;
+}
+.sp-no-conflict-badge {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:26px; height:26px; flex:none;
+  background:#16a34a; color:#fff; border-radius:50%;
+}
+.sp-no-conflict-badge svg { width:15px; height:15px; }
+.sp-no-conflict-text { display:flex; flex-direction:column; line-height:1.2; }
+.sp-no-conflict-title { font-size:13px; font-weight:700; color:#15803d; }
+.sp-no-conflict-sub { font-size:11px; color:#4d7c5a; margin-top:1px; }
 
 /* ── Forms ────────────────────────────────────────────────────────────────── */
 .sp-form {

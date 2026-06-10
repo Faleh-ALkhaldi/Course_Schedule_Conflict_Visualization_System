@@ -156,6 +156,12 @@ async function buildTableWorkbook(scheduleId, semester) {
     { header:'Category',       key:'category',      width:10 },
     { header:'Section #',      key:'sectionNumber', width:10 },
     { header:'Section Type',   key:'sectionType',   width:12 },   // NEW-FU-100
+    // NEW-FU-502 (Phase 123): Gender column so the F-section flag round-trips.
+    // Without it, §F-55 exported as a bare "55" and re-imported as male — and
+    // because the sections UNIQUE key includes gender, an M/F pair sharing a
+    // number+day collapsed to one row on import (second insert silently hit
+    // ON CONFLICT DO NOTHING). Same additive pattern as FU-100's Section Type.
+    { header:'Gender',         key:'gender',        width:9  },   // NEW-FU-502
     { header:'Days',           key:'days',          width:28 },
     { header:'Start Time',     key:'startTime',     width:12 },
     { header:'End Time',       key:'endTime',       width:12 },
@@ -197,6 +203,7 @@ async function buildTableWorkbook(scheduleId, semester) {
     row.getCell('category').value      = safeCell(sec.category       ?? '');
     row.getCell('sectionNumber').value = safeCell(sec.sectionNumber  ?? '');
     row.getCell('sectionType').value   = safeCell(sec.sectionType    ?? 'Lec');   // NEW-FU-100
+    row.getCell('gender').value        = sec.gender === 'F' ? 'F' : 'M';          // NEW-FU-502
     row.getCell('days').value          = days.sort().join(', ');
     row.getCell('startTime').value     = startT;
     row.getCell('endTime').value       = endT;
@@ -214,8 +221,8 @@ async function buildTableWorkbook(scheduleId, semester) {
 
   // Auto-filter on header
   // NEW-FU-100: extend to column L now that Section Type was inserted
-  // before Days (12 columns total: A..L).
-  ws.autoFilter = { from:'A1', to:`L1` };
+  // before Days. NEW-FU-502 (Phase 123): one more column (Gender) → A..M.
+  ws.autoFilter = { from:'A1', to:`M1` };
 
   return wb;
 }
@@ -486,8 +493,8 @@ async function commitRows(rowData, scheduleId) {
         try {
           const ins = await client.query(`
             INSERT INTO sections
-              (schedule_id,course_id,instructor_id,venue_id,section_number,day,start_time,end_time,section_type)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+              (schedule_id,course_id,instructor_id,venue_id,section_number,day,start_time,end_time,section_type,gender)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
             ON CONFLICT DO NOTHING
             RETURNING id
           `, [
@@ -496,6 +503,7 @@ async function commitRows(rowData, scheduleId) {
             venue?.id      ?? null,
             row.sectionNumber, day, row.startTime, row.endTime,
             row.sectionType ?? 'Lec',
+            row.gender === 'F' ? 'F' : 'M',   // NEW-FU-502 (Phase 123)
           ]);
           if (ins.rowCount > 0) created++;
           else                  skipped++;
@@ -560,7 +568,7 @@ async function parseExcelToRows(buffer) {
       return k ? cellToTimeString(row.getCell(k)?.value) : '';
     };
     const courseCode    = getStr('Course Code');
-    const sectionNumber = getStr('Section #');
+    let   sectionNumber = getStr('Section #');
     const daysStr       = getStr('Days');
     const startTime     = getTime('Start Time');
     const endTime       = getTime('End Time');
@@ -579,6 +587,15 @@ async function parseExcelToRows(buffer) {
     // NEW-FU-498 (Phase 122): recognize all four types (Lec/Lab/Prj/Ths); unknown → Lec.
     const rawSectionType = getStr('Section Type');
     const sectionType = (['Lec','Lab','Prj','Ths'].includes(rawSectionType) ? rawSectionType : 'Lec');
+    // NEW-FU-502 (Phase 123): gender round-trip. Primary source is the new
+    // Gender column ('F' → female, anything else → 'M' — matches the column
+    // default in migration 014, so files exported before this column existed
+    // import exactly as they used to). Tolerance: a hand-edited "F-55"/"F55"
+    // in Section # also marks the row female and strips the prefix, so the
+    // registrar-style label users SEE in the app is accepted as input.
+    let gender = getStr('Gender').trim().toUpperCase() === 'F' ? 'F' : 'M';
+    const fPrefixed = sectionNumber.match(/^F-?(\d{2})$/i);
+    if (fPrefixed) { gender = 'F'; sectionNumber = fPrefixed[1]; }
     rowData.push({
       courseCode,
       courseName:    getStr('Course Name')    || courseCode,
@@ -587,6 +604,7 @@ async function parseExcelToRows(buffer) {
       credits,
       sectionNumber,
       sectionType,    // NEW-FU-100
+      gender,         // NEW-FU-502
       days: daysStr.split(/[,;/\s]+/).map(d => d.trim()).filter(Boolean),
       startTime,
       endTime,

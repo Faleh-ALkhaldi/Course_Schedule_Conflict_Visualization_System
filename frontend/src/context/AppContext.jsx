@@ -28,6 +28,16 @@ export const SLOT_STEP  = 5;
 const SLOT_START = 7 * 60;
 const SLOT_END   = 22 * 60;
 
+// Frontend mirror of backend constants.TIME_WINDOWS (the client can't import the
+// server config). This is the ONE place the R-06 teaching windows live on the
+// frontend — the drag-drop guard (SchedulerPage) and SectionModal both read it.
+// Keep in sync with backend/src/config/constants.js if the windows ever change.
+//   UG (and capstone): 07:00–17:10   |   GR: 17:20–22:00
+export const TIME_WINDOWS = {
+  UG: { start: 7 * 60,       end: 17 * 60 + 10 },
+  GR: { start: 17 * 60 + 20, end: 22 * 60 },
+};
+
 export function fromMinutes(m) {
   // NEW-FU-453 (Phase 108): clamp to a valid minute-of-day (0–1439) so a bad or
   // overflowed input can NEVER render as scientific notation / a >24h garbage
@@ -275,6 +285,15 @@ export function AppProvider({ children }) {
     }
   }, []);
 
+  // Shared "reload the current view after a resource change" guard, used by
+  // addInstructor / removeInstructor / addVenue / removeVenue / removeCourse below.
+  // Skips the reload only for an unfiltered Teacher/Venue view (nothing selected).
+  const reloadCurrentView = useCallback(() => {
+    if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) {
+      loadView(state.schedule.id, state.view, state.filterId);
+    }
+  }, [state.schedule, state.view, state.filterId, loadView]);
+
   const moveSection = useCallback(async (sectionId, updates) => {
     const { section, conflicts:result } = await api.updateSection(sectionId, updates);
     // section may be null for group updates — reload whole view to get all siblings
@@ -327,10 +346,10 @@ export function AppProvider({ children }) {
       // sections to the new real instructor — RELOAD the view so the grid shows
       // it. (The old CLEAR_SECTIONS just blanked the grid: the sections-length
       // reload effect it relied on was removed in FU-55.)
-      if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) loadView(state.schedule.id, state.view, state.filterId);
+      reloadCurrentView();
     }
     return { ...instructor, replacedDummy };
-  }, [state.schedule, state.view, state.filterId, loadView]);
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView]);
 
   const removeInstructor = useCallback(async (id) => {
     await api.deleteInstructor(id);
@@ -338,8 +357,8 @@ export function AppProvider({ children }) {
     // NEW-FU-437 (Phase 107 H3): RELOAD the view (sections.instructor_id is now
     // NULL on affected rows). The old CLEAR_SECTIONS relied on a SchedulerPage
     // reload effect that FU-55 removed, so the grid blanked with no re-fetch.
-    if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) loadView(state.schedule.id, state.view, state.filterId);
-  }, [state.schedule, state.view, state.filterId, loadView]);
+    reloadCurrentView();
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView]);
 
   const addVenue = useCallback(async (data) => {
     // NEW-FU-434 (Phase 106 item 6): auto-replace the oldest placeholder venue of
@@ -350,18 +369,18 @@ export function AppProvider({ children }) {
       dispatch({ type:'REMOVE_VENUE', id: replacedDummy.id });
       // NEW-FU-437 (Phase 107 H3): reload so the grid shows the real venue on the
       // placeholder's reassigned sections (CLEAR_SECTIONS only blanked it).
-      if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) loadView(state.schedule.id, state.view, state.filterId);
+      reloadCurrentView();
     }
     return { ...venue, replacedDummy };
-  }, [state.schedule, state.view, state.filterId, loadView]);
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView]);
 
   const removeVenue = useCallback(async (id) => {
     await api.deleteVenue(id);
     dispatch({ type:'REMOVE_VENUE', id });
     // NEW-FU-437 (Phase 107 H3): reload so the deleted venue's name disappears
     // from the grid (sections.venue_id is NULL via cascade).
-    if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) loadView(state.schedule.id, state.view, state.filterId);
-  }, [state.schedule, state.view, state.filterId, loadView]);
+    reloadCurrentView();
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView]);
 
   const addCourse = useCallback(async (data) => {
     const course = await api.createCourse(data);
@@ -375,12 +394,12 @@ export function AppProvider({ children }) {
       dispatch({ type:'REMOVE_COURSE', id });
       // NEW-FU-437 (Phase 107 H3): reload so the deleted course's sections leave
       // the grid (CLEAR_SECTIONS alone blanked it — FU-55 removed the reload effect).
-      if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) loadView(state.schedule.id, state.view, state.filterId);
+      reloadCurrentView();
     } catch(err) {
       console.error('Delete course failed:', err.response?.data?.error ?? err.message);
       throw err;
     }
-  }, [state.schedule, state.view, state.filterId, loadView]);
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView]);
 
   // NEW-FU-78: accept either a boolean (legacy "confirm all softs") or an
   // array of explicit conflict ids the user saw and acknowledged. The

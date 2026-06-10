@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useApp, DAYS, DAY_DURATION, fromMinutes, toMinutes, sectionLabel } from '../../context/AppContext.jsx';
+import { useApp, DAYS, DAY_DURATION, fromMinutes, toMinutes, sectionLabel, TIME_WINDOWS } from '../../context/AppContext.jsx';
 import * as api from '../../api/index.js';
 // NEW-FU-280/281 (Phase 56): replace window.prompt-based "+ New"
 // shortcuts with proper modals. SectionModal nests them so the user
@@ -79,6 +79,19 @@ const DURATION_LIMITS_BY_TYPE = {
   Prj: { min: 50, max: 180 },
   Ths: { min: 50, max: 180 },
 };
+
+// NEW-FU-505 (Phase 123): display-only formatter for the computed end time.
+// The native <input type="time"> start picker renders in the OS locale
+// ("10:00 AM" on a 12-hour macOS), while computeEnd() returns the raw 24h
+// "10:50" — the modal showed two formats side by side. This formats the END
+// display through the same locale (toLocaleTimeString with no explicit
+// locale = the user's), so both fields read identically. The raw 24h value
+// is still what Save submits — payloads are untouched.
+function fmtTimeForDisplay(t) {
+  const [h, m] = String(t).split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return t;
+  return new Date(2000, 0, 1, h, m).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
 
 // NEW-FU-401 (Phase 101): inline SVG icon set (Lucide-style, currentColor) that
 // replaces the emoji glyphs the old modal used (📅 📍 ✏️ 📘 🧪 ◇ ✈ ✓). SVG icons
@@ -523,9 +536,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   const courseIsR06Exempt = selectedCourse?.course_code === 'SWE 412';
   const timeWindow = (courseIsExternal || courseIsR06Exempt)
     ? null
-    : courseIsCapstone
-      ? { start: 7*60, end: 17*60 + 10 }
-      : (selectedCourse?.category === 'GR' ? { start: 17*60 + 20, end: 22*60 } : { start: 7*60, end: 17*60 + 10 });
+    : (selectedCourse?.category === 'GR' && !courseIsCapstone) ? TIME_WINDOWS.GR : TIME_WINDOWS.UG;
   const winLabel = courseIsCapstone ? 'Capstone'
     : (selectedCourse?.category === 'GR' ? 'Graduate' : 'Undergraduate');
   const startMinNow = toMinutes(form.startTime);
@@ -972,7 +983,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   </div>
                   <div className="sm-field">
                     <label>End time</label>
-                    <div className="sm-readonly">{computeEnd()}</div>
+                    <div className="sm-readonly">{fmtTimeForDisplay(computeEnd())}</div>
                   </div>
                 </div>
               </>
@@ -1184,7 +1195,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               </div>
             </div>
             <div className="sm-field sm-end-preview">
-              End time: <strong>{computeEnd()}</strong>
+              End time: <strong>{fmtTimeForDisplay(computeEnd())}</strong>
             </div>
             {/* NEW-FU-478 (Phase 115): out-of-window / out-of-range time is flagged inline
                 and blocks Save (the edit tab was previously unguarded). */}

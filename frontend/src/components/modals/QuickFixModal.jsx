@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+// NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
+import Ico from '../shared/Icons.jsx';
 import * as api from '../../api/index.js';
 import './SectionModal.css';
 
@@ -112,7 +114,7 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
     <div className="sm-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
       <div className="sm-card" style={{maxWidth: 720, width: '95vw'}}>
         <div className="sm-header">
-          <h2 className="sm-title">✦ Quick Fix Conflicts</h2>
+          <h2 className="sm-title"><Ico name="sparkles" /> Quick Fix Conflicts</h2>
           <button className="sm-close" onClick={onClose}>×</button>
         </div>
 
@@ -125,13 +127,13 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
 
         {loading && (
           <div style={{padding: '24px', textAlign: 'center', color: 'var(--slate-500)'}}>
-            ⏳ Computing fix plan…
+            Computing fix plan…
           </div>
         )}
 
         {error && (
           <div style={{padding: '12px 24px', color: '#b91c1c'}}>
-            ⚠ {error}
+            <Ico name="alert" /> {error}
           </div>
         )}
 
@@ -219,7 +221,7 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
             onClick={handleApply}
             disabled={loading || applying || !plan || selected.size === 0}
           >
-            {applying ? '⏳ Applying…' : `✓ Apply ${selected.size} ${selected.size === 1 ? 'fix' : 'fixes'}`}
+            {applying ? 'Applying…' : <><Ico name="check" /> Apply {selected.size} {selected.size === 1 ? 'fix' : 'fixes'}</>}
           </button>
         </div>
       </div>

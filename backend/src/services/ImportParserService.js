@@ -48,7 +48,7 @@ function canonicalizeHeader(h) {
 // ── shared row normalization ─────────────────────────────────────────────────
 function normalizeRow(raw) {
   const cc = (raw['course code'] ?? '').trim();
-  const sn = (raw['section #']    ?? raw['section'] ?? '').trim();
+  let   sn = (raw['section #']    ?? raw['section'] ?? '').trim();
   const dd = (raw['days']         ?? '').trim();
   const st = (raw['start time']   ?? '').trim().substring(0, 5);
   const et = (raw['end time']     ?? '').trim().substring(0, 5);
@@ -58,6 +58,14 @@ function normalizeRow(raw) {
   const rawType = (raw['section type'] ?? '').trim();
   const sectionType = ['Lec','Lab','Prj','Ths'].includes(rawType) ? rawType : 'Lec';
 
+  // NEW-FU-502 (Phase 123): gender round-trip — mirror of the xlsx parser.
+  // Gender column 'F' marks female; an F-prefixed section number ("F-55")
+  // also marks female and strips to the bare two digits. Default 'M' keeps
+  // pre-Phase-123 files importing byte-identically.
+  let gender = (raw['gender'] ?? '').trim().toUpperCase() === 'F' ? 'F' : 'M';
+  const fPrefixed = sn.match(/^F-?(\d{2})$/i);
+  if (fPrefixed) { gender = 'F'; sn = fPrefixed[1]; }
+
   return {
     courseCode:    cc,
     courseName:    (raw['course name']    ?? '').trim() || cc,
@@ -66,6 +74,7 @@ function normalizeRow(raw) {
     credits:       Number.isFinite(parseInt(raw['credits'], 10)) ? parseInt(raw['credits'], 10) : 3,
     sectionNumber: sn,
     sectionType,
+    gender,         // NEW-FU-502
     days:          dd.split(/[,;/\s]+/).map(d => d.trim()).filter(Boolean),
     startTime:     st,
     endTime:       et,
@@ -131,9 +140,9 @@ async function parseDocxToRows(buffer) {
 // the flattened text stream. We pair it with a header read from the text
 // stream (getTable strips the header row).
 //
-// Column order in the output of our own PdfExportService.buildTablePdfBuffer
-// is fixed; for third-party PDFs we fall back to the header keys found
-// in the text stream.
+// Column order in the output of our own PdfExportService.buildTablePdfBuffer is
+// fixed, and we map columns by that fixed order. A third-party PDF whose columns
+// are in a different order won't be remapped — only our own export round-trips cleanly.
 const SELF_EXPORT_COLUMNS = [
   'course code', 'course name', 'section #', 'section type',
   'days', 'start time', 'end time', 'duration', 'instructor', 'venue',

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   DndContext, PointerSensor, useSensor, useSensors, DragOverlay, closestCenter,
 } from '@dnd-kit/core';
-import { useApp, VIEWS, DAY_DURATION, LEVEL_COLORS, fromMinutes } from '../context/AppContext.jsx';
+import { useApp, VIEWS, DAY_DURATION, LEVEL_COLORS, fromMinutes, TIME_WINDOWS } from '../context/AppContext.jsx';
 
 const DAY_GROUPS = {
   Sunday:'STT', Tuesday:'STT', Thursday:'STT',
@@ -23,6 +23,8 @@ import SuggestModal     from '../components/modals/SuggestModal.jsx';
 import DecisionModal    from '../components/modals/DecisionModal.jsx';
 import QuickFixModal    from '../components/modals/QuickFixModal.jsx';
 import { conflictTypesPlain } from '../utils/conflictText.js';
+// NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs in the chrome.
+import Ico from '../components/shared/Icons.jsx';
 import './SchedulerPage.css';
 
 const DEPT_ID  = import.meta.env.VITE_DEPT_ID  || 'SWE-DEPT';
@@ -347,6 +349,11 @@ export default function SchedulerPage() {
         const origStart  = sec.startTime ?? sec.start_time ?? '';
         const origEnd    = sec.endTime   ?? sec.end_time   ?? '';
         const duration   = timeToMin(origEnd) - timeToMin(origStart);
+        // NEW-FU-502 (Phase 123): defensive — a section with missing/equal
+        // times would compute duration 0 and the move below would write a
+        // zero-length section (start == end). Unreachable from the grid
+        // (DayColumn skips time-less sections) but cheap to refuse here.
+        if (!Number.isFinite(duration) || duration <= 0) return;
         if (day === sec.day && startTime === origStart.substring(0,5)) return;
 
         // NEW-FU-371 (Phase 98 item 2): a LAB is single-day by definition
@@ -416,8 +423,9 @@ export default function SchedulerPage() {
           const eMin      = timeToMin(dragEnd);
           const isGR      = sec.category === 'GR';
           const isCap     = sec.isCapstone;
-          const winStart  = isCap ? 7*60 : isGR ? 17*60 + 20 : 7*60;
-          const winEnd    = isCap ? 17*60 + 10 : isGR ? 22*60 : 17*60 + 10;
+          const win       = (isGR && !isCap) ? TIME_WINDOWS.GR : TIME_WINDOWS.UG;
+          const winStart  = win.start;
+          const winEnd    = win.end;
           if (sMin < winStart || eMin > winEnd) {
             const lbl = isCap ? '07:00–17:10 (Capstone)'
                       : isGR  ? '17:20–22:00 (Graduate)'
@@ -546,7 +554,7 @@ export default function SchedulerPage() {
   async function handleUnlock() {
     try {
       await unfinalizeSchedule();
-      showToast('🔓 Schedule unlocked — you can edit it again.', 'success');
+      showToast('Schedule unlocked — you can edit it again.', 'success');
     } catch (err) {
       showToast(err.response?.data?.error || 'Could not unlock the schedule.', 'error');
     }
@@ -557,7 +565,7 @@ export default function SchedulerPage() {
   // styled dialog (DecisionModal via askDecision), never the OS window.confirm().
   async function handleLogout() {
     const choice = await askDecision({
-      icon: '⏻',
+      icon: <Ico name="power" />,
       title: 'Log out of SchedulerSWE?',
       lead: "You'll need to sign in again to view or change schedules.",
       options: [
@@ -835,7 +843,7 @@ export default function SchedulerPage() {
         if (hasDrop) {
           const { count, bullets } = dropPlanInfo(lrp);
           const ok = await askDecision({
-            icon: '⚠️',
+            icon: <Ico name="alert" />,
             title: 'A few sections must be dropped to stay conflict-free',
             lead: `Not every section fits, and no added instructor/venue can fix it (the clash is in the timing). The conflict-free plan drops ${count} section${count > 1 ? 's' : ''}:`,
             bullets,
@@ -880,7 +888,7 @@ export default function SchedulerPage() {
         // Their exact picks would clash. Explain in plain language and offer
         // the two real choices.
         const choice = await askDecision({
-          icon: '⚠️',
+          icon: <Ico name="alert" />,
           title: 'Your selections can’t be scheduled without conflicts',
           lead: 'Placing every course exactly as you set it would create these clashes:',
           bullets: conflictTypesPlain(conflictRules),
@@ -903,7 +911,7 @@ export default function SchedulerPage() {
           // auto-adjust (the conflict-free path) rather than aborting —
           // per the Phase-96 decision tree.
           const sure = await askDecision({
-            icon: '⚠️',
+            icon: <Ico name="alert" />,
             title: 'This plan will contain conflicts',
             lead: 'Keeping your exact selections saves the schedule with these unresolved clashes:',
             bullets: conflictTypesPlain(conflictRules),
@@ -999,8 +1007,12 @@ export default function SchedulerPage() {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
   }, []);
   function showToast(msg, type='info') {
+    // NEW-FU-506 (Phase 123): unknown types fall back to 'info' so a typo'd
+    // call can never render the unstyled transparent pill again (the exact
+    // Phase 58 toast bug class — .toast has no background of its own).
+    const safeType = ['success','error','info','warn'].includes(type) ? type : 'info';
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    setToast({ message: msg, type });
+    setToast({ message: msg, type: safeType });
     toastTimerRef.current = setTimeout(() => {
       setToast(null);
       toastTimerRef.current = null;
@@ -1034,7 +1046,7 @@ export default function SchedulerPage() {
                 Banner makes the state legible up front. */}
             {schedule?.archived_at && (
               <div className="scheduler-archived-banner" role="status" aria-live="polite">
-                <span className="scheduler-archived-icon" aria-hidden="true">📦</span>
+                <span className="scheduler-archived-icon" aria-hidden="true"><Ico name="archive" /></span>
                 <span className="scheduler-archived-msg">
                   This term is <strong>archived</strong> and is read-only.
                   Unarchive it from the term picker to make changes.
@@ -1045,7 +1057,7 @@ export default function SchedulerPage() {
                 up front (the controls are disabled) instead of only after a rejected click. */}
             {!schedule?.archived_at && schedule?.status === 'Finalized' && (
               <div className="scheduler-archived-banner" role="status" aria-live="polite">
-                <span className="scheduler-archived-icon" aria-hidden="true">🔒</span>
+                <span className="scheduler-archived-icon" aria-hidden="true"><Ico name="lock" /></span>
                 <span className="scheduler-archived-msg">
                   This term is <strong>finalized</strong> and is read-only.
                   Click <strong>Unlock</strong> in the top bar to make changes.
@@ -1060,9 +1072,10 @@ export default function SchedulerPage() {
                   producing a contradictory header. Now the label always
                   reflects the active view; the hint adds the filter-pick
                   prompt when applicable. */}
-              {view === VIEWS.TEACHER ? '👤 Instructor View'
-                : view === VIEWS.VENUE ? '🏛 Venue View'
-                : '📋 Course View'}
+              {/* NEW-FU-503 (Phase 123): SVG icons; span keeps icon+text one flex item. */}
+              {view === VIEWS.TEACHER ? <span><Ico name="user" /> Instructor View</span>
+                : view === VIEWS.VENUE ? <span><Ico name="pin" /> Venue View</span>
+                : <span><Ico name="clipboard" /> Course View</span>}
               {(view === VIEWS.TEACHER || view === VIEWS.VENUE) && !filterId && (
                 <span className="view-hint"> — select a{view === VIEWS.TEACHER ? 'n instructor' : ' venue'} from the sidebar</span>
               )}
@@ -1072,7 +1085,7 @@ export default function SchedulerPage() {
                 <span className="view-dummy-advisory" role="status"
                   style={{ marginLeft: 14, fontSize: '.78rem', fontWeight: 600, color: '#b45309',
                     background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '3px 10px' }}>
-                  🧩 To finalize this schedule, add{dummyInstrCount > 0 ? ` ${dummyInstrCount} more instructor${dummyInstrCount === 1 ? '' : 's'}` : ''}{dummyInstrCount > 0 && dummyVenueCount > 0 ? ' and' : ''}{dummyVenueCount > 0 ? ` ${dummyVenueCount} more venue${dummyVenueCount === 1 ? '' : 's'}` : ''}.
+                  <Ico name="info" /> To finalize this schedule, add{dummyInstrCount > 0 ? ` ${dummyInstrCount} more instructor${dummyInstrCount === 1 ? '' : 's'}` : ''}{dummyInstrCount > 0 && dummyVenueCount > 0 ? ' and' : ''}{dummyVenueCount > 0 ? ` ${dummyVenueCount} more venue${dummyVenueCount === 1 ? '' : 's'}` : ''}.
                 </span>
               )}
               {/* NEW-FU-483 (Phase 117): hint text adapts to lock state — dragging and editing are

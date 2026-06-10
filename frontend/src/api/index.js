@@ -51,7 +51,13 @@ api.interceptors.request.use(cfg => {
 api.interceptors.response.use(
   r => r,
   err => {
-    if (err.response?.status === 401 && !err.config?.url?.includes('/auth/login')) {
+    // NEW-FU-507 (Phase 123): exact-path match instead of substring — a future
+    // endpoint merely CONTAINING '/auth/login' in its path must not suppress
+    // the session-expiry redirect. Anchored to end-of-path so only the real
+    // login call (whose 401 means "wrong credentials", handled by doLogin)
+    // is exempt.
+    const reqUrl = String(err.config?.url ?? '');
+    if (err.response?.status === 401 && !/\/auth\/login$/.test(reqUrl)) {
       // NEW-FU-51: clear the stale user object too. Previously only the
       // token was cleared on 401, so the LoginPage briefly flashed the
       // last-logged-in username from the persisted user blob via the

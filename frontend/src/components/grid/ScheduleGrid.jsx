@@ -500,7 +500,7 @@ function DayColumn({ day, height, layouts, officeHours, conflictMap, onBlockClic
         const top = pixelOffsetAt(toMinutes(start));
         const h = pixelOffsetAt(toMinutes(end)) - top;
         return (
-          <div key={i} style={{ position:'absolute', top, left:2, right:2, height: Math.max(h, 20), zIndex:2 }}>
+          <div key={oh.id ?? i} style={{ position:'absolute', top, left:2, right:2, height: Math.max(h, 20), zIndex:2 }}>
             <OfficeHourBlock officeHour={oh} onClick={() => onOHClick && onOHClick(oh)} />
           </div>
         );

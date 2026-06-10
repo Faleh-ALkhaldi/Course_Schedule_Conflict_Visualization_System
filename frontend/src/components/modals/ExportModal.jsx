@@ -1,4 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
+// NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
+import Ico from '../shared/Icons.jsx';
 import { useApp } from '../../context/AppContext.jsx';
 import * as api from '../../api/index.js';
 import './SectionModal.css';
@@ -152,7 +154,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                     <input type="radio" name="exp" value="full"
                       checked={choice==='full'} onChange={()=>setChoice('full')} />
                     <div className="exp-label">
-                      <span className="exp-title">📋 Full Semester — Table</span>
+                      <span className="exp-title"><Ico name="clipboard" /> Full Semester — Table</span>
                       <span className="exp-desc">One row per section group. Importable format.</span>
                     </div>
                   </label>
@@ -161,7 +163,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                     <input type="radio" name="exp" value="teacher"
                       checked={choice==='teacher'} onChange={()=>setChoice('teacher')} />
                     <div className="exp-label">
-                      <span className="exp-title">👤 Instructor View — Visual Grid</span>
+                      <span className="exp-title"><Ico name="user" /> Instructor View — Visual Grid</span>
                       <span className="exp-desc">One instructor's schedule</span>
                     </div>
                   </label>
@@ -182,7 +184,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                           transition:'border-color .15s, box-shadow .15s',
                         }}
                       >
-                        <option value="">👤  Select an instructor…</option>
+                        <option value="">Select an instructor…</option>
                         {instructors.map(i =>
                           <option key={i.id} value={i.id}>{i.name}</option>
                         )}
@@ -201,7 +203,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                     <input type="radio" name="exp" value="venue"
                       checked={choice==='venue'} onChange={()=>setChoice('venue')} />
                     <div className="exp-label">
-                      <span className="exp-title">🏛 Venue View — Visual Grid</span>
+                      <span className="exp-title"><Ico name="pin" /> Venue View — Visual Grid</span>
                       <span className="exp-desc">All sections assigned to a specific venue</span>
                     </div>
                   </label>
@@ -222,7 +224,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                           transition:'border-color .15s, box-shadow .15s',
                         }}
                       >
-                        <option value="">🏛  Select a venue…</option>
+                        <option value="">Select a venue…</option>
                         {venues.map(v =>
                           <option key={v.id} value={v.id}>{v.name} ({v.type})</option>
                         )}
@@ -363,7 +365,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                   borderRadius:8, padding:'10px 12px', fontSize:'.8rem',
                 }}>
                   <div style={{fontWeight:600, marginBottom:4}}>
-                    ✓ {importResult.created} section(s) imported
+                    <Ico name="check" /> {importResult.created} section(s) imported
                     {importResult.skipped ? ` · ${importResult.skipped} duplicate(s) skipped` : ''}
                     {importResult.errors?.length ? ` · ${importResult.errors.length} error(s)` : ''}
                   </div>
