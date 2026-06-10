@@ -42,12 +42,34 @@ order below; each builds on the previous one.
 | Database | PostgreSQL       | 18 |
 | Auth     | JWT + bcryptjs   | jsonwebtoken 9, bcryptjs 2 |
 | Drag-and-drop | dnd-kit     | latest |
+| Animation | Framer Motion   | latest |
 | Excel    | ExcelJS          | 4.x |
 | HTTP     | Axios            | latest |
 | Testing  | Jest + supertest | Jest 29 |
 
 The frontend runs on **port 3000**; the backend API on **port 4000**.
 Vite proxies `/api/*` from 3000 to 4000 during development.
+
+---
+
+## Interface, Theming & Accessibility
+
+- **Light & dark mode** — a complete dark theme built on the CSS design-token
+  system. It follows the operating system's `prefers-color-scheme` by default,
+  and a sun/moon toggle in the top bar lets the user override it (the choice is
+  remembered in `localStorage`). The dark palette is a distinct deep-navy / indigo
+  scheme — not a dimmed copy of the light theme — and every surface is themed
+  (grid, cards, sidebar, modals, status banners).
+- **Responsive** — desktop is the primary target; the layout adapts gracefully to
+  tablet and phone widths (the sidebar stacks above the grid, the top bar scrolls,
+  and the weekly grid stays usable).
+- **Accessibility** — every interactive element has a visible keyboard focus ring;
+  text meets WCAG AA contrast (the chrome is audited to ≥7:1); icon-only buttons
+  carry `aria-label`s; and all motion is gated behind `prefers-reduced-motion`
+  (WCAG 2.3.3 — vestibular safety).
+- **Motion** — tasteful Framer Motion / CSS animations (view-transition cross-fade,
+  modal pop-in, toast slide, hover feedback) that stay subtle and professional and
+  disable entirely under reduced-motion.
 
 ---
 
