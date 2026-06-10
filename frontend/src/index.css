@@ -45,7 +45,7 @@
      All pass WCAG AA on white. */
   --text-primary:   var(--navy-900);   /* #0d1b2a — body, headings, course codes */
   --text-secondary: var(--slate-600);  /* #475569 — time/instructor/room lines */
-  --text-muted:     var(--slate-500);  /* #64748b — helper / hints (still AA) */
+  --text-muted:     #5b6675;  /* darkened from slate-500 #64748b so hints/caps clear AA (4.5+) on the off-white sidebar/forms */
 
   /* Spacing */
   --header-h: 56px;
@@ -86,7 +86,7 @@
      values match the originals; the dark block defines distinct dark variants. */
   --lvl-fr-bg:#daeef3; --lvl-fr-bd:#1f6b7a; --lvl-fr-tx:#0d3d46;
   --lvl-so-bg:#e2efda; --lvl-so-bd:#2d6a2e; --lvl-so-tx:#1a3d1b;
-  --lvl-ju-bg:#fff2cc; --lvl-ju-bd:#b8860b; --lvl-ju-tx:#4f3700;
+  --lvl-ju-bg:#fff2cc; --lvl-ju-bd:#8a6508; --lvl-ju-tx:#4f3700;  /* accent deepened from #b8860b so the Junior sidebar label/code clear AA (was 2.98:1) */
   --lvl-se-bg:#e8e0f5; --lvl-se-bd:#6b3fa0; --lvl-se-tx:#3b1f5e;
   --lvl-gr-bg:#EADDC1; --lvl-gr-bd:#6B3FA0; --lvl-gr-tx:#3d0f21;
   --conflict-soft-bg:#fffacd; --conflict-hard-bg:#ffd5d5;

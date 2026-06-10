@@ -72,7 +72,7 @@
 .sg-vt-btn + .sg-vt-btn { border-left: 1px solid var(--slate-300); }
 .sg-vt-btn:hover { color: var(--text-primary); }
 .sg-vt-btn.active {
-  background: var(--teal-500);
+  background: #0f766e;   /* teal-700: white label clears WCAG AA (teal-500 was ~3.7:1) */
   color: #fff;
 }
 .sg-vt-btn:focus-visible { outline: 2px solid var(--teal-400); outline-offset: -2px; }
