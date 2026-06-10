@@ -92,7 +92,7 @@
   --lvl-so-bg:#dcefc4; --lvl-so-bd:#4f8f1f; --lvl-so-tx:#2c4d12;  /* lime green */
   --lvl-ju-bg:#fbe7b6; --lvl-ju-bd:#9a6a08; --lvl-ju-tx:#523600;  /* orange */
   --lvl-se-bg:#e7ddf6; --lvl-se-bd:#7a4fc0; --lvl-se-tx:#36215e;  /* purple */
-  --lvl-gr-bg:#f7d9d6; --lvl-gr-bd:#c2362e; --lvl-gr-tx:#5e1c18;  /* red — Freshman(teal)↔Graduate(red) maximally opposite */
+  --lvl-gr-bg:#d3e4f3; --lvl-gr-bd:#2e6e9e; --lvl-gr-tx:#0e324f;  /* steel blue — distinct from teal Freshman; NOT red, so it can't be mistaken for a conflict/error card */
   --conflict-soft-bg:#fffacd; --conflict-hard-bg:#ffd5d5;
 
   /* Semantic status chip tokens — used by inline-styled badges that can't reach
@@ -170,7 +170,7 @@
   --lvl-so-bg:#1a2a0c; --lvl-so-bd:#6bbf3a; --lvl-so-tx:#c3e89a;  /* lime green */
   --lvl-ju-bg:#2e2408; --lvl-ju-bd:#e69f00; --lvl-ju-tx:#f3c969;  /* orange */
   --lvl-se-bg:#1f1733; --lvl-se-bd:#9b6fd6; --lvl-se-tx:#d3c2f0;  /* purple */
-  --lvl-gr-bg:#2e1413; --lvl-gr-bd:#e0524a; --lvl-gr-tx:#f3b0ab;  /* red — Freshman(teal)↔Graduate(red) maximally opposite */
+  --lvl-gr-bg:#0e2236; --lvl-gr-bd:#3f8fc4; --lvl-gr-tx:#a9d4ef;  /* steel blue — distinct from teal Freshman; NOT red, so it can't be mistaken for a hard-conflict card */
   --conflict-soft-bg:#33280a; --conflict-hard-bg:#3a1a1a;
   --warn-bg:#2a2410; --warn-fg:#fcd34d;
   --danger-bg:#3a1a1a; --danger-fg:#fca5a5;
