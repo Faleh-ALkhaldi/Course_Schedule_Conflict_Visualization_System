@@ -426,7 +426,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                 const colors = LEVEL_COLORS[level] ?? LEVEL_COLORS.Freshman;
                 return (
                   <div key={level} className="sp-sec-level-group">
-                    <div className="sp-sec-level-header" style={{borderColor:colors.border,color:colors.border}}>
+                    <div className="sp-sec-level-header" style={{borderColor:colors.border,color:colors.text}}>
                       {level}
                     </div>
                     {/* NEW-FU-499 (Phase 123): sort course groups numerically.
@@ -462,7 +462,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                                     hyphen) instead of "§01" (which dropped the
                                     gender entirely before this phase). */}
                                 <span className="sp-sec-code" style={{minWidth:28,fontSize:'.72rem',
-                                  color:colors.border,fontWeight:700}}>{sectionLabel(grp)}</span>
+                                  color:colors.text,fontWeight:700}}>{sectionLabel(grp)}</span>
                                 <span className="sp-sec-detail">{days} {grp.startTime}</span>
                                 <button className="sp-del-btn"
                                   title={isArchived ? lockedTitle : `Remove entire section ${sectionLabel(grp)} (all meeting days)`}
@@ -753,7 +753,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
               const cs = grouped[level];
               return (
             <div key={level} className="sp-level-group">
-              <div className="sp-level-header" style={{color: LEVEL_COLORS[level]?.border, borderColor: LEVEL_COLORS[level]?.border}}>
+              <div className="sp-level-header" style={{color: LEVEL_COLORS[level]?.text, borderColor: LEVEL_COLORS[level]?.border}}>
                 <span className="sp-level-dot" style={{background:LEVEL_COLORS[level]?.bg, borderColor:LEVEL_COLORS[level]?.border}} />
                 {level}
               </div>
