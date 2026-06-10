@@ -15,8 +15,8 @@
   gap: 10px;
   padding: 7px 14px;
   margin-left: 10px;
-  background: #0d9488;
-  border: 1.5px solid #0f766e;
+  background: #0f766e;   /* teal-700: white label clears WCAG AA (was teal-500 #0d9488 ≈ 3.7:1) */
+  border: 1.5px solid #0a5d54;
   border-radius: 999px;
   color: #ffffff;
   font-family: var(--font-sans, system-ui, sans-serif);
@@ -41,7 +41,7 @@
   box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.55);
 }
 .tp-chip:hover {
-  background: #0f766e;
+  background: #0b665c;
   border-color: #134e4a;
   box-shadow: 0 4px 10px rgba(15, 118, 110, 0.42), 0 1px 2px rgba(15, 23, 42, 0.18);
   transform: translateY(-1px);
