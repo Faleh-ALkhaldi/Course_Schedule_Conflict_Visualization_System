@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { motion, useReducedMotion } from 'framer-motion';
 import {
   DndContext, PointerSensor, useSensor, useSensors, DragOverlay, closestCenter,
 } from '@dnd-kit/core';
@@ -75,6 +76,7 @@ export default function SchedulerPage() {
           // NEW-FU-283 (Phase 56): `venues` added so the audit effect
           // below can walk the loaded list.
           sections, courses, venues, instructors, error, dispatch, unfinalizeSchedule, doLogout } = useApp();
+  const reduceMotion = useReducedMotion();
 
   // NEW-FU-482 (Phase 116): a term is locked (read-only) when archived OR finalized — the
   // backend refuses writes in both. Gate every mutating entry point up front so a finalized
@@ -1130,13 +1132,20 @@ export default function SchedulerPage() {
                   leak in). uniformType drives UNIFORM TYPOGRAPHY (same duration ⇒ identical
                   fonts) for Instructor/Venue regardless of layout — the Phase-95 decoupling
                   of uniform fonts from the readable layout. */}
-              <ScheduleGrid
-                onBlockClick={handleBlockClick}
-                onOHClick={handleOHClick}
-                onSectionDelete={handleSectionDelete}
-                viewMode={view === VIEWS.COURSE ? viewMode : 'overview'}
-                uniformType={view !== VIEWS.COURSE}
-              />
+              <motion.div
+                key={view + '|' + (filterId ?? '')}
+                initial={reduceMotion ? false : { opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+              >
+                <ScheduleGrid
+                  onBlockClick={handleBlockClick}
+                  onOHClick={handleOHClick}
+                  onSectionDelete={handleSectionDelete}
+                  viewMode={view === VIEWS.COURSE ? viewMode : 'overview'}
+                  uniformType={view !== VIEWS.COURSE}
+                />
+              </motion.div>
             </div>
           </main>
         </div>
