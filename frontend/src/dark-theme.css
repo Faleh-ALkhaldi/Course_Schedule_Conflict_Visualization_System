@@ -107,6 +107,34 @@
    the hover to a deep indigo press state instead. */
 [data-theme="dark"] .decision-btn.primary:hover { background: #4338ca; }
 
+/* ── Remaining status surfaces with no prior dark override (meticulous sweep) ──
+   Each kept a literal light tint (amber-50 / red-50 / teal-50 / white) that
+   glared on the dark modals and sidebar. Re-tinted to the same dark status
+   palette used above — hue preserved, text lifted to AA. */
+/* Sidebar placeholder badge + advisory (amber) */
+[data-theme="dark"] .sp-dummy-badge { background:#2a2410; color:#fcd34d; border-color:#5a4a1e; }
+[data-theme="dark"] .sp-dummy-advisory { background:#2a2410; border-color:#5a4a1e; border-left-color:#b45309; }
+[data-theme="dark"] .sp-dummy-advisory-text { color:#fcd34d; }
+/* SectionModal error banner / delete button / confirm icon (red) */
+[data-theme="dark"] .sm-error { background:#3a1a1a; color:#fca5a5; }
+[data-theme="dark"] .sm-btn-delete { background:#3a1a1a; color:#fca5a5; border-color:#5e2a2a; }
+[data-theme="dark"] .sm-btn-delete:hover:not(:disabled) { background:#4a2020; }
+[data-theme="dark"] .sm-confirm-icon { background:#3a1a1a; color:#fca5a5; }
+/* SuggestModal banners (info = blue, warn = amber, capacity = amber) */
+[data-theme="dark"] .suggest-banner-info { background:#16243d; border-color:#2a3f63; color:#93c5fd; }
+[data-theme="dark"] .suggest-banner-warn { background:#2a2410; border-color:#5a4a1e; color:#fcd34d; }
+[data-theme="dark"] .suggest-capacity-warning { background:#2a2410; border-left-color:#b45309; color:#fcd34d; }
+/* TermPicker: delete-row hover, error, preview panels, secondary button */
+[data-theme="dark"] .tp-row-del:hover { background:#3a1a1a; border-color:#b91c1c; color:#fca5a5; }
+[data-theme="dark"] .tp-error { background:#3a1a1a; border-color:#5e2a2a; color:#fca5a5; }
+[data-theme="dark"] .tp-preview { background:#11302a; border-color:#1f5135; }
+[data-theme="dark"] .tp-preview-warn { background:#3a1a1a; border-color:#5e2a2a; color:#fca5a5; }
+[data-theme="dark"] .tp-btn-secondary { background:var(--bg-surface); color:var(--fg-dim); border-color:var(--border-strong); }
+[data-theme="dark"] .tp-btn-secondary:hover:not(:disabled) { background:var(--bg-app); }
+/* DecisionModal danger button (dark-red text + light hover) */
+[data-theme="dark"] .decision-btn.danger { color:#fca5a5; }
+[data-theme="dark"] .decision-btn.danger:hover { background:#3a1a1a; }
+
 [data-theme="dark"] .sm-end-preview strong,
 [data-theme="dark"] .sm-conflict-list strong,
 [data-theme="dark"] .sm-confirm-text strong,
