@@ -127,6 +127,12 @@
   --teal-500: #6366f1;
   --teal-400: #818cf8;
   --teal-300: #a5b4fc;
+  /* The 600/700 accent steps were never in the light palette, so every
+     `var(--teal-600, #0f766e)` usage fell back to a dark teal literal that
+     reads as dark-on-dark here. Defining them ONLY in this dark block lights
+     that accent text up; light mode still has no token and keeps #0f766e. */
+  --teal-600: #a5b4fc;
+  --teal-700: #a5b4fc;
 
   /* Soft conflict tints tuned for dark. */
   --soft-yellow: #3b3414;

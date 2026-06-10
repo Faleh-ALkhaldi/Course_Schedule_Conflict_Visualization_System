@@ -163,7 +163,7 @@ export default function AddCourseModal({ onClose, showToast }) {
             {/* NEW-FU-479 (Phase 115): the "SWE" prefix is fixed by the system — the user
                 types only the 3-digit number (101–599); the stored code is "SWE " + digits. */}
             <div style={{ display: 'flex', alignItems: 'stretch', gap: 8 }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', padding: '0 12px', borderRadius: 8, background: 'var(--surface-2, #eef2f7)', fontWeight: 700, letterSpacing: '.5px' }}>SWE</span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', padding: '0 12px', borderRadius: 8, background: 'var(--bg-app)', color: 'var(--fg-dim)', fontWeight: 700, letterSpacing: '.5px' }}>SWE</span>
               <input style={{ flex: 1 }} inputMode="numeric" maxLength={3} placeholder="206"
                 aria-label="Course number (101–599)"
                 aria-invalid={!!codeError || !!dupCodeError}

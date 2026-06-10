@@ -1085,8 +1085,8 @@ export default function SchedulerPage() {
                   to register — placeholders ("dummies") still stand in for missing ones. */}
               {view === VIEWS.COURSE && (dummyInstrCount > 0 || dummyVenueCount > 0) && (
                 <span className="view-dummy-advisory" role="status"
-                  style={{ marginLeft: 14, fontSize: '.78rem', fontWeight: 600, color: '#b45309',
-                    background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '3px 10px' }}>
+                  style={{ marginLeft: 14, fontSize: '.78rem', fontWeight: 600,
+                    borderRadius: 8, padding: '3px 10px' }}>
                   <Ico name="info" /> To finalize this schedule, add{dummyInstrCount > 0 ? ` ${dummyInstrCount} more instructor${dummyInstrCount === 1 ? '' : 's'}` : ''}{dummyInstrCount > 0 && dummyVenueCount > 0 ? ' and' : ''}{dummyVenueCount > 0 ? ` ${dummyVenueCount} more venue${dummyVenueCount === 1 ? '' : 's'}` : ''}.
                 </span>
               )}
@@ -1227,19 +1227,20 @@ export default function SchedulerPage() {
         }}>
           <style>{`@keyframes suggest-busy-spin { to { transform: rotate(360deg); } }`}</style>
           <div style={{
-            background: '#fff', borderRadius: 14, padding: '26px 34px', minWidth: 260,
+            background: 'var(--bg-elevated)', borderRadius: 14, padding: '26px 34px', minWidth: 260,
+            border: '1px solid var(--border-subtle)',
             boxShadow: '0 12px 40px rgba(0,0,0,0.25)',
             display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
           }}>
             <div style={{
               width: 34, height: 34, borderRadius: '50%',
-              border: '3px solid #d6dff0', borderTopColor: '#0d9488',
+              border: '3px solid var(--border-strong)', borderTopColor: 'var(--teal-500)',
               animation: 'suggest-busy-spin 0.8s linear infinite',
             }} />
-            <div style={{ fontWeight: 600, color: '#0F1F3D', fontSize: 14.5, textAlign: 'center' }}>
+            <div style={{ fontWeight: 600, color: 'var(--fg)', fontSize: 14.5, textAlign: 'center' }}>
               {suggestBusy.message}
             </div>
-            <div style={{ fontSize: 12, color: '#64748b' }}>Please wait — don’t refresh.</div>
+            <div style={{ fontSize: 12, color: 'var(--fg-muted)' }}>Please wait — don’t refresh.</div>
           </div>
         </div>
       )}

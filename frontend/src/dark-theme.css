@@ -88,6 +88,25 @@
    a light surface") goes dark-on-dark once those surfaces are themed. These are
    all heading/strong/code text on modal + sidebar dark surfaces → light them.
    (navy stays a dark BACKGROUND for the Save button / Suggest header, untouched.) */
+/* Inline field-validation banners (SectionModal / AddCourseModal /
+   AddInstructorModal share the .sm-inline-error class). Light uses rose-50 fill
+   + rose-700 text; on dark that pale-pink panel glares. Re-tint to a deep rose
+   that keeps the same alarm hue with a light, AA-passing label. */
+[data-theme="dark"] .sm-inline-error {
+  background: #3a1a1f; border-color: #5e2a30; color: #fca5a5;
+}
+[data-theme="dark"] .sm-inline-error .sm-ico { color: #f87171; }
+[data-theme="dark"] .sm-secnum-wrap-invalid .sm-secnum-digits,
+[data-theme="dark"] .sm-secnum-wrap-invalid .sm-secnum-prefix { border-color: #f87171; }
+
+/* Suggest "recommended" badge uses a literal teal-700 text no token can reach. */
+[data-theme="dark"] .suggest-recommend-badge { color: #a5b4fc; }
+
+/* DecisionModal primary button consumes --teal-600 as a BACKGROUND on :hover;
+   the dark --teal-600 (a light indigo) would wash out the white label, so pin
+   the hover to a deep indigo press state instead. */
+[data-theme="dark"] .decision-btn.primary:hover { background: #4338ca; }
+
 [data-theme="dark"] .sm-end-preview strong,
 [data-theme="dark"] .sm-conflict-list strong,
 [data-theme="dark"] .sm-confirm-text strong,

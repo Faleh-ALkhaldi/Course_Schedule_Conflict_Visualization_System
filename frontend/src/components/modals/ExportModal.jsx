@@ -176,8 +176,8 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                         style={{
                           width:'calc(100% - 24px)', fontSize:'.92rem', fontWeight:500,
                           padding:'9px 12px',
-                          background:'#fff',
-                          color: instrId ? 'var(--slate-800, #1e293b)' : '#64748b',
+                          background:'var(--bg-elevated)',
+                          color: instrId ? 'var(--fg)' : 'var(--fg-muted)',
                           border: `2px solid ${instrId ? 'var(--teal-500, #14b8a6)' : '#f59e0b'}`,
                           borderRadius:8, cursor:'pointer',
                           boxShadow: instrId ? 'none' : '0 0 0 3px rgba(245, 158, 11, .12)',
@@ -216,8 +216,8 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                         style={{
                           width:'calc(100% - 24px)', fontSize:'.92rem', fontWeight:500,
                           padding:'9px 12px',
-                          background:'#fff',
-                          color: venueId ? 'var(--slate-800, #1e293b)' : '#64748b',
+                          background:'var(--bg-elevated)',
+                          color: venueId ? 'var(--fg)' : 'var(--fg-muted)',
                           border: `2px solid ${venueId ? 'var(--teal-500, #14b8a6)' : '#f59e0b'}`,
                           borderRadius:8, cursor:'pointer',
                           boxShadow: venueId ? 'none' : '0 0 0 3px rgba(245, 158, 11, .12)',
@@ -258,9 +258,9 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                         style={{
                           display:'flex', flexDirection:'column', alignItems:'center', gap:2,
                           padding:'10px 6px', borderRadius:8, cursor:'pointer',
-                          background: active ? 'rgba(13,148,136,.08)' : '#fff',
+                          background: active ? 'rgba(13,148,136,.08)' : 'var(--bg-elevated)',
                           border: `1.5px solid ${active ? 'var(--teal-500)' : 'var(--slate-200)'}`,
-                          color: active ? 'var(--teal-700, #0f766e)' : 'var(--slate-700)',
+                          color: active ? 'var(--teal-700, #0f766e)' : 'var(--fg-dim)',
                           fontWeight: active ? 600 : 500, fontSize:'.82rem',
                           transition:'background .15s, border-color .15s',
                         }}

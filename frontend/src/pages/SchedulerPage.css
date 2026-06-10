@@ -104,6 +104,15 @@
 .scheduler-archived-icon {
   font-size: 18px;
 }
+
+/* NEW-FU-480 advisory pill ("add N more instructors/venues"). The amber chrome
+   lives here (not inline) so the dark theme can override it — inline styles win
+   over the cascade, so only layout stays inline on the element. */
+.view-dummy-advisory {
+  color: #b45309;               /* amber-700 — AA on amber-50 */
+  background: #fffbeb;          /* amber-50 */
+  border: 1px solid #fde68a;    /* amber-300 */
+}
 .scheduler-archived-msg strong {
   font-weight: 700;
 }
@@ -181,3 +190,6 @@
 [data-theme="dark"] .sg-vt-btn:hover { color: var(--fg); }
 [data-theme="dark"] .sg-vt-btn.active { background: var(--accent); color: var(--accent-contrast); }
 [data-theme="dark"] .sg-vt-btn + .sg-vt-btn { border-left-color: var(--border-strong); }
+[data-theme="dark"] .view-dummy-advisory {
+  color: #fcd34d; background: #2a2410; border-color: #5a4a1e;
+}
