@@ -88,11 +88,11 @@
      prior palette where Senior and Graduate shared an identical border (#6b3fa0)
      and Junior≈Graduate. Light fills are deepened so the fill carries the hue
      (pale pastels can't); verified combined CVD ΔE 9.5, text ≥9.1, border ≥3:1. */
-  --lvl-fr-bg:#c9e7f6; --lvl-fr-bd:#1f7fb0; --lvl-fr-tx:#0c3a47;  /* sky blue */
-  --lvl-so-bg:#cdebd9; --lvl-so-bd:#1a8a63; --lvl-so-tx:#123d2c;  /* bluish green */
+  --lvl-fr-bg:#c9ecea; --lvl-fr-bd:#167f78; --lvl-fr-tx:#0a3d39;  /* teal */
+  --lvl-so-bg:#dcefc4; --lvl-so-bd:#4f8f1f; --lvl-so-tx:#2c4d12;  /* lime green */
   --lvl-ju-bg:#fbe7b6; --lvl-ju-bd:#9a6a08; --lvl-ju-tx:#523600;  /* orange */
-  --lvl-se-bg:#ecd7ec; --lvl-se-bd:#9c4f86; --lvl-se-tx:#46203f;  /* reddish purple */
-  --lvl-gr-bg:#d3e2f6; --lvl-gr-bd:#2f63a8; --lvl-gr-tx:#143356;  /* blue (was tan, == Senior border) */
+  --lvl-se-bg:#e7ddf6; --lvl-se-bd:#7a4fc0; --lvl-se-tx:#36215e;  /* purple */
+  --lvl-gr-bg:#f7d9d6; --lvl-gr-bd:#c2362e; --lvl-gr-tx:#5e1c18;  /* red — Freshman(teal)↔Graduate(red) maximally opposite */
   --conflict-soft-bg:#fffacd; --conflict-hard-bg:#ffd5d5;
 
   /* Semantic status chip tokens — used by inline-styled badges that can't reach
@@ -166,11 +166,11 @@
      BORDER (the primary cue on dark cards), dark fills + light text. The border
      hues are chosen so the worst-case separation across normal/protan/deutan/
      tritan is ΔE 11.1 (was 2.3 — Sophomore≈Graduate under deuteranopia). */
-  --lvl-fr-bg:#0e2630; --lvl-fr-bd:#56b4e9; --lvl-fr-tx:#bfe6fb;  /* sky blue */
-  --lvl-so-bg:#0c2a20; --lvl-so-bd:#1aa37a; --lvl-so-tx:#9fe8cf;  /* bluish green */
+  --lvl-fr-bg:#07292a; --lvl-fr-bd:#19b0a7; --lvl-fr-tx:#8fe6df;  /* teal */
+  --lvl-so-bg:#1a2a0c; --lvl-so-bd:#6bbf3a; --lvl-so-tx:#c3e89a;  /* lime green */
   --lvl-ju-bg:#2e2408; --lvl-ju-bd:#e69f00; --lvl-ju-tx:#f3c969;  /* orange */
-  --lvl-se-bg:#2a1530; --lvl-se-bd:#cc79a7; --lvl-se-tx:#ecb3d6;  /* reddish purple */
-  --lvl-gr-bg:#102540; --lvl-gr-bd:#4189d9; --lvl-gr-tx:#aecdf3;  /* blue — lightened from #3a86d6 so it clears AA as the sidebar level-label text (the border doubles as that label); keeps CVD worst-case ΔE 8.4 */
+  --lvl-se-bg:#1f1733; --lvl-se-bd:#9b6fd6; --lvl-se-tx:#d3c2f0;  /* purple */
+  --lvl-gr-bg:#2e1413; --lvl-gr-bd:#e0524a; --lvl-gr-tx:#f3b0ab;  /* red — Freshman(teal)↔Graduate(red) maximally opposite */
   --conflict-soft-bg:#33280a; --conflict-hard-bg:#3a1a1a;
   --warn-bg:#2a2410; --warn-fg:#fcd34d;
   --danger-bg:#3a1a1a; --danger-fg:#fca5a5;
