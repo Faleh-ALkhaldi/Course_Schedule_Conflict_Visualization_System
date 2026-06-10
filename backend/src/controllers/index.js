@@ -16,6 +16,9 @@ const suggestSvc = require('../services/SuggestService');
 // enforced at section create / update; auto-suggester also imports it
 // to filter candidates before greedy assignment.
 const sectionPattern = require('../domain/sectionPattern');
+const { filterCoursesForTerm, isCourseAllowedInTerm, disallowReason } = require('../domain/courseTermValidity');
+const { courseCodeError, courseNameError, courseFlagError } = require('../domain/courseFormat');
+const { R06_TIME_EXEMPT_COURSES, TIME_WINDOWS } = require('../config/constants'); // NEW-FU-497 (Phase 121)
 const { ScheduleRepository, VenueRepository, CourseRepository } = require('../repositories/repositories');
 const InstructorRepository = require('../repositories/InstructorRepository');
 // NEW-FU-23: SectionRepository import dropped — controllers don't touch
@@ -50,19 +53,25 @@ const VALID_VENUE_TYPES = new Set(['LectureHall','Laboratory','Multipurpose']);
 // padded, no '00'). Matches the DB CHECK constraint added in migration 009.
 const SECTION_NUM_RE = /^(0[1-9]|[1-9][0-9])$/;
 // NEW-FU-96: section_type values mirror SECTION_TYPE in constants.js.
-const VALID_SECTION_TYPES = new Set(['Lec','Lab']);
+// NEW-FU-498 (Phase 122): + Prj (Project) and Ths (Thesis).
+const VALID_SECTION_TYPES = new Set(['Lec','Lab','Prj','Ths']);
 // NEW-FU-108: type-scoped section# ranges. Mirrors SECTION_NUMBER_RANGE in
 // constants.js (kept inline here for hot-path validation perf — no module
-// crossing per request).
+// crossing per request). NEW-FU-498: Prj/Ths share the Lec 01–49 range.
 const SECTION_NUM_RE_BY_TYPE = {
   Lec: /^(0[1-9]|[1-4][0-9])$/,
   Lab: /^[5-9][0-9]$/,
+  Prj: /^(0[1-9]|[1-4][0-9])$/,
+  Ths: /^(0[1-9]|[1-4][0-9])$/,
 };
 // NEW-FU-109: duration limits by type. Frontend offers quick-picks; backend
 // validates a numeric in-range minute count.
+// NEW-FU-498 (Phase 122): Prj/Ths allow long single blocks (50–180).
 const SECTION_DURATION_BY_TYPE = {
   Lec: { min: 50, max: 75  },
   Lab: { min: 50, max: 165 },
+  Prj: { min: 50, max: 180 },
+  Ths: { min: 50, max: 180 },
 };
 
 // NEW-FU-109: compute duration in minutes between two HH:MM strings.
@@ -82,6 +91,25 @@ function isTime(s)  { return typeof s === 'string' && HHMM_RE.test(s); }
 function isDay(s)   { return typeof s === 'string' && VALID_DAYS.has(s); }
 // NEW-FU-95: matches the DB-level CHECK in migration 009.
 function isSectionNumber(s) { return typeof s === 'string' && SECTION_NUM_RE.test(s); }
+// NEW-FU-466 (Phase 112): office hours may only be 08:00–16:00 (8 AM–4 PM).
+// Mirrors OFFICE_HOURS_WINDOW in constants.js (kept inline — same hot-path
+// reasoning as SECTION_NUM_RE_BY_TYPE). Returns a plain-language message when
+// out of window (start before 08:00 or end after 16:00), else null. The root
+// cause of the R-04 storm was an out-of-window early block (e.g. 04:00) that
+// overlapped an instructor's whole morning; this is the backend guard.
+const OH_WINDOW = { startStr: '08:00', endStr: '16:00' };
+function officeHoursWindowError(startTime, endTime) {
+  const s = String(startTime).slice(0, 5), e = String(endTime).slice(0, 5);
+  // NEW-FU-496 (Phase 120): check BOTH edges of BOTH endpoints, so a start AFTER
+  // 16:00 (e.g. 17:00) or an end BEFORE 08:00 also returns the window message —
+  // previously only start<08:00 / end>16:00 were caught, and an out-of-window
+  // start surfaced only as the less-helpful "start before end" ordering error.
+  if (s < OH_WINDOW.startStr || s > OH_WINDOW.endStr ||
+      e < OH_WINDOW.startStr || e > OH_WINDOW.endStr) {
+    return `Office hours must be between ${OH_WINDOW.startStr} and ${OH_WINDOW.endStr} (8:00 AM to 4:00 PM).`;
+  }
+  return null;
+}
 function badRequest(res, msg) { return res.status(400).json({ error: msg }); }
 
 // NEW-FU-46: bounded-string validator mirroring the DB VARCHAR column
@@ -104,6 +132,13 @@ function normalizeName(s) {
   if (typeof s !== 'string') return null;
   const trimmed = s.trim();
   return trimmed.length === 0 ? null : trimmed;
+}
+// NEW-FU-419 (Phase 104 item 5): instructor names are stored ALL CAPS — the
+// established convention across the seed ("HASAN AL-KAF"). Trim, collapse inner
+// whitespace, then upper-case, so every create/update is consistent.
+function normalizeInstructorName(s) {
+  const n = normalizeName(s);
+  return n ? n.replace(/\s+/g, ' ').toUpperCase() : n;
 }
 
 // NEW-M4: precomputed dummy hash used when a username doesn't exist, so the
@@ -210,7 +245,7 @@ const createSection = ah(async (req, res) => {
   if (gender !== undefined && gender !== 'M' && gender !== 'F')
     return badRequest(res, 'gender must be "M" or "F".');
   if (!courseId || !sectionNumber || !startTime || !endTime)
-    return badRequest(res, 'courseId, sectionNumber, startTime, endTime required.');
+    return badRequest(res, 'Please choose a course, a section number, a start time and an end time.');
   // NEW-M8: validate input shapes before they reach the DB. Returns precise
   // 400 messages rather than generic "Database constraint violation" 500s.
   if (!isUuid(scheduleId))                              return badRequest(res, 'scheduleId must be a UUID.');
@@ -218,20 +253,32 @@ const createSection = ah(async (req, res) => {
   if (instructorId && !isUuid(instructorId))            return badRequest(res, 'instructorId must be a UUID.');
   if (venueId && !isUuid(venueId))                      return badRequest(res, 'venueId must be a UUID.');
   if (!isTime(startTime) || !isTime(endTime))           return badRequest(res, 'startTime and endTime must be HH:MM.');
-  // NEW-FU-96: section_type validation. Defaults to 'Lec' if not supplied
+  // NEW-FU-96: section_type validation. Defaults if not supplied
   // (backward-compat for clients that don't know about the new field).
   // 'Lab' is only valid if the course has has_lab=true — we look that up
   // below before insert (after we have the course in hand).
-  const effectiveSectionType = sectionType ?? 'Lec';
+  // NEW-FU-371 (Phase 98 item 2): DERIVE the default type from the section
+  // number's range instead of blindly defaulting to 'Lec'. Section numbers are
+  // type-scoped by domain invariant (Lec 01–49, Lab 50–99), so a '50'–'99'
+  // number unambiguously means a Lab. The old `?? 'Lec'` mis-classified any
+  // Lab section whose creator omitted sectionType — e.g. a cross-day-group
+  // drag-move (SchedulerPage.confirmGroupChange) re-creates the section and,
+  // before this phase, dropped sectionType → a §50 Lab was validated against
+  // the Lec range → false "sectionNumber for Lec sections must be in 01–49"
+  // (and, had it passed, ScheduleService would have silently stored it as a
+  // Lec). Deriving from the number makes the omitted-type path correct.
+  const effectiveSectionType = sectionType
+    ?? (SECTION_NUM_RE_BY_TYPE.Lab.test(String(sectionNumber).trim()) ? 'Lab' : 'Lec');
   if (!VALID_SECTION_TYPES.has(effectiveSectionType))
-    return badRequest(res, `sectionType must be "Lec" or "Lab" (got "${sectionType}").`);
+    return badRequest(res, `sectionType must be "Lec", "Lab", "Prj", or "Ths" (got "${sectionType}").`);
   // NEW-FU-95 + NEW-FU-108: section number must be in the type-scoped range
   // (Lec: 01-49; Lab: 50-99). This is stricter than the old FU-95 check
   // which only enforced format. The DB CHECK constraint (migration 010)
   // enforces the same predicate, so a malformed value rejected here would
   // also be rejected by pg — surfacing the precise client-facing message
   // up front is the point of this validator.
-  const expectedRange = effectiveSectionType === 'Lec' ? '01–49' : '50–99';
+  // NEW-FU-498 (Phase 122): Lab → 50–99; Lec/Prj/Ths → 01–49.
+  const expectedRange = effectiveSectionType === 'Lab' ? '50–99' : '01–49';
   if (!SECTION_NUM_RE_BY_TYPE[effectiveSectionType].test(sectionNumber))
     return badRequest(res, `sectionNumber for ${effectiveSectionType} sections must be in ${expectedRange} (two-digit, zero-padded).`);
   // NEW-FU-109: duration validation by type. Lec: 50..75; Lab: 50..165.
@@ -246,14 +293,48 @@ const createSection = ah(async (req, res) => {
   // the Lab/has_lab gate and the KFUPM pattern validator below.
   const courseRow = await courseRepo.findById(courseId);
   if (!courseRow) return res.status(404).json({ error: 'Course not found.' });
+  // NEW-FU-415 (Phase 103 item 1): reject adding a section of a course that is
+  // not offered in THIS term (SWE 412 after 252, SWE 399 outside Summer).
+  const createSemRow = await query(`SELECT semester FROM schedules WHERE id = $1`, [scheduleId]);
+  const createTermSemester = createSemRow.rows[0]?.semester ?? null;
+  if (!isCourseAllowedInTerm(courseRow.course_code, createTermSemester)) {
+    return res.status(409).json({ error: disallowReason(courseRow.course_code, createTermSemester) });
+  }
   if (effectiveSectionType === 'Lab' && !courseRow.has_lab) {
     return res.status(409).json({
       error: `Course ${courseRow.course_code} is not configured for lab sections. Enable "has lab" on the course first.`,
     });
   }
+  // NEW-FU-475 (Phase 114): instructor AND venue are required for a real section —
+  // server-side backstop for the modal's new hard requirement (was a soft R-09/R-10
+  // warning). External courses carry no section assignment; capstone courses have no
+  // venue. Suggest/Import use their own insert paths, so they are unaffected.
+  if (!courseRow.is_external) {
+    if (!instructorId) return badRequest(res, 'An instructor is required for the section.');
+    if (!courseRow.is_capstone && !venueId) return badRequest(res, 'A venue is required for the section.');
+  }
   // H-3: time-order validation
   if (startTime >= endTime)
     return badRequest(res, 'endTime must be after startTime.');
+  // NEW-FU-454 (Phase 108): enforce the R-06 teaching WINDOW at create time —
+  // server-side defense for the modal's input-time guard, so an out-of-window
+  // section is rejected up front instead of persisting and surfacing later as a
+  // hard conflict.
+  // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00. Capstone is now
+  // bound to the UG window (venue-exempt but NOT time-exempt — every capstone is
+  // a UG Senior course). External courses have no section row → fully exempt.
+  if (!courseRow.is_external && !R06_TIME_EXEMPT_COURSES.has(courseRow.course_code)) {
+    const hm = t => { const [h,mn] = String(t).split(':').map(Number); return (h||0)*60 + (mn||0); };
+    const sMin = hm(startTime), eMin = hm(endTime);
+    // Window from constants.TIME_WINDOWS — same source R-06 uses, so create-time
+    // validation can't drift from the engine. Capstone is bound to the UG window.
+    const win = TIME_WINDOWS[(courseRow.category === 'GR' && !courseRow.is_capstone) ? 'GR' : 'UG'];
+    if (sMin < win.start || eMin > win.end) {
+      const lbl = courseRow.is_capstone ? '07:00–17:10 (Capstone)'
+                : courseRow.category === 'GR' ? '17:20–22:00 (Graduate)' : '07:00–17:10 (Undergraduate)';
+      return badRequest(res, `${courseRow.course_code} must be scheduled within ${lbl} (got ${startTime}–${endTime}).`);
+    }
+  }
   // NEW-FU-237: KFUPM pattern validator. Enforces the (credits ×
   // day-pattern × duration) table from sectionPattern.js. Permissive
   // read, strict write — existing seeded sections that violate the
@@ -295,7 +376,7 @@ const updateSection = ah(async (req, res) => {
   // 'Lec' and 'Lab'. The Lab-requires-has_lab check happens in the service
   // because we need to look up the section's course there.
   if (sectionType != null && !VALID_SECTION_TYPES.has(sectionType))
-    return badRequest(res, `sectionType must be "Lec" or "Lab" (got "${sectionType}").`);
+    return badRequest(res, `sectionType must be "Lec", "Lab", "Prj", or "Ths" (got "${sectionType}").`);
   // NEW-FU-95 + NEW-FU-108: type-scoped section# validation on update.
   // If the caller is changing the section type and/or number, we validate
   // the (type, number) pair. If sectionNumber is provided without type,
@@ -304,7 +385,7 @@ const updateSection = ah(async (req, res) => {
     if (!isSectionNumber(sectionNumber))
       return badRequest(res, 'sectionNumber must be "01"–"99" (two-digit, zero-padded).');
     if (sectionType != null) {
-      const expectedRange = sectionType === 'Lec' ? '01–49' : '50–99';
+      const expectedRange = sectionType === 'Lab' ? '50–99' : '01–49'; // NEW-FU-498: Lec/Prj/Ths → 01–49
       if (!SECTION_NUM_RE_BY_TYPE[sectionType].test(sectionNumber))
         return badRequest(res, `sectionNumber for ${sectionType} sections must be in ${expectedRange}.`);
     }
@@ -313,13 +394,16 @@ const updateSection = ah(async (req, res) => {
   // time fields supplied) and on partial updates that don't change times.
   if (!infoOnly && startTime && endTime) {
     const dur = durationMinutes(startTime, endTime);
-    // For updateSection without a sectionType in body we don't know the
-    // type — use the broader Lab range (50..165) as the outer envelope.
-    // The service layer also locks the section and could re-validate
-    // tighter, but enforcing the union here catches obvious overruns.
-    const typeForDuration = sectionType ?? 'Lab';
+    // NEW-FU-445 (Phase 107 M5): validate duration against the section's ACTUAL
+    // type, not a 'Lab' default. A time-only edit (drag-resize) sends no type, so
+    // the old default (50–165) let a Lec be resized to an illegal 76–165 minutes.
+    let typeForDuration = sectionType;
+    if (!typeForDuration) {
+      const r = await query(`SELECT section_type FROM sections WHERE id = $1`, [sectionId]);
+      typeForDuration = r.rows[0]?.section_type ?? 'Lab';
+    }
     const durLimits = SECTION_DURATION_BY_TYPE[typeForDuration];
-    if (dur < durLimits.min || dur > durLimits.max)
+    if (durLimits && (dur < durLimits.min || dur > durLimits.max))
       return badRequest(res, `${typeForDuration} section duration must be ${durLimits.min}–${durLimits.max} minutes (got ${dur}).`);
   }
   try {
@@ -338,6 +422,33 @@ const updateSection = ah(async (req, res) => {
     if (!isDay(day))                              return badRequest(res, `Invalid day: "${day}".`);
     if (!isTime(startTime) || !isTime(endTime))   return badRequest(res, 'startTime and endTime must be HH:MM.');
     if (startTime >= endTime)                     return badRequest(res, 'endTime must be after startTime.');
+    // NEW-FU-494 (Phase 119 item 4): enforce R-06 teaching window on TIME EDITS
+    // (drag-move, SectionModal time tab). The create path (createSection) already
+    // does this; updateSection lacked it, so dragging a UG section past its window
+    // or a GR section before its window was accepted and just surfaced as a hard R-06.
+    // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00; capstone bound to the
+    // UG window (venue-exempt but NOT time-exempt); external fully exempt.
+    {
+      const secRow = await query(
+        `SELECT c.is_external, c.is_capstone, c.category, c.course_code
+           FROM sections s JOIN courses c ON c.id = s.course_id WHERE s.id = $1`,
+        [sectionId]
+      );
+      if (secRow.rows.length > 0) {
+        const cr = secRow.rows[0];
+        if (!cr.is_external && !R06_TIME_EXEMPT_COURSES.has(cr.course_code)) {
+          const hm = t => { const [h,mn] = String(t).split(':').map(Number); return (h||0)*60 + (mn||0); };
+          const sMin = hm(startTime), eMin = hm(endTime);
+          // Window from constants.TIME_WINDOWS (same source as R-06; capstone = UG window).
+          const win = TIME_WINDOWS[(cr.category === 'GR' && !cr.is_capstone) ? 'GR' : 'UG'];
+          if (sMin < win.start || eMin > win.end) {
+            const lbl = cr.is_capstone ? '07:00–17:10 (Capstone)'
+                      : cr.category === 'GR' ? '17:20–22:00 (Graduate)' : '07:00–17:10 (Undergraduate)';
+            return badRequest(res, `${cr.course_code} must be scheduled within ${lbl} (got ${startTime}–${endTime}).`);
+          }
+        }
+      }
+    }
     const result = await schedSvc.assignSection(sectionId, { instructorId, venueId, day, startTime, endTime });
     res.json({ section: null, conflicts: result });
   } catch(err) {
@@ -500,7 +611,20 @@ const exportSchedule = ah(async (req, res) => {
 // NEW-FU-274 (Phase 51 #5): optional ?term=251 query — when supplied, only
 // returns courses with at least one section in that term's schedule. Keeps
 // term sidebars from cluttering with courses offered in other terms.
-const getCourses = ah(async (req, res) => { res.json(await courseRepo.findAll(req.query.term || null)); });
+// NEW-FU-415 (Phase 103 item 1): course listing, two scopes, both excluding
+// courses not offered in the given term (SWE 412 after 252, SWE 399 outside
+// Summer):
+//   • default      → courses that already have SECTIONS in the term (term-scoped).
+//   • scope=catalog→ the FULL global program catalog (so the Suggest modal still
+//                    reveals Graduate / not-yet-added courses — Phase 99 item 6),
+//                    minus the curriculum-invalid ones for that term.
+const getCourses = ah(async (req, res) => {
+  const term = req.query.term || null;
+  const courses = req.query.scope === 'catalog'
+    ? await courseRepo.findAll(null)   // whole catalog
+    : await courseRepo.findAll(term);  // only those with sections in the term
+  res.json(filterCoursesForTerm(courses, term));
+});
 
 const createCourse = ah(async (req, res) => {
   const { courseCode, name, credits, academicLevel, category, numSections, hasLab,
@@ -518,6 +642,18 @@ const createCourse = ah(async (req, res) => {
   // NEW-FU-46: enforce DB VARCHAR limits for course_code (20) and name (120).
   if (!isBoundedString(courseCode, 20)) return badLength(res, 'courseCode', 20);
   if (!isBoundedString(name,      120)) return badLength(res, 'name',      120);
+  // NEW-FU-422 (Phase 104 items 3+4): strict code (SWE 101–599) + real name +
+  // single-flag (at most one of has_lab / capstone / external).
+  { const e = courseCodeError(courseCode); if (e) return badRequest(res, e); }
+  { const e = courseNameError(name);       if (e) return badRequest(res, e); }
+  { const e = courseFlagError({ hasLab, isCapstone, isExternal }); if (e) return badRequest(res, e); }
+  // NEW-FU-484 (Phase 118 item 3): level-gated flag constraints.
+  // CAPSTONE requires Undergraduate + Senior; EXTERNAL requires Undergraduate + Junior.
+  // Frontend disables the checkboxes, but the backend is the authoritative gate.
+  if (isCapstone && !(category === 'UG' && academicLevel === 'Senior'))
+    return badRequest(res, 'The Capstone flag is only allowed for Undergraduate Senior courses.');
+  if (isExternal && !(category === 'UG' && academicLevel === 'Junior'))
+    return badRequest(res, 'The External flag is only allowed for Undergraduate Junior courses.');
   // NEW-FU-278 (Phase 54): credits range 0..4 per KFUPM catalog. 0 is a
   // legal value (SWE 413 is 0-credit, capstone part 1). Migration 018
   // relaxed the DB CHECK from `> 0` to `>= 0` to match.
@@ -553,6 +689,9 @@ const updateCourse = ah(async (req, res) => {
   // NEW-FU-46: enforce DB VARCHAR limits on optional fields when provided.
   if (courseCode != null && !isBoundedString(courseCode, 20))  return badLength(res, 'courseCode', 20);
   if (name       != null && !isBoundedString(name,      120))  return badLength(res, 'name',      120);
+  // NEW-FU-422 (Phase 104 item 4): same strict code/name format on edit.
+  if (courseCode != null) { const e = courseCodeError(courseCode); if (e) return badRequest(res, e); }
+  if (name       != null) { const e = courseNameError(name);       if (e) return badRequest(res, e); }
   // NEW-FU-15: validate numeric fields on update too (create-time validation
   // exists; update was leaking bad values through to pg as opaque errors).
   if (credits != null) {
@@ -589,6 +728,71 @@ const deleteCourse = ah(async (req, res) => {
 // NEW-FU-274 (Phase 51 #5): same ?term= filter as getCourses.
 const getInstructors = ah(async (req, res) => { res.json(await instrRepo.findAll(req.query.term || null)); });
 
+// NEW-FU-434 (Phase 106 item 6): when a real instructor/venue is created while
+// the active term still has placeholders, AUTOMATICALLY replace the OLDEST
+// matching placeholder — reassign its sections to the new real entity and delete
+// the placeholder (a dummy instructor's office hours cascade-delete). The active
+// term is threaded from the client as req.body.ownerSemester. Transactional so
+// reassign+delete can't half-apply. Instructors match by recency; venues also
+// match by TYPE (a real Laboratory replaces a placeholder Laboratory, never a
+// LectureHall — which would re-introduce R-11/R-12). Returns the replaced
+// placeholder { id, name } or null.
+async function replaceOldestDummyInstructor(ownerSemester, newInstructorId) {
+  // NEW-FU-436 (Phase 107 H2): validate the term code (don't trust a raw body
+  // field) and scope the reassign to the owner term's schedule(s) so a stray
+  // ownerSemester can never repoint sections in another (or finalized) term.
+  if (!ownerSemester || !/^\d{2}[123]$/.test(String(ownerSemester))) return null;
+  const { getClient } = require('../config/db');
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const d = await client.query(
+      `SELECT id, name FROM instructors WHERE is_dummy = true AND owner_semester = $1
+       ORDER BY created_at ASC LIMIT 1 FOR UPDATE`, [ownerSemester]);
+    if (d.rowCount === 0) { await client.query('ROLLBACK'); return null; }
+    const dummy = d.rows[0];
+    await client.query(
+      `UPDATE sections SET instructor_id = $1
+       WHERE instructor_id = $2 AND schedule_id IN (SELECT id FROM schedules WHERE semester = $3)`,
+      [newInstructorId, dummy.id, ownerSemester]);
+    await client.query(`DELETE FROM instructors WHERE id = $1`, [dummy.id]); // office_hours cascade
+    await client.query('COMMIT');
+    return { id: dummy.id, name: dummy.name };
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; }
+  finally { try { client.release(); } catch { /* ignore */ } }
+}
+async function replaceOldestDummyVenue(ownerSemester, newVenueId, newType) {
+  // NEW-FU-436 (Phase 107 H2): validate + scope to the owner term's schedule(s).
+  if (!ownerSemester || !/^\d{2}[123]$/.test(String(ownerSemester))) return null;
+  const { getClient } = require('../config/db');
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const d = await client.query(
+      `SELECT id, name FROM venues WHERE is_dummy = true AND owner_semester = $1 AND type = $2
+       ORDER BY created_at ASC LIMIT 1 FOR UPDATE`, [ownerSemester, newType]);
+    if (d.rowCount === 0) { await client.query('ROLLBACK'); return null; }
+    const dummy = d.rows[0];
+    await client.query(
+      `UPDATE sections SET venue_id = $1
+       WHERE venue_id = $2 AND schedule_id IN (SELECT id FROM schedules WHERE semester = $3)`,
+      [newVenueId, dummy.id, ownerSemester]);
+    await client.query(`DELETE FROM venues WHERE id = $1`, [dummy.id]);
+    await client.query('COMMIT');
+    return { id: dummy.id, name: dummy.name };
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; }
+  finally { try { client.release(); } catch { /* ignore */ } }
+}
+
+// NEW-FU-461 (Phase 109): a sensible default office-hours block for a new instructor —
+// the most-common day among existing instructors + a mid-morning hour (within the real
+// office-hours window). Shown pre-filled in the Add-Instructor panel; also the auto-default.
+async function suggestedOfficeHour() {
+  const r = await query(`SELECT day, COUNT(*) c FROM office_hours GROUP BY day ORDER BY c DESC, day LIMIT 1`);
+  return { day: r.rows[0]?.day || 'Sunday', startTime: '10:00', endTime: '11:00' };
+}
+const getSuggestedOfficeHour = ah(async (_req, res) => { res.json(await suggestedOfficeHour()); });
+
 const createInstructor = ah(async (req, res) => {
   const { name, email } = req.body;
   if (!name || !email)
@@ -603,8 +807,28 @@ const createInstructor = ah(async (req, res) => {
   // NEW-FU-59: trim leading/trailing whitespace so " Dr. Hassan " and
   // "Dr. Hassan" don't end up as two distinct DB rows under the UNIQUE
   // constraint they nominally share.
-  const instructor = await instrRepo.create({ name: normalizeName(name), email: normalizeName(email) });
-  res.status(201).json(instructor);
+  const instructor = await instrRepo.create({ name: normalizeInstructorName(name), email: normalizeName(email) });
+  // NEW-FU-461 (Phase 109): capture office hours up front so a new instructor never
+  // trips the "no office hours" flag. Use what the Add-Instructor panel sends, or a
+  // sensible default — even an API-created instructor gets office hours.
+  const ohIn = req.body.officeHours;
+  let officeHour;
+  if (ohIn && ohIn.day && ohIn.startTime && ohIn.endTime) {
+    if (!isDay(ohIn.day) || !isTime(ohIn.startTime) || !isTime(ohIn.endTime))
+      return badRequest(res, 'Office hours need a valid day, start time and end time.');
+    // NEW-FU-496 (Phase 120): window check BEFORE the ordering check, so an
+    // out-of-window value returns the window message (which names 08:00–16:00)
+    // rather than the ambiguous "start before end" message.
+    { const we = officeHoursWindowError(ohIn.startTime, ohIn.endTime); if (we) return badRequest(res, we); } // NEW-FU-466 (Phase 112)
+    if (ohIn.startTime >= ohIn.endTime)
+      return badRequest(res, 'Office hours need a start time before the end time (within 08:00–16:00).');
+    officeHour = await instrRepo.addOfficeHour(instructor.id, { day: ohIn.day, startTime: ohIn.startTime, endTime: ohIn.endTime });
+  } else {
+    officeHour = await instrRepo.addOfficeHour(instructor.id, await suggestedOfficeHour());
+  }
+  // NEW-FU-434 (Phase 106 item 6): auto-replace a placeholder in the active term.
+  const replacedDummy = await replaceOldestDummyInstructor(req.body.ownerSemester, instructor.id);
+  res.status(201).json({ ...instructor, officeHour, replacedDummy });
 });
 
 const updateInstructor = ah(async (req, res) => {
@@ -618,9 +842,12 @@ const updateInstructor = ah(async (req, res) => {
   if (email != null && !isBoundedString(email, 120)) return badLength(res, 'email', 120);
   // NEW-FU-59: trim before write so updates match the same normalization
   // applied at create time.
+  // NEW-FU-439 (Phase 107 M4): partial update — COALESCE so a body with only one
+  // field doesn't NULL the other (instructors.name/email are NOT NULL). Parity
+  // with updateCourse/updateVenue, which already do partial updates.
   const upd = await query(
-    `UPDATE instructors SET name=$2, email=$3, updated_at=NOW() WHERE id=$1`,
-    [req.params.instructorId, normalizeName(name), normalizeName(email)]
+    `UPDATE instructors SET name=COALESCE($2,name), email=COALESCE($3,email), updated_at=NOW() WHERE id=$1`,
+    [req.params.instructorId, name != null ? normalizeInstructorName(name) : null, email != null ? normalizeName(email) : null]
   );
   // NEW-M9: surface missing rows as 404.
   if (upd.rowCount === 0) return res.status(404).json({ error: 'Instructor not found.' });
@@ -704,12 +931,14 @@ async function withInstructorLock(instructorId, fn) {
 const addOfficeHour = ah(async (req, res) => {
   const { day, startTime, endTime } = req.body;
   if (!day || !startTime || !endTime)
-    return badRequest(res, 'day, startTime, endTime required.');
+    return badRequest(res, 'Please provide a day, a start time and an end time.');
   // NEW-M8: validate input shapes.
   if (!isUuid(req.params.instructorId))         return badRequest(res, 'instructorId must be a UUID.');
   if (!isDay(day))                              return badRequest(res, `Invalid day: "${day}".`);
   if (!isTime(startTime) || !isTime(endTime))   return badRequest(res, 'startTime and endTime must be HH:MM.');
-  if (startTime >= endTime)                     return badRequest(res, 'endTime must be after startTime.');
+  // NEW-FU-496 (Phase 120): window check before the ordering check (see createInstructor).
+  { const we = officeHoursWindowError(startTime, endTime); if (we) return badRequest(res, we); } // NEW-FU-466 (Phase 112)
+  if (startTime >= endTime)                     return badRequest(res, 'endTime must be after startTime (within 08:00–16:00).');
   // NEW-FU-52 + NEW-FU-64: overlap check + write under FOR UPDATE on the
   // instructor row, so concurrent admin OH writes serialize behind the lock
   // and the second one sees the first's commit (no TOCTOU window).
@@ -739,12 +968,14 @@ const addOfficeHour = ah(async (req, res) => {
 const updateOfficeHour = ah(async (req, res) => {
   const { day, startTime, endTime } = req.body;
   if (!day || !startTime || !endTime)
-    return badRequest(res, 'day, startTime, endTime required.');
+    return badRequest(res, 'Please provide a day, a start time and an end time.');
   if (!isUuid(req.params.instructorId))         return badRequest(res, 'instructorId must be a UUID.');
   if (!isUuid(req.params.ohId))                 return badRequest(res, 'ohId must be a UUID.');
   if (!isDay(day))                              return badRequest(res, `Invalid day: "${day}".`);
   if (!isTime(startTime) || !isTime(endTime))   return badRequest(res, 'startTime and endTime must be HH:MM.');
-  if (startTime >= endTime)                     return badRequest(res, 'endTime must be after startTime.');
+  // NEW-FU-496 (Phase 120): window check before the ordering check (see createInstructor).
+  { const we = officeHoursWindowError(startTime, endTime); if (we) return badRequest(res, we); } // NEW-FU-466 (Phase 112)
+  if (startTime >= endTime)                     return badRequest(res, 'endTime must be after startTime (within 08:00–16:00).');
   // NEW-FU-52 + NEW-FU-64: overlap check + write under FOR UPDATE on the
   // instructor row to serialize concurrent admin writes.
   try {
@@ -782,6 +1013,49 @@ const deleteOfficeHour = ah(async (req, res) => {
 // NEW-FU-274 (Phase 51 #5): same ?term= filter as getCourses.
 const getVenues = ah(async (req, res) => { res.json(await venueRepo.findAll(req.query.term || null)); });
 
+// NEW-FU-483 (Phase 117): whole-room vs sub-room identity rule. Replaces the Phase-115
+// venueCanonicalKey approach (which only prevented format variants of the same key,
+// but did not enforce the whole-room/sub-room exclusivity constraint).
+//
+// A room identified by building+room may exist as the whole room (no suffix) OR as
+// one-or-more sub-rooms (with suffixes) — never both. Format variants like "01-002"
+// and "01-0002" are the same building+room (parsed integers, not strings).
+//
+// Returns a plain-English conflict message when adding `newName` is blocked, null when allowed.
+function venueConflictError(newName, existingNames) {
+  function parseParts(n) {
+    const ps = String(n || '').trim().split('-');
+    return {
+      bldg:   parseInt(ps[0], 10),
+      room:   parseInt(ps[1], 10),
+      suffix: (ps[2] || '').toUpperCase(),
+    };
+  }
+  const { bldg: nb, room: nr, suffix: ns } = parseParts(newName);
+  if (isNaN(nb) || isNaN(nr)) return null; // malformed — other validators handle it
+
+  const sameRoom = (existingNames || []).filter(n => {
+    const { bldg, room } = parseParts(n);
+    return bldg === nb && room === nr;
+  });
+
+  if (sameRoom.length === 0) return null; // nothing here yet — allow
+
+  if (!ns) {
+    // Adding a whole room (no suffix)
+    if (sameRoom.some(n => !parseParts(n).suffix))
+      return 'A room with this building and room number already exists.';
+    return 'Sub-rooms of this room already exist. The whole room cannot be added alongside its sub-rooms.';
+  } else {
+    // Adding a sub-room (has suffix)
+    if (sameRoom.some(n => !parseParts(n).suffix))
+      return 'The whole room is already registered. Sub-rooms cannot be added once the whole room exists.';
+    if (sameRoom.some(n => parseParts(n).suffix === ns))
+      return 'A sub-room with this suffix already exists. Choose a different suffix.';
+    return null; // different suffix, no whole room — allowed
+  }
+}
+
 const createVenue = ah(async (req, res) => {
   const { name, type, capacity } = req.body;
   if (!name || !type || capacity == null)
@@ -789,13 +1063,23 @@ const createVenue = ah(async (req, res) => {
   // NEW-M8: validate venue type enum + capacity range.
   if (!VALID_VENUE_TYPES.has(type)) return badRequest(res, `Invalid venue type: "${type}".`);
   const cap = parseInt(capacity, 10);
-  if (!Number.isInteger(cap) || cap < 1 || cap > 10000)
-    return badRequest(res, 'capacity must be an integer between 1 and 10000.');
+  // NEW-FU-225 (Phase 97): cap 10000 → 250 (realistic KFUPM venue max).
+  if (!Number.isInteger(cap) || cap < 1 || cap > 250)
+    return badRequest(res, 'capacity must be an integer between 1 and 250.');
   // NEW-FU-46: enforce DB VARCHAR(80) on venues.name.
   if (!isBoundedString(name, 80)) return badLength(res, 'name', 80);
   // NEW-FU-59: trim before write (parity with createInstructor).
-  const venue = await venueRepo.create({ name: normalizeName(name), type, capacity });
-  res.status(201).json(venue);
+  const cleanName = normalizeName(name);
+  // NEW-FU-483 (Phase 117): whole-room/sub-room exclusivity check backstops the modal's
+  // client-side gate. Handles format variants (01-002 ≡ 01-0002), whole-room blocking,
+  // and sub-room coexistence rules. Returns a plain-English message when blocked.
+  const existingVenues = await query('SELECT name FROM venues');
+  const conflictMsg = venueConflictError(cleanName, existingVenues.rows.map(v => v.name));
+  if (conflictMsg) return res.status(409).json({ error: conflictMsg });
+  const venue = await venueRepo.create({ name: cleanName, type, capacity });
+  // NEW-FU-434 (Phase 106 item 6): auto-replace a placeholder venue of the SAME type.
+  const replacedDummy = await replaceOldestDummyVenue(req.body.ownerSemester, venue.id, type);
+  res.status(201).json({ ...venue, replacedDummy });
 });
 
 const updateVenue = ah(async (req, res) => {
@@ -807,8 +1091,9 @@ const updateVenue = ah(async (req, res) => {
     const cap = parseInt(capacity, 10);
     // NEW-FU-15: tighten capacity max bound to match createVenue (was missing
     // upper bound on update, allowing 1..Infinity through to pg).
-    if (!Number.isInteger(cap) || cap < 1 || cap > 10000)
-      return badRequest(res, 'capacity must be an integer between 1 and 10000.');
+    // NEW-FU-225 (Phase 97): cap 10000 → 250 (realistic KFUPM venue max).
+    if (!Number.isInteger(cap) || cap < 1 || cap > 250)
+      return badRequest(res, 'capacity must be an integer between 1 and 250.');
   }
   // NEW-FU-46: enforce DB VARCHAR(80) on venues.name when supplied.
   if (name != null && !isBoundedString(name, 80)) return badLength(res, 'name', 80);
@@ -915,7 +1200,7 @@ const suggestSchedule = ah(async (req, res) => {
       // Picking the tighter limit means the API and UI agree; the limit can
       // be raised later if needed.
       if (!Number.isInteger(n) || n < 1 || n > 10)
-        return res.status(400).json({ error: 'Each courseConfig.sections must be an integer between 1 and 10.' });
+        return res.status(400).json({ error: 'Each section count must be a whole number between 1 and 10.' });
       // NEW-FU-33: propagate the canonical integer to the service. Without
       // this, payloads like {"sections":"5abc"} pass the validator (parseInt
       // returns 5) but the service's `for (let sec=1; sec<=cfg.sections; sec++)`
@@ -971,9 +1256,15 @@ const suggestSchedule = ah(async (req, res) => {
   if (typeof relaxIfConflicts !== 'undefined' && typeof relaxIfConflicts !== 'boolean') {
     return res.status(400).json({ error: 'relaxIfConflicts must be a boolean.' });
   }
+  // NEW-FU-425 (Phase 104 item 2): allowDummyResources — the explicit auto-fix
+  // (and its apply) may invent term-local placeholder instructors/venues to keep
+  // every section instead of dropping. Forwarded to both the relaxation and the
+  // direct apply below.
+  const { allowDummyResources } = req.body;
   const opts = {
     applyToCourseIds: applyToCourseIds ?? undefined,
     maxConflictsPerSection: maxConflictsPerSection ?? undefined,
+    allowDummyResources: allowDummyResources === true,
   };
   if (relaxIfConflicts) {
     // NEW-FU-372 (Phase 36): suggestWithRelaxation now guarantees its
@@ -1017,7 +1308,22 @@ const suggestRecommend = ah(async (req, res) => {
       return res.status(400).json({ error: 'sectionsHint must be URI-encoded JSON.' });
     }
   }
-  const result = await suggestSvc.recommend(req.params.scheduleId, { sectionsHint });
+  // NEW-FU-381 (Phase 99 item 2 + 5): the live auto-choose passes the modal's
+  // current per-course configs + the set of user-locked courses + fast=1 (skip
+  // the heavy greedy). All URI-encoded JSON, mirroring sectionsHint. Each is
+  // optional and parse-tolerant — a bad value just degrades to the legacy
+  // behaviour rather than 400-ing the whole live request.
+  let configs, lockedCourseIds;
+  if (req.query.configs) {
+    try { const v = JSON.parse(req.query.configs); if (Array.isArray(v)) configs = v; } catch { /* ignore */ }
+  }
+  if (req.query.lockedCourseIds) {
+    try { const v = JSON.parse(req.query.lockedCourseIds); if (Array.isArray(v)) lockedCourseIds = v; } catch { /* ignore */ }
+  }
+  const fast = req.query.fast === '1' || req.query.fast === 'true';
+  const result = await suggestSvc.recommend(req.params.scheduleId, {
+    sectionsHint, configs, lockedCourseIds, fast,
+  });
   res.json(result);
 });
 
@@ -1040,11 +1346,37 @@ const quickFixApply = ah(async (req, res) => {
   // NEW-FU-348 (Phase 33): allow 'compound' — wraps multiple sub-ops
   // applied atomically inside the same transaction. Each subOp is
   // validated recursively.
-  const ALLOWED_OP_TYPES = ['reassign-instructor', 'reassign-venue', 'drop', 'add-day', 'move', 'compound'];
+  // NEW-FU-227 (Phase 97): the resolver (QuickFixService) GENERATES and APPLIES
+  // three course/venue-level metadata ops — 'mark-venue-exempt', 'reclassify-venue',
+  // 'untag-has-lab' — but this request validator's allow-list omitted them, so
+  // applying any plan containing one failed with "Unsupported op.type:
+  // mark-venue-exempt" and NO conflict could be cleared. Kept in sync with
+  // QuickFixService's `supportedOpTypes`. (Root cause of the broken Quick Fix.)
+  // NEW-FU-426 (Phase 105): allow the placeholder-resource ops the resolver now
+  // generates ('add-dummy-instructor' / 'add-dummy-venue') — same allow-list /
+  // supportedOpTypes sync discipline as NEW-FU-227 above. Omitting them would
+  // 400 every plan that resolves a capacity bind with a placeholder.
+  const ALLOWED_OP_TYPES = ['reassign-instructor', 'reassign-venue', 'drop', 'add-day', 'move', 'compound',
+    'mark-venue-exempt', 'reclassify-venue', 'untag-has-lab',
+    'add-dummy-instructor', 'add-dummy-venue'];
+  // These metadata ops act on a course or venue row, not a section, so they
+  // carry courseId / venueId instead of sectionId.
+  const COURSE_LEVEL_OPS = new Set(['mark-venue-exempt', 'untag-has-lab']);
+  const VENUE_LEVEL_OPS  = new Set(['reclassify-venue']);
   const isHHMM = (s) => typeof s === 'string' && /^\d{2}:\d{2}(:\d{2})?$/.test(s);
   function validateOp(o, depth = 0) {
     if (!o || typeof o.type !== 'string') return 'Each op must have a type field.';
     if (!ALLOWED_OP_TYPES.includes(o.type)) return `Unsupported op.type: ${o.type}.`;
+    // Course/venue-level metadata ops validate their own id field and are
+    // section-less; everything else is section-scoped.
+    if (COURSE_LEVEL_OPS.has(o.type)) {
+      return typeof o.courseId === 'string' ? null : `${o.type} op requires courseId: string.`;
+    }
+    if (VENUE_LEVEL_OPS.has(o.type)) {
+      if (typeof o.venueId !== 'string') return 'reclassify-venue op requires venueId: string.';
+      if (typeof o.newType !== 'string') return 'reclassify-venue op requires newType: string.';
+      return null;
+    }
     if (typeof o.sectionId !== 'string') return 'op.sectionId must be a string.';
     if (o.type === 'add-day') {
       if (!Array.isArray(o.addDays) || o.addDays.length === 0
@@ -1066,6 +1398,13 @@ const quickFixApply = ah(async (req, res) => {
         const subErr = validateOp(sub, depth + 1);
         if (subErr) return `compound subOp: ${subErr}`;
       }
+    }
+    // NEW-FU-426 (Phase 105): placeholder venue op carries the required venue
+    // type so apply() mints the right kind; apply() defaults it defensively,
+    // but reject an explicitly non-string value.
+    if (o.type === 'add-dummy-venue' && o.venueType !== undefined
+        && typeof o.venueType !== 'string') {
+      return 'add-dummy-venue op venueType must be a string when provided.';
     }
     return null;
   }
@@ -1124,7 +1463,8 @@ const createTerm = ah(async (req, res) => {
 
 const archiveTerm = ah(async (req, res) => {
   const { code } = req.params;
-  const activeCode = req.query.activeCode || null;
+  // NEW-FU-452 (Phase 107 D3): prefer the server-resolved active term (header) over the query param.
+  const activeCode = req.activeTerm?.code || req.query.activeCode || null;
   try {
     const out = await termSvc.archiveTerm({ code, activeCode });
     res.json(out);
@@ -1169,7 +1509,8 @@ const setTermStatus = ah(async (req, res) => {
 const renameTerm = ah(async (req, res) => {
   const { code } = req.params;
   const { newCode } = req.body;
-  const activeCode = req.query.activeCode || null;
+  // NEW-FU-452 (Phase 107 D3): prefer the server-resolved active term (header) over the query param.
+  const activeCode = req.activeTerm?.code || req.query.activeCode || null;
   if (typeof newCode !== 'string') {
     return res.status(400).json({ error: 'newCode must be a string matching ^\\d{2}[123]$.' });
   }
@@ -1188,7 +1529,11 @@ const renameTerm = ah(async (req, res) => {
 
 const deleteTerm = ah(async (req, res) => {
   const { code } = req.params;
-  const activeCode = req.query.activeCode || null;
+  // NEW-FU-452 (Phase 107 D3): prefer the server-resolved active term (from the
+  // X-Active-Term header the axios interceptor always sends) over a per-call query
+  // param that's easy to omit — so "can't delete the active term" can't be bypassed
+  // by just dropping ?activeCode. Query param remains a fallback for non-app clients.
+  const activeCode = req.activeTerm?.code || req.query.activeCode || null;
   try {
     const out = await termSvc.deleteTerm({ code, activeCode });
     res.json(out);
@@ -1208,7 +1553,7 @@ module.exports = {
   suggestSchedule, suggestRecommend,
   saveSchedule, getConflicts, exportSchedule,
   getCourses, createCourse, updateCourse, deleteCourse,
-  getInstructors, createInstructor, updateInstructor, deleteInstructor,
+  getInstructors, createInstructor, updateInstructor, deleteInstructor, getSuggestedOfficeHour,
   getOfficeHours, addOfficeHour, updateOfficeHour, deleteOfficeHour,
   getNextSectionNumber,   // NEW-FU-95
   getVenues, createVenue, updateVenue, deleteVenue,

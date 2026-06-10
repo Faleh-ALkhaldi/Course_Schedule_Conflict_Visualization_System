@@ -65,7 +65,13 @@ class Section {
     if (!timeStr) return 0;
     const clean = typeof timeStr === 'string' ? timeStr : String(timeStr);
     const [h, m] = clean.substring(0, 5).split(':').map(Number);
-    return (h || 0) * 60 + (m || 0);
+    // NEW-FU-466 (Phase 112): a MALFORMED non-empty time (e.g. "8", "ab:cd")
+    // used to coerce to 0 = midnight via `(h||0)`, which made a bad office-hours
+    // value silently overlap the whole morning (a phantom R-04 storm). Return
+    // NaN instead so every overlap comparison (`x < NaN`) is false — a malformed
+    // value can never manufacture a conflict. Valid times are unaffected.
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return NaN;
+    return h * 60 + m;
   }
 
   get startMinutes() { return Section.toMinutes(this.startTime); }

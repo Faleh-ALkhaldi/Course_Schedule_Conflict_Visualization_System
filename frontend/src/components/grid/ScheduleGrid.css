@@ -122,6 +122,18 @@
   border-right: 1px solid rgba(255,255,255,.08);
 }
 
+/* NEW-FU-220 (Phase 94): in READABLE the day columns total far wider than the viewport
+   (horizontal scroll), so the .sg-day-headers row's OWN navy background paints only the
+   first viewport-width — every day past it (Mon…Thu) fell onto white, and the near-white
+   text was invisible ("not written"). Give EACH header its own navy bar + bottom border
+   (the body columns already self-paint their white backgrounds the same way), so every
+   day renders a full, legible bar aligned above its column at any scroll position. Scoped
+   to .sg-readable — Overview (no overflow) keeps the row-level background, byte-unchanged. */
+.sg-day-headers.sg-readable .sg-day-header {
+  background: var(--navy-800);
+  border-bottom: 2px solid var(--navy-700);
+}
+
 /* ── Day columns body ────────────────────────────────────────────────────────── */
 .sg-day-cols {
   display: flex;

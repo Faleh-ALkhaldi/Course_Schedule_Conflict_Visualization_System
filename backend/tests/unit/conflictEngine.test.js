@@ -357,8 +357,8 @@ describe('R06Rule', () => {
     expect(cs[0].severity).toBe(SEVERITY.HARD);
   });
 
-  test('TC-15b: UG course with endTime 17:01 → Hard', () => {
-    const a = sec({ category:'UG', startTime:'16:01', endTime:'17:01' });
+  test('TC-15b: UG course ending 17:11 → Hard (UG window ends 17:10)', () => {
+    const a = sec({ category:'UG', startTime:'16:11', endTime:'17:11' });
     expect(R06Rule.evaluate(a).filter(c => c.ruleId === 'R-06')).toHaveLength(1);
   });
 
@@ -379,9 +379,14 @@ describe('R06Rule', () => {
     expect(R06Rule.evaluate(a).filter(c => c.ruleId === 'R-06')).toHaveLength(0);
   });
 
-  test('GR starting exactly 17:00 → no conflict', () => {
-    const a = sec({ category:'GR', academicLevel:'Graduate', startTime:'17:00', endTime:'17:50' });
+  test('GR starting exactly 17:20 → no conflict (inclusive lower boundary)', () => {
+    const a = sec({ category:'GR', academicLevel:'Graduate', startTime:'17:20', endTime:'18:10' });
     expect(R06Rule.evaluate(a).filter(c => c.ruleId === 'R-06')).toHaveLength(0);
+  });
+
+  test('GR in the 17:10–17:20 gap (e.g. 17:00) → Hard', () => {
+    const a = sec({ category:'GR', academicLevel:'Graduate', startTime:'17:00', endTime:'17:50' });
+    expect(R06Rule.evaluate(a).filter(c => c.ruleId === 'R-06')).toHaveLength(1);
   });
 
   test('GR ending exactly 22:00 → no conflict', () => {
@@ -861,7 +866,7 @@ describe('ConflictEngine.evaluateAll()', () => {
   test('fully valid schedule reports zero conflicts', () => {
     const swe101 = sec({ courseId:'c1', academicLevel:'Freshman', category:'UG', day:'Sunday', startTime:'08:00', endTime:'08:50', instructorId:'i1', venueId:'v1' });
     const swe201 = sec({ courseId:'c2', academicLevel:'Sophomore', category:'UG', day:'Sunday', startTime:'10:00', endTime:'10:50', instructorId:'i2', venueId:'v2' });
-    const swe501 = sec({ courseId:'c3', academicLevel:'Graduate', category:'GR', day:'Sunday', startTime:'17:00', endTime:'17:50', instructorId:'i3', venueId:'v3' });
+    const swe501 = sec({ courseId:'c3', academicLevel:'Graduate', category:'GR', day:'Sunday', startTime:'17:20', endTime:'18:10', instructorId:'i3', venueId:'v3' });
     const result = engine.evaluateAll([swe101, swe201, swe501], new Map());
     expect(result.hasHard).toBe(false);
     expect(result.conflicts).toHaveLength(0);

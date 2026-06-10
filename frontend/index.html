@@ -5,7 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#0d1b2a" />
     <meta name="description" content="Course Schedule Conflict Visualization System" />
+    <!-- NEW-FU-499 (Phase 122 hardening): inline SVG favicon (navy tile + teal grid,
+         matching the ⊞ SchedulerSWE logo). Removes the /favicon.ico 404 so the
+         browser console is genuinely error-free. Data URI → no extra network request. -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230d1b2a'/><g fill='none' stroke='%233ddc97' stroke-width='2.2'><rect x='7' y='7' width='18' height='18' rx='2.5'/><line x1='7' y1='13' x2='25' y2='13'/><line x1='13' y1='13' x2='13' y2='25'/></g></svg>" />
     <title>SchedulerSWE</title>
+    <!-- NEW-FU-208 (Phase 85): JetBrains Mono for the schedule CARD typography only
+         (via --font-card-mono in index.css). The system mono stack (SF Mono/Menlo)
+         tops out at ~weight 700-800; JetBrains Mono ships a true 800 so the card
+         code/text can read genuinely THICKER (the user's "thickness" lever), and it
+         is designed for legibility at small sizes. display=swap → first paint is
+         never blocked; useFitCard re-fits on document.fonts.ready so the transform
+         scale re-measures once the web font's metrics arrive (no clip on swap). -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&display=swap" />
   </head>
   <body>
     <div id="root"></div>

@@ -231,10 +231,15 @@
   background: #f1f5f9;
   outline: none;
 }
+/* NEW-FU-463 (Phase 110): make the SELECTED term unmistakable — a stronger teal
+   fill, a solid 4px teal left bar, a soft lift, and a bolder darker label —
+   clearly differentiated from the subtle hover state of the other rows. */
 .tp-row.active {
-  background: #ecfdf5;
+  background: #d1fae5;
   border-left-color: #0d9488;
+  box-shadow: inset 4px 0 0 0 #0d9488, 0 1px 6px rgba(13, 148, 136, 0.20);
 }
+.tp-row.active .tp-row-label { color: #065f46; font-weight: 800; }
 .tp-row-check {
   font-size: 14px;
   font-weight: 800;

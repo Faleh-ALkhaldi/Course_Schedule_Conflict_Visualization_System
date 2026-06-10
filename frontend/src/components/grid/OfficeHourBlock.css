@@ -21,8 +21,14 @@
   box-shadow: 0 2px 8px rgba(0,0,0,.15);
   border-color: #6b7280;
 }
+/* NEW-FU-221 (Phase 95): office-hour cards live only in Instructor View, which now
+   always renders the uniform-typography overview layout. Bump the headline to 13px and
+   keep the time at 11px so OH cards match the section cards' uniform 13/11 scale (course
+   code 13px · time/instr/venue 11px) — Instructor View reads as one consistent typographic
+   system. These are already FIXED sizes (OH cards never content-fit), so every OH card is
+   identical regardless of duration; this only aligns them to the section-card scale. */
 .oh-label {
-  font-size: 11.5px;
+  font-size: 13px;
   font-weight: 600;
   color: #374151;
   font-style: italic;

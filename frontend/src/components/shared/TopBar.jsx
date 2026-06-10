@@ -12,7 +12,7 @@ const SEMESTER_DISPLAY = {
 };
 const displayCode = (sem) => (sem ? (SEMESTER_DISPLAY[sem] || sem) : '');
 
-export default function TopBar({ onSave, onSuggest, onExport, onSwitchTerm }) {
+export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitchTerm, onUnlock, onLogout }) {
   const { user, doLogout, schedule, view, filterId, saveBlocked, softPending, loading, switchView, conflicts } = useApp();
   const isAdmin = user?.role === 'admin';
   // NEW-FU-314 (Phase 29): derive live conflict counts from the conflicts
@@ -39,6 +39,12 @@ export default function TopBar({ onSave, onSuggest, onExport, onSwitchTerm }) {
   // returns 409 on these anyway (FU-201), but disabling avoids a flash of
   // error toast for the user-initiated click.
   const isArchived = Boolean(schedule?.archived_at);
+  // NEW-FU-465 (Phase 110): the top button is a stateful toggle — on a draft term it
+  // SAVES (finalizes + locks); on a finalized term it UNLOCKS (un-finalizes → draft).
+  const isFinalized = schedule?.status === 'Finalized';
+  // NEW-FU-482 (Phase 116): mutation actions (Suggest, Import) are blocked when the term is
+  // finalized OR archived. Unlock stays available so a finalized term can be un-finalized.
+  const isLocked = isArchived || isFinalized;
 
   const viewTabs = [
     { id: VIEWS.COURSE,  label: 'Course View'  },
@@ -89,22 +95,36 @@ export default function TopBar({ onSave, onSuggest, onExport, onSwitchTerm }) {
 
       <div className="topbar-actions">
         <button className="topbar-btn suggest" onClick={onSuggest}
-          disabled={!schedule || loading || incompleteFilter || isArchived}
+          disabled={!schedule || loading || incompleteFilter || isLocked}
           title={
-            isArchived ? 'Term is archived — unarchive to regenerate.'
+            isFinalized ? 'Term is finalized — unlock it first to regenerate.'
+            : isArchived ? 'Term is archived — unarchive to regenerate.'
             : incompleteFilter ? `Select a ${view} from the sidebar first`
             : undefined
           }>
           ✦ Suggest
         </button>
-        <button className={saveClass} onClick={onSave}
-          disabled={!schedule || loading || saveBlocked || isArchived}
-          title={isArchived ? 'Term is archived — unarchive to save.' : undefined}>{saveLabel}</button>
+        {isFinalized ? (
+          <button className="topbar-btn warn" onClick={onUnlock}
+            disabled={!schedule || loading || isArchived}
+            title="This term is saved & locked. Click to unlock it so you can edit again.">🔓 Unlock</button>
+        ) : (
+          <button className={saveClass} onClick={onSave}
+            disabled={!schedule || loading || saveBlocked || isArchived}
+            title={isArchived ? 'Term is archived — unarchive to save.' : undefined}>{saveLabel}</button>
+        )}
+        {/* NEW-FU-228 (Phase 97): Import is now its own top-bar button instead
+            of being buried as a tab inside the Export modal. */}
+        <button className="topbar-btn import" onClick={onImport}
+          disabled={!schedule || isLocked}
+          title={isFinalized ? 'Term is finalized — unlock it first to import.' : isArchived ? 'Term is archived — unarchive to import.' : 'Import a schedule from Excel / Word / PDF'}>↑ Import</button>
         <button className="topbar-btn export" onClick={onExport}
           disabled={!schedule}>↓ Export</button>
         <div className="topbar-user">
           <span className="topbar-username">{user?.username}</span>
-          <button className="topbar-logout" onClick={doLogout} title="Sign out">⏻</button>
+          {/* NEW-FU-476 (Phase 114): confirm before logging out (onLogout asks via the
+              styled dialog); fall back to a direct logout only if no handler is wired. */}
+          <button className="topbar-logout" onClick={onLogout || doLogout} title="Sign out">⏻</button>
         </div>
       </div>
     </header>

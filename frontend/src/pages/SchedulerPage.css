@@ -44,6 +44,39 @@
   font-family: var(--font-body);
 }
 
+/* NEW-FU-217 (Phase 91): Overview / Readable view-mode toggle — a segmented control.
+   The active segment is filled teal; click the other to switch. Sits at the right of
+   the .view-label header (after the hint). marginLeft pushes it off the hint. */
+.sg-view-toggle {
+  margin-left: 14px;
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--slate-300);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--slate-100);
+}
+.sg-vt-btn {
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  padding: 5px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .12s ease, color .12s ease;
+}
+.sg-vt-btn + .sg-vt-btn { border-left: 1px solid var(--slate-300); }
+.sg-vt-btn:hover { color: var(--text-primary); }
+.sg-vt-btn.active {
+  background: var(--teal-500);
+  color: #fff;
+}
+.sg-vt-btn:focus-visible { outline: 2px solid var(--teal-400); outline-offset: -2px; }
+
 .grid-scroll-container {
   flex: 1;
   overflow: auto;

@@ -17,6 +17,7 @@
 
 const { query, getClient } = require('../config/db');
 const { decodeTerm, TERM_CODE_RE, assertTermCodeInRange, hasTermDateOverride, validateTermDateWindow } = require('../domain/term');
+const { COURSE_TERM_RULES, isCourseAllowedInTerm } = require('../domain/courseTermValidity');
 // NEW-FU-180: lazy-required to avoid the circular import that would
 // happen if TermService and ScheduleService loaded at the same module
 // resolution step. ScheduleService is a singleton so this is cheap.
@@ -281,6 +282,7 @@ async function createTerm({ code, createdBy, departmentId = DEFAULT_DEPT, starts
       SELECT s.id, s.semester FROM schedules s
       WHERE s.department_id = $1
         AND s.id != $2
+        AND s.archived_at IS NULL                    -- NEW-FU-440 (Phase 107 L1): never seed a copy from an archived term
         AND s.semester ~ ('^\\d{2}' || $3 || '$')   -- same season digit
       ORDER BY
         ABS(CAST(SUBSTRING(s.semester FROM 1 FOR 2) AS INT) - $4) ASC,
@@ -294,17 +296,81 @@ async function createTerm({ code, createdBy, departmentId = DEFAULT_DEPT, starts
       // conflicts reference template's section ids); we re-evaluate
       // them post-commit against the new section ids — see the
       // revalidate call after withTransaction returns.
+      // NEW-FU-415 (Phase 103 item 1): do NOT carry forward sections of courses
+      // that aren't offered in the NEW term (e.g. copying a ≤252 template into a
+      // >252 term must drop SWE 412; SWE 399 only survives into Summer terms).
+      // disallowedCodes is the set of course codes barred from `code`.
+      const disallowedCodes = Object.keys(COURSE_TERM_RULES).filter(cc => !isCourseAllowedInTerm(cc, code));
+      // NEW-FU-430 (Phase 106 item 7): CARRY the template's term-local DUMMY
+      // instructors/venues into the new term instead of nulling them (reverses
+      // NEW-FU-425). They're still placeholders the copied term needs to stay
+      // conflict-free, so each is re-minted as a NEW row owned by the NEW term
+      // (own owner_semester +, for instructors, a fresh non-conflicting OH), and
+      // the copied sections are remapped onto these new rows — keeping every
+      // placeholder strictly term-local (a copy never shares a dummy with its
+      // source). Dummies that only served a term-disallowed course are skipped
+      // (those sections aren't copied) so no orphans are minted.
+      const { pickDummyOfficeHours, nextDummyVenueName } = require('../domain/dummyResources');
+      const dInstrMap = new Map(), dVenueMap = new Map();
+      const srcDInstr = await client.query(
+        `SELECT DISTINCT i.id, i.name
+           FROM sections s
+           JOIN instructors i ON i.id = s.instructor_id
+           JOIN courses c     ON c.id = s.course_id
+          WHERE s.schedule_id = $1 AND i.is_dummy = true
+            AND NOT (c.course_code = ANY($2::text[]))`,
+        [templateId, disallowedCodes]);
+      for (const row of srcDInstr.rows) {
+        const r = await client.query(
+          `INSERT INTO instructors (name, email, is_dummy, owner_semester)
+           VALUES ($1, 'dummy-' || gen_random_uuid() || '@placeholder.local', true, $2) RETURNING id`,
+          [row.name, code]);
+        dInstrMap.set(row.id, r.rows[0].id);
+        const slots = await client.query(
+          `SELECT day, start_time::text AS s, end_time::text AS e
+             FROM sections WHERE schedule_id = $1 AND instructor_id = $2`,
+          [templateId, row.id]);
+        const oh = pickDummyOfficeHours(slots.rows.map(x => ({ day: x.day, start: x.s, end: x.e })));
+        await client.query(
+          `INSERT INTO office_hours (instructor_id, day, start_time, end_time) VALUES ($1,$2,$3,$4)`,
+          [r.rows[0].id, oh.day, oh.startTime, oh.endTime]);
+      }
+      const srcDVenue = await client.query(
+        `SELECT DISTINCT v.id, v.name, v.type
+           FROM sections s
+           JOIN venues v  ON v.id = s.venue_id
+           JOIN courses c ON c.id = s.course_id
+          WHERE s.schedule_id = $1 AND v.is_dummy = true
+            AND NOT (c.course_code = ANY($2::text[]))`,
+        [templateId, disallowedCodes]);
+      for (const row of srcDVenue.rows) {
+        const vname = await nextDummyVenueName(client); // NEW-FU-431: globally-unique name (venues.name is UNIQUE)
+        const r = await client.query(
+          `INSERT INTO venues (name, type, capacity, is_dummy, owner_semester) VALUES ($1,$2,30,true,$3) RETURNING id`,
+          [vname, row.type, code]);
+        dVenueMap.set(row.id, r.rows[0].id);
+      }
       const copied = await client.query(`
         INSERT INTO sections
           (schedule_id, course_id, instructor_id, venue_id,
-           section_number, section_type, day, start_time, end_time)
-        SELECT $1, course_id, instructor_id, venue_id,
-               section_number, section_type, day, start_time, end_time
-        FROM sections
-        WHERE schedule_id = $2
+           section_number, section_type, day, start_time, end_time, gender)
+        SELECT $1, s.course_id, s.instructor_id, s.venue_id,
+               s.section_number, s.section_type, s.day, s.start_time, s.end_time, s.gender
+        FROM sections s
+        JOIN courses c ON c.id = s.course_id
+        WHERE s.schedule_id = $2
+          AND NOT (c.course_code = ANY($3::text[]))
         RETURNING id
-      `, [newId, templateId]);
+      `, [newId, templateId, disallowedCodes]);
+      // NEW-FU-435 (Phase 107 H1): carry gender on copy. Without it, copied female
+      // sections defaulted to 'M', breaking the M/F paired-section exemption in
+      // R-04/R-05 and injecting phantom hard conflicts into every copied term.
       if (copied.rowCount > 0) seededSections = true;
+      // Remap the carried dummy refs onto the NEW term's own placeholder rows.
+      for (const [oldId, newDId] of dInstrMap)
+        await client.query(`UPDATE sections SET instructor_id = $1 WHERE schedule_id = $2 AND instructor_id = $3`, [newDId, newId, oldId]);
+      for (const [oldId, newDId] of dVenueMap)
+        await client.query(`UPDATE sections SET venue_id = $1 WHERE schedule_id = $2 AND venue_id = $3`, [newDId, newId, oldId]);
     }
 
     // Re-query with stats so the response reflects whatever the seed copy
@@ -343,9 +409,49 @@ async function createTerm({ code, createdBy, departmentId = DEFAULT_DEPT, starts
   // succeeds. The user can hit save/suggest to retry conflict eval.
   if (seededSections) {
     try {
-      const { conflicts } = await schedSvc().revalidateSchedule(result.scheduleId);
-      // Surface the conflict count in the create response so the UI can
-      // toast "Created term X · 47 sections · 2 hard conflicts detected".
+      let { conflicts } = await schedSvc().revalidateSchedule(result.scheduleId);
+      // NEW-FU-229 (Phase 97): a copied term must NOT open with conflicts. The
+      // seed copies the source term's sections verbatim, so any conflict the
+      // source carried (or that fresh re-detection surfaces) lands in the new
+      // term. Auto-run the Quick Fix resolver and apply every NON-DESTRUCTIVE
+      // fix (reassign instructor/venue, add a meeting day, retime, mark
+      // venue-exempt, …). Drops are the agreed last resort and are NOT applied
+      // automatically — if a conflict can ONLY be cleared by a drop, the term
+      // opens with that minimal residual and the user resolves it via Quick Fix
+      // (which surfaces the drop as an explicit, opt-in choice). Best-effort:
+      // swallow on failure so term creation still succeeds.
+      if (conflicts.length > 0) {
+        try {
+          const quickFix = require('./QuickFixService');
+          // NEW-FU-446 (Phase 107 H4): ITERATE plan→apply→revalidate. A single pass
+          // often can't clear an interdependent conflict cluster (resolving A
+          // surfaces B that needs another round), so a copied term could open with
+          // residual HARD conflicts despite "success". Loop until no non-destructive
+          // op remains or a small cap — placeholders included — so the copy genuinely
+          // lands at 0. Drops stay opt-in (never auto-applied).
+          for (let round = 0; round < 6 && conflicts.length > 0; round++) {
+            const plan = await quickFix.plan(result.scheduleId);
+            // NEW-FU-450 (Phase 107 D4): also exclude the GLOBAL-metadata flips
+            // (mark-venue-exempt → courses.is_capstone, reclassify-venue → venues.type,
+            // untag-has-lab → courses.has_lab) from the SILENT post-copy auto-resolve.
+            // Each mutates a course/venue row across ALL terms — too invasive to apply
+            // without the user seeing it. They stay available in interactive Quick Fix.
+            const GLOBAL_FLIPS = new Set(['mark-venue-exempt', 'reclassify-venue', 'untag-has-lab']);
+            const nonDestructive = (plan.ops || []).filter(
+              op => op.type !== 'drop'
+                && !GLOBAL_FLIPS.has(op.type)
+                && !(Array.isArray(op.subOps) && op.subOps.some(s => s.type === 'drop'))
+            );
+            if (nonDestructive.length === 0) break;
+            await quickFix.apply(result.scheduleId, nonDestructive);
+            ({ conflicts } = await schedSvc().revalidateSchedule(result.scheduleId));
+          }
+        } catch (rfErr) {
+          console.error('FU-229 post-copy auto-resolve failed:', rfErr.message);
+        }
+      }
+      // Surface the (post-resolve) conflict count in the create response so the
+      // UI can toast "Created term X · 47 sections · 0 conflicts".
       result.hardConflictCount = conflicts.filter(c => c.severity === 'Hard').length;
       result.softConflictCount = conflicts.filter(c => c.severity === 'Soft').length;
     } catch (e) {
@@ -458,30 +564,34 @@ async function deleteTerm({ code, activeCode, departmentId = DEFAULT_DEPT }) {
     // OH rows for instructors that ONLY existed for this schedule (see
     // shared-resource pruning below).
 
+    // NEW-FU-447 (Phase 107 M7): capture exactly which courses/instructors/venues
+    // THIS term referenced, BEFORE the cascade, so the prune only removes resources
+    // this term used (and that nobody else uses now). The old global
+    // `NOT IN (SELECT … FROM sections)` could delete ANOTHER term's transiently-
+    // unreferenced placeholder, or a real resource that's merely unassigned at the
+    // moment — neither of which this term's deletion should touch.
+    const refRows = await client.query(`
+      SELECT ARRAY(SELECT DISTINCT course_id     FROM sections WHERE schedule_id=$1) AS courses,
+             ARRAY(SELECT DISTINCT instructor_id FROM sections WHERE schedule_id=$1 AND instructor_id IS NOT NULL) AS instructors,
+             ARRAY(SELECT DISTINCT venue_id       FROM sections WHERE schedule_id=$1 AND venue_id IS NOT NULL) AS venues
+    `, [scheduleId]);
+    const refCourses = refRows.rows[0].courses     || [];
+    const refInstr   = refRows.rows[0].instructors || [];
+    const refVenues  = refRows.rows[0].venues      || [];
+
     // Cascade the schedule (sections + conflicts cascade via FK).
     await client.query(`DELETE FROM schedules WHERE id = $1`, [scheduleId]);
 
-    // Prune orphaned shared resources. A course/instructor/venue is
-    // orphaned when no remaining `sections` row references it.
-    const prunedCourses     = await client.query(`
-      DELETE FROM courses
-      WHERE id NOT IN (SELECT DISTINCT course_id FROM sections)
-      RETURNING id
-    `);
-    const prunedInstructors = await client.query(`
-      DELETE FROM instructors
-      WHERE id NOT IN (
-        SELECT DISTINCT instructor_id FROM sections WHERE instructor_id IS NOT NULL
-      )
-      RETURNING id
-    `);
-    const prunedVenues      = await client.query(`
-      DELETE FROM venues
-      WHERE id NOT IN (
-        SELECT DISTINCT venue_id FROM sections WHERE venue_id IS NOT NULL
-      )
-      RETURNING id
-    `);
+    // Prune ONLY the resources this term referenced that are now orphaned.
+    const prunedCourses = refCourses.length === 0 ? { rowCount: 0 } : await client.query(`
+      DELETE FROM courses WHERE id = ANY($1::uuid[])
+        AND id NOT IN (SELECT DISTINCT course_id FROM sections) RETURNING id`, [refCourses]);
+    const prunedInstructors = refInstr.length === 0 ? { rowCount: 0 } : await client.query(`
+      DELETE FROM instructors WHERE id = ANY($1::uuid[])
+        AND id NOT IN (SELECT DISTINCT instructor_id FROM sections WHERE instructor_id IS NOT NULL) RETURNING id`, [refInstr]);
+    const prunedVenues = refVenues.length === 0 ? { rowCount: 0 } : await client.query(`
+      DELETE FROM venues WHERE id = ANY($1::uuid[])
+        AND id NOT IN (SELECT DISTINCT venue_id FROM sections WHERE venue_id IS NOT NULL) RETURNING id`, [refVenues]);
     // OH rows cascade with their parent instructor (FK ON DELETE CASCADE).
 
     return {

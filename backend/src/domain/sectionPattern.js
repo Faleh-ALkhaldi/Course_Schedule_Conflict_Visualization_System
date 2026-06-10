@@ -165,8 +165,8 @@ function validateSectionPattern({ credits, hasLab, sectionType, days, startTime,
   if (credits === 4 && !hasLab) {
     return { ok: false, error: '4-credit courses must have a lab section. Set hasLab on the course or use 3 credits.' };
   }
-  if (!['Lec', 'Lab'].includes(sectionType)) {
-    return { ok: false, error: `Invalid sectionType "${sectionType}". Expected "Lec" or "Lab".` };
+  if (!['Lec', 'Lab', 'Prj', 'Ths'].includes(sectionType)) {
+    return { ok: false, error: `Invalid sectionType "${sectionType}". Expected "Lec", "Lab", "Prj", or "Ths".` };
   }
   if (!Array.isArray(days) || days.length === 0 || !days.every(d => VALID_DAYS.has(d))) {
     return { ok: false, error: `Invalid days ${JSON.stringify(days)}. Expected non-empty subset of Sunday–Thursday.` };
@@ -174,6 +174,18 @@ function validateSectionPattern({ credits, hasLab, sectionType, days, startTime,
   const duration = durationMinutes(startTime, endTime);
   if (duration <= 0) {
     return { ok: false, error: `endTime must be after startTime (got ${duration} min).` };
+  }
+
+  // NEW-FU-498 (Phase 122): Project/Thesis sections are pattern-FLEXIBLE — they
+  // meet in long single blocks (capstone projects) or have no fixed lecture
+  // pattern (thesis), so the rigid (credits × day-pattern × duration) Lec/Lab
+  // rules don't apply. Only the 50–180 min duration bound is enforced (mirrors
+  // the controller's SECTION_DURATION_BY_TYPE backstop).
+  if (sectionType === 'Prj' || sectionType === 'Ths') {
+    if (duration < 50 || duration > 180) {
+      return { ok: false, error: `${sectionType === 'Prj' ? 'Project' : 'Thesis'} section must be 50–180 minutes (got ${duration}).` };
+    }
+    return { ok: true };
   }
 
   // Lab section — single rule, applies regardless of credits.

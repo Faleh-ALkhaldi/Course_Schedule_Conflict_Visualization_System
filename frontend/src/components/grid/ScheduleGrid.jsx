@@ -42,6 +42,21 @@ const HOUR_MARKS = getHourMarks();
 const ROW_H_DEFAULT = 64;
 const ROW_H_MIN     = 20;
 
+// NEW-FU-217 (Phase 91): READABLE MODE — the optional second view. Where Overview
+// mode fits the whole week into the viewport (cards shrink, dense clusters get tiny),
+// Readable mode uses FIXED comfortable sizing so every card is legible and lets the
+// grid SCROLL (vertically for the tall day, horizontally for dense days). These are
+// the only two constants it needs; everything else (lane layout, fit, sticky axes)
+// is reused. They're applied ONLY when viewMode === 'readable', so the Overview path
+// is byte-for-byte unchanged.
+const READABLE_ROW_H   = 56;   // fixed row height (vs the fit-to-viewport rowH) → ~93px/50-min card
+const READABLE_LANE_PX = 140;  // min width PER LANE → 'compact' tier, all fields legible; dense days scroll
+// NEW-FU-220 (Phase 94): minimum lanes any Readable day column is sized to, so a SPARSE
+// day (e.g. Thursday ≈ 2 lanes) reads as a balanced full column instead of a thin sliver.
+// Floors the COLUMN width only — cards keep their uniform width and stay left-packed; the
+// extra lane(s) are just breathing room on the right. Dense days (> this) are unchanged.
+const MIN_READABLE_LANES = 3;
+
 // NEW-FU-133 + FU-138 + FU-139: density tier thresholds. The grid fits
 // all 5 days within `availableW` via proportional flex-grow, so per-lane
 // width = availableW / sum(maxLanesPerDay). Tier selection considers
@@ -93,14 +108,22 @@ function pickTier(laneW, cardHeight) {
 // flex instead of fixed px) and how their content is RENDERED (tier-
 // adaptive SectionBlock instead of fixed layout).
 // ────────────────────────────────────────────────────────────────────────
-function layoutSectionsForDay(sections) {
+function layoutSectionsForDay(sections, longestFirst = false) {
   if (!sections.length) return [];
 
   const sorted = [...sections].sort((a, b) => {
     const aS = toMinutes(a.startTime ?? a.start_time);
     const bS = toMinutes(b.startTime ?? b.start_time);
     if (aS !== bS) return aS - bS;
-    return toMinutes(a.endTime ?? a.end_time) - toMinutes(b.endTime ?? b.end_time);
+    // NEW-FU-219 (Phase 93): in Readable, break start-time ties by LONGEST duration
+    // first so a long meeting claims the LOWEST free lane (left) instead of whatever
+    // lane is left over after the short ones — otherwise it strands at the far-right
+    // lane for its whole length while the short cards' lanes get reused. Greedy-by-
+    // start is still an optimal interval colouring under any tiebreak, so laneTotal
+    // (card widths in Overview) is unchanged; only WHICH lane each card takes differs.
+    // Overview keeps the original end-ASC tiebreak (longestFirst=false) untouched.
+    const ae = toMinutes(a.endTime ?? a.end_time), be = toMinutes(b.endTime ?? b.end_time);
+    return longestFirst ? (be - ae) : (ae - be);
   });
 
   const colEnds = [];
@@ -188,7 +211,12 @@ function layoutSectionsForDay(sections) {
   }));
 }
 
-export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete }) {
+export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete, viewMode = 'overview', uniformType = false }) {
+  // NEW-FU-221 (Phase 95): UNIFORM typography is decoupled from the readable LAYOUT.
+  // Cards render uniform fixed fonts when EITHER the layout is Readable OR the parent
+  // marked this a uniform view (Instructor/Venue — no overlaps, overview layout). The
+  // LAYOUT still follows `viewMode` alone (every `viewMode === 'readable'` below).
+  const cardUniform = viewMode === 'readable' || uniformType;
   const { sections, officeHours, conflicts } = useApp();
   const [dropHighlight, setDropHighlight]    = useState(null);
   // NEW-FU-204 (Phase 81): SINGLE-LEVEL grid. The in-app zoom feature is removed.
@@ -222,9 +250,10 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete 
 
   const layoutsByDay = useMemo(() => {
     const m = {};
-    for (const day of DAYS) m[day] = layoutSectionsForDay(sectionsByDay[day] ?? []);
+    // NEW-FU-219 (Phase 93): Readable packs long meetings into low lanes (longestFirst).
+    for (const day of DAYS) m[day] = layoutSectionsForDay(sectionsByDay[day] ?? [], viewMode === 'readable');
     return m;
-  }, [sectionsByDay]);
+  }, [sectionsByDay, viewMode]);
 
   // NEW-FU-132: per-day max lane count drives the flex-grow ratio.
   const maxLanesPerDay = useMemo(() => {
@@ -276,6 +305,13 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete 
   // fractional card tops/heights, and useFitCard measures the REAL rendered box.
   const ROWS = (DISPLAY_END - DISPLAY_START) / 30; // 30 half-hour rows
   useEffect(() => {
+    // NEW-FU-217 (Phase 91): Readable mode does NOT fit-to-viewport — it uses a fixed
+    // comfortable row height and lets the grid scroll. Only Overview mode runs the
+    // fit measurement (+ its resize listener).
+    if (viewMode !== 'overview') {
+      setRowH(prev => (prev !== READABLE_ROW_H ? READABLE_ROW_H : prev));
+      return;
+    }
     const compute = () => {
       const el = dayColsRef.current;
       if (!el) return;
@@ -287,13 +323,19 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete 
     compute();
     window.addEventListener('resize', compute);
     return () => window.removeEventListener('resize', compute);
-  }, [ROWS]);
+  }, [ROWS, viewMode]);
 
   // NEW-FU-133 + FU-139: per-lane width AND shortest card height drive the
   // tier. The tier is GLOBAL — every day has the same per-lane width via
   // proportional flex. Shortest card height = the min slot duration in
   // any visible section × pxPerMin (drops as user zooms out).
-  const laneWidth = dayColsWidth / Math.max(1, totalLanes);
+  // NEW-FU-217 (Phase 91): in Readable mode every lane is a KNOWN fixed width
+  // (READABLE_LANE_PX); the measured dayColsWidth is viewport-constrained (the dense
+  // columns overflow it and scroll), so dividing it by totalLanes would wrongly tier
+  // the big readable cards as 'micro'. Use the real lane width for the tier instead.
+  const laneWidth = viewMode === 'readable'
+    ? READABLE_LANE_PX
+    : dayColsWidth / Math.max(1, totalLanes);
   const shortestCardHeight = useMemo(() => {
     let minDur = 50; // sensible default (50-min Lec is the seed's mode)
     for (const day of DAYS) {
@@ -359,25 +401,38 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete 
           All 5 days fit within the available container width — no horizontal
           scroll regardless of any single day's overlap density. */}
       <div className="sg-right-col">
-        <div className="sg-day-headers">
+        <div className={`sg-day-headers${viewMode === 'readable' ? ' sg-readable' : ''}`}>
           {DAYS.map(day => (
-            <div key={day} className="sg-day-header" style={{
-              flex: `${maxLanesPerDay[day]} 1 0`,
-              // NEW-FU-162 (Phase 75 R3): MIN width = lanes × MIN_LANE_PX so a
-              // dense day never squeezes its lanes below readable width; the
-              // grid scrolls horizontally instead. Matches the day-col min so
-              // header and body stay aligned when scrolled.
-              minWidth: maxLanesPerDay[day] * MIN_LANE_PX,
-            }}>{day}</div>
+            <div key={day} className="sg-day-header" style={
+              // NEW-FU-217 (Phase 91): column sizing is now mode-dependent.
+              //  • OVERVIEW (NEW-FU-215, Phase 89): EQUAL columns (`flex: 1 1 0`,
+              //    `minWidth: 0`) so the grid always fits the viewport with zero
+              //    horizontal scroll — fixes the Thursday sliver + gutter overlap.
+              //  • READABLE (Phase 91/92): each column is a FIXED width = the day's max
+              //    simultaneous overlap × the uniform card width (`maxLanes ×
+              //    READABLE_LANE_PX`). No flex-grow — the column is exactly wide enough
+              //    to hold the densest cluster's fixed-width cards side-by-side; dense
+              //    days overflow → horizontal scroll (intended). Header width matches
+              //    the body so they stay aligned when scrolled.
+              viewMode === 'readable'
+                ? { flex: `0 0 ${Math.max(maxLanesPerDay[day], MIN_READABLE_LANES) * READABLE_LANE_PX}px` }
+                : { flex: '1 1 0', minWidth: 0 }
+            }>{day}</div>
           ))}
         </div>
-        <div className="sg-day-cols" ref={dayColsRef} style={{ height: GRID_HEIGHT }}>
+        {/* NEW-FU-221 (Phase 95): mark the columns "overview-uniform" for Instructor/
+            Venue (uniformType) so SectionBlock.css can re-enable a tight line clamp +
+            compact rows there. These views render uniform, NON-shrinking 13/11 type on
+            the overview layout, so a narrow/overlapping card can't shrink its font to fit
+            (the way content-fit cards do) — without the clamp a long instructor name wraps
+            unbounded and overflows the duration box. The marker is uniformType-only, so
+            Course View (both modes) never carries it and stays byte-for-byte unchanged. */}
+        <div className={`sg-day-cols${uniformType ? ' sg-overview-uniform' : ''}`} ref={dayColsRef} style={{ height: GRID_HEIGHT }}>
           {DAYS.map(day => (
             <DayColumn
               key={day}
               day={day}
               height={GRID_HEIGHT}
-              maxLanes={maxLanesPerDay[day]}
               layouts={layoutsByDay[day] ?? []}
               officeHours={ohByDay[day] ?? []}
               conflictMap={conflictMap}
@@ -387,6 +442,9 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete 
               pxPerMin={pxPerMin}
               pixelOffsetAt={pixelOffsetAt}
               tier={tier}
+              viewMode={viewMode}
+              uniform={cardUniform}
+              maxLanes={maxLanesPerDay[day]}
             />
           ))}
         </div>
@@ -397,33 +455,28 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete 
 
 const DROP_STEP = 15;
 
-// NEW-FU-162 (Phase 75 R3): minimum per-lane width (CSS px). A lane this wide
-// holds "11:00–11:50" at a readable mono size with padding. At default zoom the
-// flex layout already gives lanes ≥ this, so the min never binds (no horizontal
-// scroll). At high browser zoom the effective width shrinks below it, the min
-// holds, and the grid scrolls horizontally — keeping text un-clipped. 46px is
-// the empirical floor where the densest term's total still fits the viewport at
-// default zoom (no scroll regression) while binding at ~1.4× zoom and beyond.
-const MIN_LANE_PX = 46;
+// NEW-FU-215 (Phase 89): MIN_LANE_PX (the Phase-75/77 per-day min-width floor) is
+// retired. It existed to scroll the grid horizontally rather than squeeze a dense
+// day's lanes below a readable width — but that floor is exactly what made a sparse
+// day (Thursday) a sliver and overflowed the viewport at the user's real width. With
+// equal columns (no per-day min) the grid always fits; ultra-narrow dense lanes are
+// now handled by the card itself (sb-pintiny code-only fit, see useFitCard), not by
+// reserving column width. So the constant + its per-day min usages are gone.
 
-function DayColumn({ day, height, maxLanes, layouts, officeHours, conflictMap, onBlockClick, onOHClick, onSectionDelete, pxPerMin, pixelOffsetAt, tier }) {
+function DayColumn({ day, height, layouts, officeHours, conflictMap, onBlockClick, onOHClick, onSectionDelete, pxPerMin, pixelOffsetAt, tier, viewMode, uniform, maxLanes }) {
   const dropZones = [];
   for (let m = DISPLAY_START; m < DISPLAY_END; m += DROP_STEP) dropZones.push(m);
 
   return (
     <div className="sg-day-col" style={{
       height,
-      flex: `${maxLanes} 1 0`,
-      // NEW-FU-190 (Phase 77): floor the card-column body width at
-      // maxLanes × MIN_LANE_PX — the SAME floor Phase 75 put on the day HEADER
-      // (line ~464). The body kept minWidth:0, so on a dense day (term 262's
-      // 6-lane clusters) the column compressed and each lane fell to ~30px —
-      // narrower than a single glyph, which no font/scale can fill (the residual
-      // clips). Matching the header floor forces a dense column wide enough for
-      // every lane to be ≥46px; .sg-root overflow:auto already supplies the
-      // horizontal scroll. Sparse terms (251) stay under the viewport, so the
-      // floor doesn't bind and no scrollbar appears there.
-      minWidth: maxLanes * MIN_LANE_PX,
+      // NEW-FU-217/218 (Phase 91/92): column body matches the header's mode sizing.
+      //  • OVERVIEW: equal columns (`flex: 1 1 0`, `minWidth: 0`) → fits viewport.
+      //  • READABLE: FIXED width = maxLanes × READABLE_LANE_PX (no flex-grow) → holds
+      //    the densest cluster's uniform fixed-width cards exactly; days scroll.
+      ...(viewMode === 'readable'
+        ? { flex: `0 0 ${Math.max(maxLanes, MIN_READABLE_LANES) * READABLE_LANE_PX}px` }
+        : { flex: '1 1 0', minWidth: 0 }),
     }}>
       {HOUR_MARKS.map(mark => {
         const top = pixelOffsetAt(toMinutes(mark));
@@ -462,11 +515,23 @@ function DayColumn({ day, height, maxLanes, layouts, officeHours, conflictMap, o
         const top      = pixelOffsetAt(startMin);
         const height   = pixelOffsetAt(endMin) - top;
         const colW     = 100 / laneTotal;
+        // NEW-FU-218 (Phase 92): card size depends ONLY on meeting duration.
+        //  • OVERVIEW keeps the percentage split — a card is 1/laneTotal of its
+        //    (equal, viewport-fit) column, so dense clusters shrink to fit.
+        //  • READABLE gives EVERY card the same UNIFORM FIXED width (READABLE_LANE_PX),
+        //    positioned at a fixed pixel lane offset. So a 50-min lecture is the exact
+        //    same box whether it sits alone or in a 6-way overlap — no card is shrunk
+        //    by clutter. The column is sized to maxLanes × READABLE_LANE_PX (header /
+        //    body styles), so the densest cluster's cards sit side-by-side at full
+        //    width and the grid scrolls horizontally; height is duration-driven, so
+        //    same-duration cards are identical boxes.
+        const cardPos = viewMode === 'readable'
+          ? { left: `${laneIndex * READABLE_LANE_PX + 2}px`, width: `${READABLE_LANE_PX - 4}px` }
+          : { left: `calc(${laneIndex * colW}% + 2px)`, width: `calc(${colW}% - 4px)` };
         return (
           <div key={sec.id} style={{
             position:'absolute', top,
-            left:  `calc(${laneIndex * colW}% + 2px)`,
-            width: `calc(${colW}% - 4px)`,
+            ...cardPos,
             height: Math.max(height, 20),
             zIndex:3,
           }}>
@@ -477,6 +542,7 @@ function DayColumn({ day, height, maxLanes, layouts, officeHours, conflictMap, o
               onDelete={onSectionDelete}
               height={height}
               tier={tier}
+              uniform={uniform}
             />
           </div>
         );

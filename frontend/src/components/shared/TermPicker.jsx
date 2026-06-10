@@ -57,6 +57,14 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
     }
   }, [activeCode, showArchived]);
 
+  // NEW-FU-464 (Phase 110): the code of another non-archived term to fall back to
+  // when acting on the CURRENTLY-SELECTED term — lets the user archive / rename /
+  // delete the term they're viewing without first switching away to another one.
+  const altCode = useCallback(
+    (target) => terms.find(x => x.code !== target.code && !x.isArchived)?.code ?? null,
+    [terms]
+  );
+
   // NEW-FU-190: prime the terms list on mount AND whenever the active
   // term changes — the chip's conflict badge needs activeTerm.hard/soft
   // counts even before the user opens the dropdown. Also refresh on
@@ -304,7 +312,7 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                     </span>
                   </div>
                 </div>
-                {isAdmin && !t.isActive && !t.isArchived && (
+                {isAdmin && !t.isArchived && (
                   <div className="tp-row-actions">
                     {/* NEW-FU-189: lock / unlock. Toggles Draft ↔ Finalized.
                         Backend refuses Draft → Finalized when hard conflicts
@@ -349,7 +357,15 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                       onClick={async e => {
                         e.stopPropagation();
                         try {
-                          await api.archiveTerm(t.code, activeCode);
+                          // NEW-FU-464: archive the SELECTED term too — switch the app to
+                          // another term first so the user doesn't have to do it manually.
+                          let ac = activeCode;
+                          if (t.isActive) {
+                            const alt = altCode(t);
+                            if (!alt) { setError('Add or unarchive another term first — you can’t archive the only one you’re viewing.'); return; }
+                            await onSwitchTerm(alt); ac = alt;
+                          }
+                          await api.archiveTerm(t.code, ac);
                           await refresh();
                         } catch (err) {
                           setError(err.response?.data?.error || 'Archive failed.');
@@ -360,7 +376,13 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                       type="button"
                       className="tp-row-del"
                       title="Delete this term"
-                      onClick={e => { e.stopPropagation(); setDelTarget(t); }}
+                      onClick={e => {
+                        e.stopPropagation();
+                        // NEW-FU-464: deleting the SELECTED term is allowed, but only when
+                        // there's another term to land on afterwards.
+                        if (t.isActive && !altCode(t)) { setError('Add another term before deleting the only one you’re viewing.'); return; }
+                        setDelTarget(t);
+                      }}
                     >🗑</button>
                   </div>
                 )}
@@ -435,11 +457,13 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
       {delTarget && (
         <DeleteTermModal
           term={delTarget}
-          activeCode={activeCode}
+          activeCode={delTarget.isActive ? altCode(delTarget) : activeCode}
           onClose={() => setDelTarget(null)}
           onDeleted={async () => {
+            const wasActive = delTarget.isActive, alt = altCode(delTarget);
             setDelTarget(null);
             await refresh();
+            if (wasActive && alt) onSwitchTerm(alt); // land on another term
           }}
         />
       )}
@@ -447,12 +471,15 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
       {renameTarget && (
         <RenameTermModal
           term={renameTarget}
-          activeCode={activeCode}
+          activeCode={renameTarget.isActive ? altCode(renameTarget) : activeCode}
           existingCodes={terms.map(t => t.code)}
           onClose={() => setRenameTarget(null)}
-          onRenamed={async () => {
+          onRenamed={async (newCode) => {
+            const wasActive = renameTarget.isActive;
             setRenameTarget(null);
             await refresh();
+            // NEW-FU-464: follow the rename so the user keeps viewing the same term.
+            if (wasActive && newCode) onSwitchTerm(newCode);
           }}
         />
       )}

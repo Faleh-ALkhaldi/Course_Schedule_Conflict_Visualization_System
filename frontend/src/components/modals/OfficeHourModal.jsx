@@ -30,13 +30,29 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
   const [busy,  setBusy]  = useState(false);
   const [error, setError] = useState('');
 
+  // NEW-FU-466 (Phase 112): office hours may only be 08:00–16:00 (8 AM–4 PM).
+  // Validate as the user types — flag immediately and block Save, never wait for
+  // the API to bounce it. The backend enforces the same window as a backstop.
+  // This is the user-facing half of the R-04 "class overlaps office hours" fix:
+  // an out-of-window early block can no longer be entered here at all.
+  // NEW-FU-496 (Phase 120): check BOTH endpoints against BOTH edges (catches a
+  // start AFTER 16:00 / an end BEFORE 08:00, not just start<08:00 / end>16:00),
+  // give the window message PRIORITY over the ordering message, and have the
+  // ordering message still name the window so the user is never left guessing.
+  // The inputs are clamped on change so an out-of-window value can't be entered.
+  const OH_MIN = '08:00', OH_MAX = '16:00';
+  const clampOH = v => !v ? v : (v < OH_MIN ? OH_MIN : v > OH_MAX ? OH_MAX : v);
+  const windowBad = (form.startTime && (form.startTime < OH_MIN || form.startTime > OH_MAX)) ||
+                    (form.endTime   && (form.endTime   < OH_MIN || form.endTime   > OH_MAX));
+  const orderBad  = form.startTime && form.endTime && form.endTime <= form.startTime;
+  const validationMsg = windowBad ? 'Office hours can only be between 8:00 AM and 4:00 PM.'
+    : orderBad ? 'End time must be after the start time (office hours are 8:00 AM–4:00 PM).' : '';
+
   async function handleSave(e) {
     e.preventDefault();
-    // H-9: client-side time-order guard so the user gets instant feedback
-    if (form.endTime <= form.startTime) {
-      setError('End time must be after start time.');
-      return;
-    }
+    // H-9 + NEW-FU-466: block any out-of-window / out-of-order value at the source.
+    // The user already sees `validationMsg` inline; this also stops the submit.
+    if (validationMsg) { setError(validationMsg); return; }
     setBusy(true); setError('');
     try {
       // NEW-FU-41: one atomic PUT instead of the prior C-5 add-then-delete
@@ -91,19 +107,25 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
           <div className="sm-row">
             <div className="sm-field">
               <label>Start time</label>
-              <input type="time" value={form.startTime}
+              <input type="time" min={OH_MIN} max={OH_MAX} value={form.startTime}
                 disabled={isArchived}
-                onChange={e => setForm(f => ({...f, startTime: e.target.value}))} required />
+                onChange={e => setForm(f => ({...f, startTime: clampOH(e.target.value)}))} required />
             </div>
             <div className="sm-field">
               <label>End time</label>
-              <input type="time" value={form.endTime}
+              <input type="time" min={OH_MIN} max={OH_MAX} value={form.endTime}
                 disabled={isArchived}
-                onChange={e => setForm(f => ({...f, endTime: e.target.value}))} required />
+                onChange={e => setForm(f => ({...f, endTime: clampOH(e.target.value)}))} required />
             </div>
           </div>
 
-          {error && <div className="sm-error">{error}</div>}
+          {/* NEW-FU-466 (Phase 112): live window/order flag (takes precedence),
+              else the plain-language rule so the secretary knows it up front. */}
+          {(validationMsg || error)
+            ? <div className="sm-error">{validationMsg || error}</div>
+            : <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+                Office hours can be set between 8:00 AM and 4:00 PM.
+              </div>}
 
           <div className="sm-actions">
             <button type="button" className="sm-btn-delete"
@@ -114,8 +136,8 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
             </button>
             <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>
             <button type="submit" className="sm-btn-save"
-              disabled={busy || isArchived}
-              title={isArchived ? lockedTitle : undefined}>
+              disabled={busy || isArchived || !!validationMsg}
+              title={isArchived ? lockedTitle : (validationMsg || undefined)}>
               {busy ? '…' : 'Save'}
             </button>
           </div>

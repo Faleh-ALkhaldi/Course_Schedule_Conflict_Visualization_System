@@ -2,6 +2,21 @@ import React, { createContext, useContext, useReducer, useCallback } from 'react
 import * as api from '../api/index.js';
 
 export const VIEWS = { COURSE: 'course', TEACHER: 'teacher', VENUE: 'venue' };
+
+// NEW-FU-474 (Phase 114): order venues by building number, then room number,
+// numerically — so a NEWLY-ADDED venue sorts into place instead of being appended
+// at the bottom of the list. Matches the backend's load-time ORDER BY. Handles the
+// XX-YYY, XX-YYY-Z and XX-YYYY name formats (leading digits = building, digits after
+// the first dash = room); unparseable names sort last by string.
+export function venueOrder(a, b) {
+  const parse = v => {
+    const m = String((v && v.name) || v || '').match(/^(\d+)(?:-(\d+))?/);
+    return [m && m[1] ? +m[1] : Infinity, m && m[2] ? +m[2] : Infinity];
+  };
+  const [ab, ar] = parse(a), [bb, br] = parse(b);
+  return ab - bb || ar - br ||
+    String((a && a.name) || '').localeCompare(String((b && b.name) || ''), undefined, { numeric: true });
+}
 export const DAYS  = ['Sunday','Monday','Tuesday','Wednesday','Thursday'];
 
 // Sun/Tue/Thu = 50 min, Mon/Wed = 75 min
@@ -14,7 +29,12 @@ const SLOT_START = 7 * 60;
 const SLOT_END   = 22 * 60;
 
 export function fromMinutes(m) {
-  return `${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
+  // NEW-FU-453 (Phase 108): clamp to a valid minute-of-day (0–1439) so a bad or
+  // overflowed input can NEVER render as scientific notation / a >24h garbage
+  // time ("510:30", "1.66e+26:32") anywhere in the app. Validation upstream
+  // blocks such values from being saved; this is the last-line display guard.
+  const v = Number.isFinite(m) ? Math.max(0, Math.min(Math.trunc(m), 24 * 60 - 1)) : 0;
+  return `${String(Math.floor(v/60)).padStart(2,'0')}:${String(v%60).padStart(2,'0')}`;
 }
 export function toMinutes(t) {
   if (!t) return 0;
@@ -99,7 +119,7 @@ function reducer(state, action) {
     case 'SET_REFERENCE':  return { ...state,
       courses:     action.courses     ?? state.courses,
       instructors: action.instructors ?? state.instructors,
-      venues:      action.venues      ?? state.venues,
+      venues:      action.venues ? [...action.venues].sort(venueOrder) : state.venues,
     };
     case 'SET_SCHEDULE':   return { ...state, schedule:action.schedule };
     case 'SET_VIEW_DATA':  return { ...state, sections:action.sections, officeHours:action.officeHours??[], loading:false };
@@ -123,7 +143,7 @@ function reducer(state, action) {
     case 'CLEAR_SECTIONS':     return { ...state, sections: [], loading: false };
     case 'ADD_INSTRUCTOR':     return { ...state, instructors: [...state.instructors, action.instructor] };
     case 'REMOVE_INSTRUCTOR':  return { ...state, instructors: state.instructors.filter(i=>i.id!==action.id) };
-    case 'ADD_VENUE':          return { ...state, venues:      [...state.venues, action.venue] };
+    case 'ADD_VENUE':          return { ...state, venues:      [...state.venues, action.venue].sort(venueOrder) };
     case 'REMOVE_VENUE':       return { ...state, venues:      state.venues.filter(v=>v.id!==action.id) };
     case 'ADD_COURSE':         return { ...state, courses:     [...state.courses, action.course] };
     case 'REMOVE_COURSE':      return { ...state, courses:     state.courses.filter(c=>c.id!==action.id) };
@@ -161,7 +181,13 @@ export function AppProvider({ children }) {
     dispatch({ type:'LOGOUT' });
   }, []);
 
+  // NEW-FU-471 (Phase 113): stale-response guard, mirroring loadView's loadViewSeq.
+  // Without it, a fast term-switch (A→B→A) lets whichever reference fetch resolves
+  // LAST win — so the sidebar (courses / instructors / venues) could show term A
+  // while the grid shows term B. Same ++seq / drop-if-superseded pattern as loadView.
+  const loadReferenceSeq = React.useRef(0);
   const loadReference = useCallback(async (termCode = null) => {
+    const mySeq = ++loadReferenceSeq.current;
     // NEW-FU-12: use allSettled so a single endpoint failing (e.g. /venues
     // returns 500) doesn't blank out the other two reference lists. Each
     // failed fetch keeps its previous value via the reducer's `?? state.*`
@@ -175,6 +201,9 @@ export function AppProvider({ children }) {
       api.getCourses(termCode), api.getInstructors(termCode), api.getVenues(termCode),
     ]);
     const [courses, instructors, venues] = results.map(r => r.status === 'fulfilled' ? r.value : undefined);
+    // NEW-FU-471 (Phase 113): a newer term-switch superseded this fetch — drop it
+    // so we never paint a stale term's reference lists over the current term.
+    if (mySeq !== loadReferenceSeq.current) return;
     // NEW-FU-32: surface partial failures via the existing FU-31 toast
     // pipeline. Before this dispatch, the only signal of a transient backend
     // hiccup was a dev-only console.error — the user saw a sidebar missing
@@ -207,8 +236,16 @@ export function AppProvider({ children }) {
     // dispatches independently; SET_ERROR fires only if both failed (or
     // if the still-applicable half failed and there's nothing useful to
     // partially render).
+    // NEW-FU-458 (Phase 108): retry the sections fetch once on a transient failure.
+    // SET_VIEW clears sections on a view-switch; if the follow-up fetch then errors
+    // (a brief 5xx/DB hiccup) the grid would sit blank. One retry keeps a momentary
+    // failure from rendering the term as empty — "never blank a term on an error".
+    const getSectionsResilient = async () => {
+      try { return await api.getSections(scheduleId, view, filterId); }
+      catch { return await api.getSections(scheduleId, view, filterId); }
+    };
     const results = await Promise.allSettled([
-      api.getSections(scheduleId, view, filterId),
+      getSectionsResilient(),
       api.getConflicts(scheduleId),
     ]);
     // Stale-response guard (same as before — newer loadView wins).
@@ -279,37 +316,52 @@ export function AppProvider({ children }) {
   }, []);
 
   const addInstructor = useCallback(async (data) => {
-    const instructor = await api.createInstructor(data);
+    // NEW-FU-434 (Phase 106 item 6): thread the active term so the backend can
+    // auto-replace the oldest placeholder instructor in it. If it did, drop the
+    // placeholder from the list and reload sections (now on the new instructor).
+    const { replacedDummy, ...instructor } = await api.createInstructor({ ...data, ownerSemester: state.schedule?.semester });
     dispatch({ type:'ADD_INSTRUCTOR', instructor });
-    return instructor;
-  }, []);
+    if (replacedDummy) {
+      dispatch({ type:'REMOVE_INSTRUCTOR', id: replacedDummy.id });
+      // NEW-FU-437 (Phase 107 H3): the backend reassigned the placeholder's
+      // sections to the new real instructor — RELOAD the view so the grid shows
+      // it. (The old CLEAR_SECTIONS just blanked the grid: the sections-length
+      // reload effect it relied on was removed in FU-55.)
+      if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) loadView(state.schedule.id, state.view, state.filterId);
+    }
+    return { ...instructor, replacedDummy };
+  }, [state.schedule, state.view, state.filterId, loadView]);
 
   const removeInstructor = useCallback(async (id) => {
     await api.deleteInstructor(id);
     dispatch({ type:'REMOVE_INSTRUCTOR', id });
-    // NEW-FU-50: trigger CLEAR_SECTIONS so SchedulerPage's reload effect
-    // re-fetches with the now-NULL instructor_id on any affected sections.
-    // Previously the grid kept rendering the deleted instructor's name on
-    // section blocks until the user changed view or reloaded the page.
-    // CLEAR_SECTIONS (C-6) preserves officeHours so Teacher View doesn't
-    // blank out mid-cleanup.
-    dispatch({ type:'CLEAR_SECTIONS' });
-  }, []);
+    // NEW-FU-437 (Phase 107 H3): RELOAD the view (sections.instructor_id is now
+    // NULL on affected rows). The old CLEAR_SECTIONS relied on a SchedulerPage
+    // reload effect that FU-55 removed, so the grid blanked with no re-fetch.
+    if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) loadView(state.schedule.id, state.view, state.filterId);
+  }, [state.schedule, state.view, state.filterId, loadView]);
 
   const addVenue = useCallback(async (data) => {
-    const venue = await api.createVenue(data);
+    // NEW-FU-434 (Phase 106 item 6): auto-replace the oldest placeholder venue of
+    // the SAME type in the active term, then drop it + reload sections.
+    const { replacedDummy, ...venue } = await api.createVenue({ ...data, ownerSemester: state.schedule?.semester });
     dispatch({ type:'ADD_VENUE', venue });
-    return venue;
-  }, []);
+    if (replacedDummy) {
+      dispatch({ type:'REMOVE_VENUE', id: replacedDummy.id });
+      // NEW-FU-437 (Phase 107 H3): reload so the grid shows the real venue on the
+      // placeholder's reassigned sections (CLEAR_SECTIONS only blanked it).
+      if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) loadView(state.schedule.id, state.view, state.filterId);
+    }
+    return { ...venue, replacedDummy };
+  }, [state.schedule, state.view, state.filterId, loadView]);
 
   const removeVenue = useCallback(async (id) => {
     await api.deleteVenue(id);
     dispatch({ type:'REMOVE_VENUE', id });
-    // NEW-FU-50: same reason as removeInstructor — sections.venue_id is
-    // set NULL by the DB cascade; clear local sections to force a reload
-    // so stale venue names disappear from the grid.
-    dispatch({ type:'CLEAR_SECTIONS' });
-  }, []);
+    // NEW-FU-437 (Phase 107 H3): reload so the deleted venue's name disappears
+    // from the grid (sections.venue_id is NULL via cascade).
+    if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) loadView(state.schedule.id, state.view, state.filterId);
+  }, [state.schedule, state.view, state.filterId, loadView]);
 
   const addCourse = useCallback(async (data) => {
     const course = await api.createCourse(data);
@@ -321,13 +373,14 @@ export function AppProvider({ children }) {
     try {
       await api.deleteCourse(id);
       dispatch({ type:'REMOVE_COURSE', id });
-      // Clear sections (triggers reload in SchedulerPage) without wiping officeHours (C-6).
-      dispatch({ type:'CLEAR_SECTIONS' });
+      // NEW-FU-437 (Phase 107 H3): reload so the deleted course's sections leave
+      // the grid (CLEAR_SECTIONS alone blanked it — FU-55 removed the reload effect).
+      if (state.schedule && !((state.view === VIEWS.VENUE || state.view === VIEWS.TEACHER) && !state.filterId)) loadView(state.schedule.id, state.view, state.filterId);
     } catch(err) {
       console.error('Delete course failed:', err.response?.data?.error ?? err.message);
       throw err;
     }
-  }, []);
+  }, [state.schedule, state.view, state.filterId, loadView]);
 
   // NEW-FU-78: accept either a boolean (legacy "confirm all softs") or an
   // array of explicit conflict ids the user saw and acknowledged. The
@@ -358,6 +411,15 @@ export function AppProvider({ children }) {
     }
   }, [state.schedule]);
 
+  // NEW-FU-465 (Phase 110): un-finalize / unlock — the reverse of Save. Returns the
+  // term to Draft so it can be edited again. Always allowed (no hard-conflict guard);
+  // lets the top button toggle Save (finalize) ↔ Unlock (un-finalize).
+  const unfinalizeSchedule = useCallback(async () => {
+    if (!state.schedule) return;
+    await api.setTermStatus(state.schedule.semester, 'Draft');
+    dispatch({ type:'SET_SCHEDULE', schedule: { ...state.schedule, status: 'Draft' } });
+  }, [state.schedule]);
+
   const switchView = useCallback((view, filterId=null) => {
     dispatch({ type:'SET_VIEW', view, filterId });
   }, []);
@@ -370,7 +432,7 @@ export function AppProvider({ children }) {
       addInstructor, removeInstructor,
       addVenue, removeVenue,
       addCourse, removeCourse,
-      saveSchedule, switchView, dispatch,
+      saveSchedule, unfinalizeSchedule, switchView, dispatch,
     }}>
       {children}
     </AppContext.Provider>

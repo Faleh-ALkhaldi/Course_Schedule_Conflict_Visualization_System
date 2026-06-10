@@ -402,3 +402,267 @@
   font-weight: 500;
   line-height: 1.35;
 }
+
+/* ── NEW-FU-224 (Phase 96): fit the whole panel — no vertical scroll, no
+   horizontal clipping ──────────────────────────────────────────────────────
+   The modal capped at 700px wide × 88vh with generous card spacing and tall
+   stacked Duration/Days rows, so on a real schedule (≈10 courses) the list
+   scrolled AND the third day-pattern button ("Tue / Thu") was clipped at the
+   right edge. This block widens + heightens the card, lays Duration and Days
+   on ONE row, compacts the per-course rows, and shrinks the day buttons so the
+   full course list, the footer note, and the action buttons are all visible at
+   once. Relationship-based (vw/flex), not pinned to one viewport. */
+.suggest-card {
+  /* NEW-FU-373 (Phase 98 item 3): single-column layout ⇒ a comfortable reading
+     width (was 1280px to host the 3-column grid). The course list now scrolls
+     vertically inside .suggest-table-wrap instead of fanning across columns. */
+  max-width: 720px;
+  max-height: 94vh;
+}
+.suggest-desc {
+  padding: 6px 24px 8px;
+  font-size: .8rem;
+}
+.suggest-banner { margin: 0 24px 8px; }
+
+/* Tighter card chassis: smaller inter-row gap + row padding. */
+.suggest-table { border-spacing: 0 8px; }
+.suggest-course-row > td {
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+/* Lay the lecture block's Duration + Days steps side-by-side on one row
+   (the heading, when present, spans the full width above them). This halves
+   the height of every lecture course vs. the old stacked layout. */
+.suggest-lec-block {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 20px;
+  row-gap: 4px;
+}
+.suggest-lec-heading { flex-basis: 100%; margin-bottom: 2px; }
+.suggest-lec-block .suggest-step { margin-bottom: 0; }
+
+/* Compact the remaining spacings. */
+.suggest-step { margin-bottom: 3px; }
+.suggest-section-block { margin-bottom: 4px; }
+.suggest-lab-block { margin-top: 6px; padding: 6px 10px 5px; }
+.suggest-lab-step { margin-top: 4px; padding-top: 4px; }
+.suggest-level-row > td { padding-top: 2px; padding-bottom: 2px; }
+
+/* Smaller, wrap-safe pattern buttons — 3–4 day buttons + their label now fit
+   the column without horizontal overflow. */
+.suggest-pattern-group { gap: 4px; flex-wrap: wrap; }
+.suggest-pattern-btn {
+  min-width: 70px;
+  padding: 3px 7px;
+  font-size: .72rem;
+}
+.suggest-duration-group .suggest-pattern-btn { min-width: 56px; }
+.suggest-weekday-btn { min-width: 42px; }
+
+/* NEW-FU-223 (Phase 96): one-line footer note that replaced the Advanced
+   conflict-tolerance knob. Muted + compact — sets expectations without
+   reintroducing clutter. */
+.suggest-foot-note {
+  margin: 0;
+  padding: 4px 24px 10px;
+  font-size: .76rem;
+  line-height: 1.45;
+  color: var(--slate-500);
+}
+.suggest-foot-note strong { color: var(--teal-600, #0f766e); font-weight: 600; }
+
+/* ── NEW-FU-231 (Phase 97): auto-choose toggle + tooltip (items 7/8) ─────────── */
+.suggest-autochoose {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px 8px;
+}
+.suggest-autochoose-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 0;
+  font-size: .78rem;
+  color: var(--slate-600);
+}
+.suggest-autochoose-track {
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--slate-300);
+  position: relative;
+  transition: background .15s;
+  flex: 0 0 auto;
+}
+.suggest-autochoose-toggle.on .suggest-autochoose-track { background: var(--teal-500, #0d9488); }
+.suggest-autochoose-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform .15s;
+  box-shadow: 0 1px 2px rgba(0,0,0,.2);
+}
+.suggest-autochoose-toggle.on .suggest-autochoose-knob { transform: translateX(16px); }
+.suggest-autochoose-label strong { color: var(--navy-800); }
+.suggest-autochoose-help {
+  cursor: help;
+  color: var(--slate-400);
+  font-size: .82rem;
+  user-select: none;
+}
+.suggest-autochoose-help:hover,
+.suggest-autochoose-help:focus { color: var(--teal-600, #0f766e); outline: none; }
+
+/* ── NEW-FU-232 (Phase 97, item 6): calmer cards + quieter controls ──────────
+   The panel read as a wall of competing chips/colours. Soften every secondary
+   element (inactive buttons, borders, axis labels) so the eye lands on the
+   course code + the one ACTIVE choice per row. Height-neutral (no scroll). */
+.suggest-course-card { border-color: #e6eaf0; }
+.suggest-course-card:hover { background: #f8fafc; }
+.suggest-pattern-btn {
+  border-color: #e6eaf0;
+  background: #fff;
+  color: var(--slate-500, #64748b);
+}
+.suggest-pattern-btn.active {
+  border-color: var(--teal-500, #0d9488);
+  background: rgba(13, 148, 136, .06);
+  color: var(--teal-600, #0f766e);
+}
+/* mute the micro axis labels (DURATION / DAYS / # SEC / LECTURE SECTION). */
+.suggest-step-label,
+.suggest-section-heading,
+.suggest-sections-label {
+  color: #9aa6b5;
+  font-weight: 600;
+}
+/* lighten the per-level group bar into a quiet divider, not a colour block. */
+.suggest-level-row {
+  font-size: .68rem;
+  letter-spacing: .07em;
+}
+
+/* ── NEW-FU-224 (Phase 96): multi-COLUMN card list (replaces the single-column
+   table) so a full course list fits the modal without vertical scroll. ──────
+   CSS multi-column flows the course cards into as many ≥410px columns as fit
+   (2 on a normal modal, 1 when narrow → responsive, not pinned). Each academic-
+   level header spans all columns so the grouping still reads top-to-bottom. */
+/* NEW-FU-232 (Phase 97, item 6): calm the panel. The full-width navy
+   "DESELECT ALL" bar dominated the modal; a light, quiet bar reads as a utility
+   control, not a header, and lets the course cards be the focus. */
+.suggest-apply-bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  padding: 7px 16px;
+  margin: 0 4px;
+  background: var(--slate-50, #f8fafc);
+  border: 1px solid var(--slate-200, #e2e8f0);
+  border-radius: 8px;
+}
+.suggest-apply-bar .suggest-apply-all-label { color: var(--slate-600, #475569); }
+.suggest-apply-bar .suggest-apply-all-label input[type="checkbox"] { accent-color: var(--teal-500, #0d9488); }
+
+/* NEW-FU-373 (Phase 98 item 3): SINGLE connected column. The Phase-96 CSS
+   multi-column (`columns: 380px 3`) flowed a tier's courses across columns, so a
+   FRESHMAN / … / GRADUATE header ended up visually detached from its own courses
+   and the panel read as broken. One column keeps every tier header directly above
+   ITS courses, top-to-bottom; the list scrolls vertically (the accepted trade-off
+   that supersedes the Phase-96 "fit without scroll via 3 columns" goal). */
+.suggest-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 4px 2px;
+}
+.suggest-level-row {
+  /* Full-width group header that connects to the courses immediately below it. */
+  font-weight: 700;
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 5px 12px;
+  margin: 8px 0 2px;
+  border-radius: 6px;
+}
+.suggest-level-row:first-child { margin-top: 0; }
+
+.suggest-course-card {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-left: 3px solid var(--row-accent, #cbd5e1);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 0;
+  transition: background .1s;
+}
+.suggest-course-card:hover { background: #f8fafc; }
+/* unchecked (skipped) cards recede but stay legible. */
+.suggest-course-card.suggest-course-row-skipped { opacity: .55; }
+
+.suggest-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.suggest-apply-cb {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: #14b8a6;
+}
+.suggest-card-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: nowrap;        /* keep the whole title on ONE line (head stays ~1 row) */
+  gap: 0 6px;
+}
+.suggest-card-title .suggest-code   { flex: 0 0 auto; }
+.suggest-card-title .suggest-credits { flex: 0 0 auto; }
+.suggest-card-title .suggest-name {
+  flex: 1 1 auto;           /* take the remaining width, ellipsise the overflow */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.suggest-card-title .suggest-credits { margin-left: 0; }
+.suggest-cat { flex: 0 0 auto; }
+.suggest-sections-field {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.suggest-sections-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: #64748b;
+}
+.suggest-sections-field .suggest-num-input {
+  width: 44px;
+  padding: 3px 4px;
+}
+.suggest-card-body { margin-top: 7px; }

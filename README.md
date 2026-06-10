@@ -243,7 +243,7 @@ definitions and ConflictEngine call order.
 | R-03 | Senior-course exemption from R-01 and R-02             | Modifier | Applied inside `R02Rule.js` |
 | R-04 | Instructor double-booking or office-hour overlap       | Hard | `R04Rule.js` |
 | R-05 | Venue (lecture-hall or laboratory) double-booking      | Hard | `R05Rule.js` |
-| R-06 | UG outside 07:00–17:00 or GR before 17:00              | Hard | `R06Rule.js` |
+| R-06 | UG outside 07:00–17:10 or GR outside 17:20–22:00      | Hard | `R06Rule.js` |
 | R-07 | Parallel-course-per-slot cap (auto-suggest only)       | Constraint | `services/SuggestService.js` |
 | R-08 | Same-course sections in same slot cap (auto-suggest)   | Constraint | `services/SuggestService.js` |
 | R-09 | Section saved without an instructor                    | Soft warning | `repositories/SectionRepository.validateOneInstructor` |

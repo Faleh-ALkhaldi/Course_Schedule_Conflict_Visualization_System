@@ -160,6 +160,167 @@
   border-radius:7px; padding:9px 12px; font-size:.82rem; color:var(--slate-600);
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   NEW-FU-401 (Phase 101): SectionModal modern restructure. Brings the section-
+   edit panel in line with the rest of the redesigned system — SVG icons (no
+   emoji), modern pills, inline severity-coloured conflict panels, an in-app
+   delete confirmation (replacing window.confirm), and accessible focus states.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* Inline SVG icons inherit currentColor + sit on the text baseline. */
+.sm-ico { width: 15px; height: 15px; flex: 0 0 auto; vertical-align: -2px; }
+
+.sm-header-text { min-width: 0; }
+
+/* Group badge: icon + text on one calm row. */
+.sm-group-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: .76rem; color: var(--teal-600, #0f766e); margin-top: 4px; font-weight: 600;
+}
+.sm-group-badge .sm-ico { color: var(--teal-600, #0f766e); }
+.sm-group-note { font-weight: 400; color: var(--slate-400); }
+
+/* Tabs: icon + label. */
+.sm-tabs button { display: inline-flex; align-items: center; gap: 6px; }
+.sm-tabs button .sm-ico { width: 14px; height: 14px; }
+
+/* Modern pill toggles (replace the old sm-daymode-btn look). */
+.sm-pill-group { display: flex; flex-wrap: wrap; gap: 6px; }
+.sm-pill-group-sm { gap: 4px; margin-bottom: 6px; }
+.sm-daymode-group { display: flex; flex-wrap: wrap; gap: 6px; }
+.sm-pill {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  flex: 1 1 auto;
+  padding: 8px 12px; border-radius: 8px;
+  font-family: var(--font-body); font-size: .82rem; font-weight: 600;
+  color: var(--slate-600); background: var(--white);
+  border: 1.5px solid var(--slate-200);
+  cursor: pointer; transition: background .15s, border-color .15s, color .15s;
+}
+.sm-pill .sm-ico { width: 14px; height: 14px; }
+.sm-pill:hover:not(:disabled):not(.active) { border-color: var(--slate-300); background: var(--slate-50); }
+.sm-pill.active {
+  border-color: var(--teal-500, #0d9488);
+  background: rgba(13,148,136,.08);
+  color: var(--teal-600, #0f766e);
+}
+.sm-pill:disabled { opacity: .45; cursor: not-allowed; }
+.sm-pill:focus-visible { outline: 2px solid var(--teal-500, #0d9488); outline-offset: 1px; }
+.sm-pill-sm { flex: 0 0 auto; padding: 5px 11px; font-size: .76rem; }
+
+.sm-subselect { margin-top: 6px; }
+
+/* Help / hint text under fields. */
+.sm-hint {
+  display: flex; align-items: center; gap: 5px;
+  margin: 4px 0 0; font-size: .72rem; line-height: 1.4; color: var(--slate-500);
+}
+.sm-hint .sm-ico { width: 13px; height: 13px; color: var(--slate-400); }
+.sm-hint strong { color: var(--slate-700); font-weight: 700; }
+
+/* Label row with an inline "+ New" affordance. */
+.sm-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.sm-inline-add {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 9px; font-size: .68rem; font-weight: 700; text-transform: none;
+  color: var(--teal-600, #0f766e);
+  background: rgba(13,148,136,.08);
+  border: 1px solid rgba(13,148,136,.28);
+  border-radius: 6px; cursor: pointer; transition: background .15s;
+}
+.sm-inline-add .sm-ico { width: 12px; height: 12px; }
+.sm-inline-add:hover { background: rgba(13,148,136,.16); }
+
+/* Info boxes: shared chassis (icon-aligned) + three tones. */
+.sm-info-box { display: flex; align-items: flex-start; gap: 8px; line-height: 1.45; }
+.sm-info-box .sm-ico { margin-top: 1px; }
+.sm-info-accent { background: rgba(13,148,136,.06); border: 1px solid rgba(13,148,136,.22); color: var(--slate-600); }
+.sm-info-accent .sm-ico { color: var(--teal-600, #0f766e); }
+.sm-info-warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; flex-direction: column; align-items: stretch; gap: 0; }
+.sm-info-warn > strong { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; }
+.sm-info-warn .sm-ico { color: #b45309; }
+.sm-info-ok { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; font-size: .8rem; align-items: center; }
+.sm-info-ok .sm-ico { color: #16a34a; }
+
+/* Conflict list — severity chips + plain text. */
+.sm-conflict-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.sm-conflict-list li { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: .78rem; line-height: 1.4; color: var(--slate-700); }
+.sm-conflict-list strong { color: var(--navy-800); font-family: var(--font-mono); font-size: .74rem; }
+.sm-sev { flex: 0 0 auto; font-size: .62rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 999px; }
+.sm-sev-hard { background: #fee2e2; color: #b91c1c; }
+.sm-sev-soft { background: #fef3c7; color: #92400e; }
+
+/* Error: icon + message (announced via role=alert in JSX). */
+.sm-error { display: flex; align-items: center; gap: 8px; }
+.sm-error .sm-ico { color: #dc2626; flex: 0 0 auto; }
+
+/* Delete buttons: outline (footer) + solid (confirm). */
+.sm-btn-delete { display: inline-flex; align-items: center; gap: 6px; }
+.sm-btn-delete .sm-ico { width: 14px; height: 14px; }
+.sm-btn-delete-solid { background: var(--red-500, #ef4444); color: #fff; border-color: var(--red-500, #ef4444); margin: 0; }
+.sm-btn-delete-solid:hover:not(:disabled) { background: #dc2626; }
+
+/* In-app delete confirmation — a small dialog over the whole viewport. */
+.sm-confirm-scrim {
+  position: fixed; inset: 0; z-index: 300;
+  background: rgba(13,27,42,.55); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+  animation: ov-in .12s ease;
+}
+.sm-confirm-card {
+  background: var(--white); border-radius: 12px; padding: 24px 24px 18px;
+  width: 88%; max-width: 380px; box-shadow: 0 16px 48px rgba(0,0,0,.3);
+  text-align: center; animation: card-in .2s cubic-bezier(.16,1,.3,1);
+  border-top: 4px solid var(--red-500, #ef4444);
+}
+.sm-confirm-icon {
+  width: 46px; height: 46px; margin: 4px auto 12px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; background: #fee2e2; color: #dc2626;
+}
+.sm-confirm-icon .sm-ico { width: 22px; height: 22px; }
+.sm-confirm-title { font-family: var(--font-display); font-size: 16px; font-weight: 700; color: var(--text-primary); margin: 0 0 6px; }
+.sm-confirm-text { font-size: .82rem; line-height: 1.5; color: var(--slate-600); margin: 0 0 18px; }
+.sm-confirm-text strong { color: var(--navy-800); }
+.sm-confirm-actions { display: flex; gap: 8px; justify-content: center; }
+.sm-confirm-actions button { flex: 1 1 auto; }
+
+/* NEW-FU-411 (Phase 102): gendered section-number input — a fixed "F-" addon for
+   female sections, with the digit input range-scoped to the section type. */
+.sm-secnum-wrap { display: flex; align-items: stretch; }
+.sm-secnum-prefix {
+  display: flex; align-items: center; padding: 0 11px;
+  font-family: var(--font-mono); font-size: 14px; font-weight: 700; color: var(--navy-800);
+  background: var(--slate-100);
+  border: 1.5px solid var(--slate-200); border-right: none;
+  border-radius: 7px 0 0 7px;
+}
+.sm-secnum-wrap:has(.sm-secnum-prefix) .sm-secnum-digits { border-radius: 0 7px 7px 0; border-left: none; }
+
+/* NEW-FU-417 (Phase 103 items 3+4): live, near-field, high-quality validation
+   error — replaces the bare native HTML5 tooltip. Sits directly under the
+   field with proper padding, a clear border, an alert icon, and rose tones
+   that meet contrast on the modal's light surface. */
+.sm-inline-error {
+  display: flex; align-items: flex-start; gap: 7px;
+  margin: 7px 0 0; padding: 9px 12px;
+  font-size: .80rem; line-height: 1.45; font-weight: 600;
+  color: #be123c;               /* rose-700 — 4.5:1+ on the rose-50 fill */
+  background: #fff1f2;          /* rose-50 */
+  border: 1px solid #fecdd3;    /* rose-200 */
+  border-radius: 8px;
+}
+.sm-inline-error .sm-ico { flex: 0 0 auto; width: 15px; height: 15px; margin-top: 1px; color: #f43f5e; }
+/* highlight the invalid input itself so the error and the field connect */
+.sm-secnum-wrap-invalid .sm-secnum-digits,
+.sm-secnum-wrap-invalid .sm-secnum-prefix { border-color: #fb7185; }
+.sm-secnum-wrap-invalid .sm-secnum-digits { box-shadow: 0 0 0 3px rgba(244, 63, 94, .14); }
+
+/* NEW-FU-410 (Phase 102): read-only section-type display (type is fixed after creation). */
+.sm-type-readonly { display: flex; align-items: center; gap: 8px; }
+.sm-type-readonly .sm-ico { color: var(--teal-600, #0f766e); }
+.sm-type-fixed { margin-left: auto; }
+
 /* ── Export modal ──────────────────────────────────────────────────────────── */
 .exp-option {
   display: flex;

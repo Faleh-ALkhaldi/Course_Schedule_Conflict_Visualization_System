@@ -3,9 +3,11 @@
   min-width: 260px;
   background: #F4F5F6;
   border-right: 1px solid var(--slate-200);
-  overflow-y: auto;
+  /* NEW-FU-418 (Phase 103 item 5): the ROOT no longer scrolls — scrolling moved
+     to .sp-scroll — so the absolutely-positioned collapse handle stays pinned to
+     the panel's visible centre instead of scrolling away with the list. */
+  overflow: visible;
   height: calc(100vh - var(--header-h));
-  padding-bottom: 32px;
   position: relative;
   transition: width 0.25s ease, min-width 0.25s ease;
   flex-shrink: 0;
@@ -13,38 +15,56 @@
 .sp-root.sp-collapsed {
   width: 32px;
   min-width: 32px;
-  overflow: hidden;
+  overflow: visible;   /* keep the handle (right: -15px) visible when collapsed */
+}
+/* NEW-FU-418 (Phase 103 item 5): inner scroll region (fills the fixed-height root). */
+.sp-scroll {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-bottom: 32px;
 }
 
-/* ── Collapse toggle button ──────────────────────────────────────────────── */
-/* Uses --navy-800 (same dark slate as the section block borders and Sign-in
-   button), with a white chevron for AA contrast. */
+/* ── Collapse toggle handle ──────────────────────────────────────────────── */
+/* NEW-FU-418 (Phase 103 item 5):
+   • position: absolute + top:50% on the NON-scrolling .sp-root keeps it pinned
+     to the panel's visible vertical centre at every scroll position.
+   • a vivid AMBER fill — deliberately unlike every surrounding colour (navy
+     header, light-grey panel, green accents, white) so it is instantly
+     spottable — with a near-black chevron for ~9:1 contrast.
+   • larger, tab-shaped, with a white seam + focus ring for clarity and a11y. */
 .sp-collapse-btn {
   position: absolute;
   top: 50%;
-  right: -13px;
+  right: -15px;
   transform: translateY(-50%);
-  width: 24px;
-  height: 48px;
-  border-radius: 0 8px 8px 0;
-  border: 1px solid var(--navy-900);
+  width: 28px;
+  height: 56px;
+  border-radius: 0 11px 11px 0;
+  border: 1px solid #b45309;          /* amber-700 edge */
   border-left: none;
-  background: var(--navy-800);
-  color: var(--white);
+  outline: 2px solid #ffffff;          /* white seam separates it from the panel */
+  outline-offset: -1px;
+  background: #f59e0b;                  /* amber-500 — the distinct accent */
+  color: #1f2937;                      /* near-black chevron, high contrast on amber */
   cursor: pointer;
-  font-size: 16px;
-  font-weight: 700;
+  font-size: 19px;
+  font-weight: 800;
   line-height: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10;
-  box-shadow: 2px 0 6px rgba(0,0,0,0.18);
-  transition: background 0.15s, box-shadow 0.15s;
+  z-index: 20;
+  box-shadow: 2px 0 8px rgba(180, 83, 9, 0.30);
+  transition: background 0.15s, box-shadow 0.15s, transform 0.15s;
 }
 .sp-collapse-btn:hover {
-  background: var(--navy-900);
-  box-shadow: 2px 0 10px rgba(0,0,0,0.28);
+  background: #d97706;                  /* amber-600 */
+  box-shadow: 3px 0 12px rgba(180, 83, 9, 0.42);
+}
+.sp-collapse-btn:focus-visible {
+  outline: 3px solid #1d4ed8;          /* clear keyboard focus ring */
+  outline-offset: 1px;
 }
 
 .sp-section {
@@ -540,3 +560,37 @@
   margin-bottom: 2px; color: var(--text-primary);
   font-family: var(--font-mono);
 }
+
+/* NEW-FU-425 (Phase 104 item 2): placeholder (dummy) resource badge — amber,
+   clearly distinct, marks Suggest-created stand-in instructors/venues. */
+.sp-dummy-badge {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #92400e;            /* amber-800 */
+  background: #fef3c7;       /* amber-100 */
+  border: 1px solid #fcd34d; /* amber-300 */
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.sp-avatar-dummy { background: #f59e0b; color: #1f2937; }
+
+/* NEW-FU-433 (Phase 106 item 5): side-panel placeholder advisory. */
+.sp-dummy-advisory {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 8px 12px 4px;
+  padding: 9px 11px;
+  background: #fffbeb;          /* amber-50 */
+  border: 1px solid #fcd34d;    /* amber-300 */
+  border-left: 3px solid #f59e0b;
+  border-radius: 8px;
+}
+.sp-dummy-advisory-icon { font-size: 14px; line-height: 1.3; flex: 0 0 auto; }
+.sp-dummy-advisory-text { font-size: 11.5px; line-height: 1.35; color: #78350f; } /* amber-900 */
+.sp-dummy-advisory-text strong { display: block; color: #92400e; margin-bottom: 2px; }
+.sp-dummy-advisory-text span { color: #92400e; opacity: 0.85; }

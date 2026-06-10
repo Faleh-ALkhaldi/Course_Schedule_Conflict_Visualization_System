@@ -69,11 +69,48 @@ const GROUP_DAYS = {
 const DURATION_DEFAULTS_BY_TYPE = {
   Lec: [50, 75],
   Lab: [50, 75, 165],
+  // NEW-FU-498 (Phase 122): Project/Thesis meet in long single blocks.
+  Prj: [75, 100, 160],
+  Ths: [75, 100, 160],
 };
 const DURATION_LIMITS_BY_TYPE = {
   Lec: { min: 50, max: 75  },
   Lab: { min: 50, max: 165 },
+  Prj: { min: 50, max: 180 },
+  Ths: { min: 50, max: 180 },
 };
+
+// NEW-FU-401 (Phase 101): inline SVG icon set (Lucide-style, currentColor) that
+// replaces the emoji glyphs the old modal used (📅 📍 ✏️ 📘 🧪 ◇ ✈ ✓). SVG icons
+// inherit text colour, scale crisply, and match the rest of the modernised
+// system. Each is a 24×24 stroked path; size + colour come from CSS (.sm-ico).
+const ICONS = {
+  calendar: 'M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z',
+  clock:    'M12 7v5l3 2M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z',
+  info:     'M12 16v-4M12 8h.01M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z',
+  user:     'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',
+  pin:      'M12 21s-6-5.7-6-10a6 6 0 1 1 12 0c0 4.3-6 10-6 10zM12 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
+  hash:     'M4 9h16M4 15h16M10 3 8 21M16 3l-2 18',
+  book:     'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z',
+  flask:    'M9 3h6M10 3v6.5L5 18a2 2 0 0 0 1.8 3h10.4A2 2 0 0 0 19 18l-5-8.5V3M7.5 14h9',
+  trash:    'M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6',
+  alert:    'M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01',
+  check:    'M20 6 9 17l-5-5',
+  plus:     'M12 5v14M5 12h14',
+  edit:     'M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z',
+  layers:   'M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
+};
+function Ico({ name, className }) {
+  const d = ICONS[name];
+  if (!d) return null;
+  return (
+    <svg className={`sm-ico ${className || ''}`} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true" focusable="false">
+      <path d={d} />
+    </svg>
+  );
+}
 
 export default function SectionModal({ mode, initial, onClose, showToast }) {
   // NEW-FU-35: Escape dismisses the modal, matching the established pattern
@@ -89,7 +126,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // already dispatch ADD_INSTRUCTOR / ADD_VENUE on their own. The old
   // path required a manual SET_REFERENCE dispatch because it bypassed
   // context and used api.* directly.
-  const { courses, instructors, venues, schedule, sections,
+  const { courses, instructors, venues, schedule, sections, conflicts,
           addSection, moveSection, removeSection, loadView, view, filterId,
         } = useApp();
 
@@ -142,6 +179,26 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
 
   const [busy,  setBusy]  = useState(false);
   const [error, setError] = useState('');
+  // NEW-FU-417 (Phase 103 items 3+4): LIVE, runtime section-number validation.
+  // Recomputed every render from the current input, so an out-of-range value is
+  // flagged the instant it is typed — no waiting for Save, and no bare native
+  // HTML5 validation bubble (the forms are noValidate). The message is specific
+  // and tells the user the exact valid range for the section's type/gender.
+  const sectionNumError = (() => {
+    const num  = String(form.sectionNumber ?? '').trim();
+    const type = form.sectionType === 'Lab' ? 'Lab' : 'Lecture';
+    if (!num) return null; // emptiness is handled by the "required" submit guard
+    const ok = (form.sectionType === 'Lab' ? /^[5-9][0-9]$/ : /^(0[1-9]|[1-4][0-9])$/).test(num);
+    if (ok) return null;
+    const pfx = form.gender === 'F' ? 'F-' : '';
+    const lo  = form.sectionType === 'Lab' ? '50' : '01';
+    const hi  = form.sectionType === 'Lab' ? '99' : '49';
+    return `${type} sections use ${pfx}${lo}–${pfx}${hi} (two digits). “${pfx}${num}” is out of range — use a ${pfx}${lo}–${pfx}${hi} number.`;
+  })();
+  // NEW-FU-401 (Phase 101): in-app delete confirmation replaces the jarring
+  // native window.confirm() — a styled confirm step inside the same modal
+  // chassis, consistent with the rest of the system's in-app dialogs.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   // NEW-FU-95 + NEW-FU-104 + NEW-FU-114: in 'add' mode, auto-fill
   // sectionNumber with the next unused two-digit value in the type-scoped
@@ -252,7 +309,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
 
   function computeEnd() {
     const [h,m] = form.startTime.split(':').map(Number);
-    return fromMinutes(h*60+m+parseInt(form.duration||0));
+    // NEW-FU-453 (Phase 108): clamp the total so a bad/huge duration can never
+    // overflow into a garbage end time — fromMinutes only formats a valid
+    // minute-of-day. durationError/timeError block submit on out-of-range input.
+    const total = (h||0)*60 + (m||0) + (parseInt(form.duration,10) || 0);
+    return fromMinutes(Math.max(0, Math.min(total, 24*60 - 1)));
   }
 
   // Days that will be created/affected
@@ -267,6 +328,31 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
 
   async function handleSubmitInfo(e) {
     e.preventDefault();
+    // NEW-FU-411 (Phase 102 item 4): enforce the type-scoped section-number range
+    // client-side (the backend also rejects, but a clear inline message beats a
+    // round-trip "constraint violation"). External courses have no section row.
+    if (!(mode === 'add' && courseIsExternal)) {
+      const range = form.sectionType === 'Lab' ? /^[5-9][0-9]$/ : /^(0[1-9]|[1-4][0-9])$/;
+      if (form.sectionNumber && !range.test(form.sectionNumber)) {
+        const lo = form.sectionType === 'Lab' ? '50' : '01';
+        const hi = form.sectionType === 'Lab' ? '99' : '49';
+        const pfx = form.gender === 'F' ? 'F-' : '';
+        setError(`Section number must be ${pfx}${lo}–${pfx}${hi} for a ${form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} section.`);
+        return;
+      }
+    }
+    // NEW-FU-453 (Phase 108): hard block submit on an out-of-range duration or an
+    // out-of-window time, even if the button guard were bypassed (defense in depth).
+    if (durationError || timeError) { setError(durationError || timeError); return; }
+    // NEW-FU-482 (Phase 116): a finalized/archived term is read-only.
+    if (scheduleLocked) { setError(lockedMsg); return; }
+    // NEW-FU-481 (Phase 116): course + section number are required (defense in depth).
+    if (courseMissing)        { setError('Choose a course before adding this section.'); return; }
+    if (sectionNumberMissing) { setError('Enter a section number before adding this section.'); return; }
+    // NEW-FU-475 (Phase 114): instructor + venue are required (defense in depth — the
+    // Save button is already disabled, this also blocks a bypassed submit).
+    if (instructorMissing) { setError('Choose an instructor before adding this section.'); return; }
+    if (venueMissing)      { setError('Choose a venue before adding this section.'); return; }
     setBusy(true); setError('');
     try {
       if (mode === 'add') {
@@ -320,6 +406,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   async function handleSubmitTime(e) {
     e.preventDefault();
     if (!existing) return;
+    if (scheduleLocked) { setError(lockedMsg); return; }
+    // NEW-FU-478 (Phase 115): block an out-of-window / out-of-range time on EDIT too
+    // (this guard used to run only on the Add form). Show the clear window/duration
+    // note instead of letting a bad time through to a confusing backend message.
+    if (timeError || durationError) { setError(timeError || durationError); return; }
     setBusy(true); setError('');
     // NEW-FU-4 + NEW-FU-8: coerce a cross-day edit into a time-only move
     // ONLY when a sibling already occupies the target day. Single-day
@@ -353,10 +444,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     } finally { setBusy(false); }
   }
 
+  // NEW-FU-401 (Phase 101): the actual delete now runs only after the in-app
+  // confirm step (setConfirmingDelete) — no native window.confirm().
   async function handleDelete() {
     if (!existing) return;
-    const label = `${existing.courseCode??existing.course_code} ${sectionLabel(existing)}`;
-    if (!window.confirm(`Delete ${label} and all linked days in its group?`)) return;
+    setConfirmingDelete(false);
     setBusy(true);
     try {
       await removeSection(existing.id);
@@ -369,11 +461,13 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // NEW-FU-104: courses get has_lab from the backend (FU-94). For
   // courses with has_lab=false, the Lec/Lab selector is hidden and
   // the section is implicitly a lecture. When the selected course
-  // changes to one without has_lab, force sectionType back to 'Lec'
+  // changes to one without has_lab, force sectionType off 'Lab'
   // so a stale 'Lab' value doesn't reach the controller.
+  // NEW-FU-498 (Phase 122): only 'Lab' requires has_lab; Lec/Prj/Ths are always
+  // allowed (Prj/Ths offered on capstone courses), so don't reset those.
   const courseHasLab = !!(selectedCourse && selectedCourse.has_lab);
   useEffect(() => {
-    if (!courseHasLab && form.sectionType !== 'Lec') {
+    if (!courseHasLab && form.sectionType === 'Lab') {
       setForm(f => ({ ...f, sectionType: 'Lec' }));
     }
   }, [courseHasLab, form.sectionType]);
@@ -385,6 +479,61 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // out the entire form and tell the user the section is auto-managed.
   const courseIsCapstone = !!(selectedCourse && selectedCourse.is_capstone);
   const courseIsExternal = !!(selectedCourse && selectedCourse.is_external);
+  // NEW-FU-475 (Phase 114): instructor AND venue are now REQUIRED for a real section
+  // (previously a soft R-09/R-10 warning the user could save past). External courses
+  // have no section row; capstone courses meet wherever convenient (no venue) — both
+  // stay exempt. These gate Save + show an inline flag until both are chosen.
+  const instructorMissing = !courseIsExternal && !form.instructorId;
+  const venueMissing      = !courseIsExternal && !courseIsCapstone && !form.venueId;
+  // NEW-FU-481 (Phase 116): a section needs a COURSE and a SECTION NUMBER too — gate Save
+  // on all four (course, section number, instructor, venue) so it can't be saved half-filled.
+  // NEW-FU-493 (Phase 119 item 3): section-number check extended to edit mode as well.
+  // courseMissing stays add-only (course is fixed on existing sections). sectionNumberMissing
+  // now fires in both modes — matching the instructorMissing / venueMissing pattern — so that
+  // if a user clears the number in edit mode the inline banner fires immediately rather than
+  // surfacing only as a post-Save backend 400. Normal edit flow is unaffected because the
+  // field is always pre-filled from the DB; the gate only triggers on deliberate clearing.
+  const courseMissing        = mode === 'add' && !form.courseId;
+  const sectionNumberMissing = !courseIsExternal && !String(form.sectionNumber || '').trim();
+  // NEW-FU-482 (Phase 116): a finalized (or archived) term is read-only. The add/edit entry
+  // points are disabled up front; this is the Save-level backstop with a plain message.
+  const scheduleLocked = Boolean(schedule?.archived_at) || schedule?.status === 'Finalized';
+  const lockedMsg = 'This term is finalized — unlock it first (Save → Unlock) to make changes.';
+
+  // NEW-FU-453 (Phase 108): runtime guards for DURATION + teaching-WINDOW. An
+  // out-of-range value is flagged inline + blocks submit — never accepted then
+  // surfaced later as a conflict, and never overflowed into a garbage end time.
+  // NEW-FU-478 (Phase 115): the DURATION + WINDOW guards now apply on EDIT too (were
+  // add-only) — editing a section's time to e.g. 11:30 PM used to slip past every guard
+  // and surface a confusing "duration got 29" from the clamped end. form.courseId /
+  // sectionType are populated in edit mode, so the same rules apply cleanly there.
+  const durLimits = DURATION_LIMITS_BY_TYPE[form.sectionType];
+  const durNum    = parseInt(form.duration, 10);
+  const durationError = (form.courseId && !courseIsExternal && form.duration !== '' &&
+    (Number.isNaN(durNum) || durNum < durLimits.min || durNum > durLimits.max))
+    ? `Duration must be ${durLimits.min}–${durLimits.max} minutes for a ${form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} (got ${Number.isNaN(durNum) ? '—' : durNum}).`
+    : null;
+  // NEW-FU-495 (Phase 120): R-06 window. UG 07:00–17:10, GR 17:20–22:00.
+  // Capstone is venue-exempt but NOT time-exempt → bound to the UG window
+  // (every capstone is a UG Senior course). External courses have no section
+  // row → fully exempt (timeWindow null → window check skipped).
+  // NEW-FU-497 (Phase 121): SWE 412 is registrar-scheduled in the evening
+  // (Tue 17:20–20:00) — the one capstone exempt from the R-06 window (timeWindow
+  // null → no banner / no Save-block). Mirrors backend R06_TIME_EXEMPT_COURSES.
+  const courseIsR06Exempt = selectedCourse?.course_code === 'SWE 412';
+  const timeWindow = (courseIsExternal || courseIsR06Exempt)
+    ? null
+    : courseIsCapstone
+      ? { start: 7*60, end: 17*60 + 10 }
+      : (selectedCourse?.category === 'GR' ? { start: 17*60 + 20, end: 22*60 } : { start: 7*60, end: 17*60 + 10 });
+  const winLabel = courseIsCapstone ? 'Capstone'
+    : (selectedCourse?.category === 'GR' ? 'Graduate' : 'Undergraduate');
+  const startMinNow = toMinutes(form.startTime);
+  const endMinNow   = startMinNow + (Number.isNaN(durNum) ? 0 : durNum);
+  const timeError = (form.courseId && !courseIsExternal && timeWindow && form.startTime &&
+    (startMinNow < timeWindow.start || endMinNow > timeWindow.end))
+    ? `${winLabel} sections must run within ${fromMinutes(timeWindow.start)}–${fromMinutes(timeWindow.end)} (this is ${form.startTime}–${computeEnd()}).`
+    : null;
 
   // NEW-FU-275 (Phase 52 #6): single-day pattern is illegal for courses
   // whose credit hours need ≥150 min/week of lecture. A 50-min single-
@@ -470,11 +619,8 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
         });
       }
     }
-    // R-10: missing venue (non-capstone)
-    if (!form.venueId && !courseIsCapstone) {
-      findings.push({ rule: 'R-10', severity: 'Soft',
-        msg: 'No venue assigned — soft warning' });
-    }
+    // NEW-FU-475 (Phase 114): the "no venue" soft warning is gone — a venue is now
+    // REQUIRED (inline flag + disabled Save), so it can never be reached at submit.
     // R-11/R-12: type mismatch
     const selVenue = venues.find(v => v.id === form.venueId);
     if (selVenue && selVenue.type !== 'Multipurpose') {
@@ -550,55 +696,89 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   function quickCreateInstructor() { setSubModal('instructor'); }
   function quickCreateVenue()      { setSubModal('venue'); }
 
+  // NEW-FU-401 (Phase 101): EDIT-mode conflict awareness. Surface the live,
+  // backend-computed conflicts this section's GROUP is actually involved in
+  // (matched by section id across all the group's day-rows, deduped by
+  // rule+description), so the editor sees exactly what's wrong with THIS
+  // section — parity with the add-mode client-side preview.
+  const sectionConflicts = React.useMemo(() => {
+    if (mode !== 'edit' || !existing) return [];
+    const cid = existing.courseId ?? existing.course_id;
+    const num = existing.sectionNumber ?? existing.section_number;
+    const groupIds = new Set(
+      sections
+        .filter(s => (s.courseId ?? s.course_id) === cid && (s.sectionNumber ?? s.section_number) === num)
+        .map(s => s.id)
+    );
+    const seen = new Set();
+    const out = [];
+    for (const c of (conflicts || [])) {
+      if (!groupIds.has(c.sectionAId) && !groupIds.has(c.sectionBId)) continue;
+      const key = `${c.ruleId}|${c.description}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(c);
+    }
+    return out;
+  }, [mode, existing, sections, conflicts]);
+
   return (
     <>
     <div className="sm-overlay" onClick={e => e.target===e.currentTarget && onClose()}>
-      <div className="sm-card">
+      <div className="sm-card" role="dialog" aria-modal="true"
+        aria-label={mode==='add' ? 'Add section' : 'Edit section'}>
         <div className="sm-header">
-          <div>
+          <div className="sm-header-text">
             <h2 className="sm-title">
-              {mode==='add' ? '+ Add Section'
+              {mode==='add' ? 'Add section'
                 : `${existing?.courseCode??existing?.course_code} ${sectionLabel(existing)}`}
             </h2>
             {mode==='edit' && existingGroup && (
               <div className="sm-group-badge">
-                {existingGroup==='STT' ? '📅 Sun / Tue / Thu group'
-                  : existingGroup==='MW' ? '📅 Mon / Wed group'
-                  : '📅 Single day'}
-                <span className="sm-group-note"> — changes apply to all days in group</span>
+                <Ico name="calendar" />
+                <span>
+                  {existingGroup==='STT' ? 'Sun / Tue / Thu group'
+                    : existingGroup==='MW' ? 'Mon / Wed group'
+                    : 'Single day'}
+                  <span className="sm-group-note"> · changes apply to every day in the group</span>
+                </span>
               </div>
             )}
           </div>
-          <button className="sm-close" onClick={onClose}>×</button>
+          <button className="sm-close" onClick={onClose} aria-label="Close">×</button>
         </div>
 
         {mode==='edit' && (
-          <div className="sm-tabs">
-            <button className={tab==='time'?'active':''} onClick={()=>setTab('time')}>📍 Time &amp; Day</button>
-            <button className={tab==='info'?'active':''} onClick={()=>setTab('info')}>✏️ Info</button>
+          <div className="sm-tabs" role="tablist">
+            <button role="tab" aria-selected={tab==='time'} className={tab==='time'?'active':''} onClick={()=>setTab('time')}>
+              <Ico name="clock" /> Time &amp; Day
+            </button>
+            <button role="tab" aria-selected={tab==='info'} className={tab==='info'?'active':''} onClick={()=>setTab('info')}>
+              <Ico name="edit" /> Details
+            </button>
           </div>
         )}
 
         {/* ── ADD MODE or INFO tab ── */}
+        {/* NEW-FU-417 (Phase 103 item 4): the forms are noValidate so the bare
+            native HTML5 validation bubble never appears — our styled, role=alert
+            inline errors are the only feedback. */}
         {(mode==='add' || tab==='info') && (
-          <form className="sm-form" onSubmit={handleSubmitInfo}>
+          <form className="sm-form" noValidate onSubmit={handleSubmitInfo}>
             {mode==='add' && (
               <>
                 <div className="sm-field">
-                  <label>Course</label>
-                  <select value={form.courseId} onChange={e=>setForm(f=>({...f,courseId:e.target.value}))} required>
+                  <label htmlFor="sm-course">Course</label>
+                  <select id="sm-course" value={form.courseId} onChange={e=>setForm(f=>({...f,courseId:e.target.value}))} required>
                     <option value="">— Select course —</option>
-                    {/* NEW-FU-275 (Phase 52 #6): badge capstone (◇) and
-                        external (✈) courses inline so the user sees at a
-                        glance which courses trigger the special behaviors. */}
                     {['Freshman','Sophomore','Junior','Senior','Graduate'].map(level => {
                       const cs = courses.filter(c=>c.academic_level===level);
                       if (!cs.length) return null;
                       return (
                         <optgroup key={level} label={level}>
                           {cs.map(c=>{
-                            const tag = c.is_external ? ' ✈ external'
-                                      : c.is_capstone ? ' ◇ capstone'
+                            const tag = c.is_external ? '  · external'
+                                      : c.is_capstone ? '  · capstone'
                                       : '';
                             return <option key={c.id} value={c.id}>{c.course_code} — {c.name}{tag}</option>;
                           })}
@@ -606,32 +786,28 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                       );
                     })}
                   </select>
-                  {/* NEW-FU-275 (Phase 52 #6): per-course notices */}
+                  {courseMissing && <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>Choose a course for this section.</span></p>}
                   {courseIsCapstone && (
-                    <small style={{color:'var(--slate-500)', fontSize:'.72rem'}}>
-                      ◇ Capstone course — venue field is hidden; meets online or anywhere on campus.
-                    </small>
+                    <p className="sm-hint"><Ico name="info" /> Capstone course — the venue field is hidden; it meets online or anywhere on campus.</p>
                   )}
                   {courseIsExternal && (
-                    <div className="sm-info-box" style={{marginTop:8}}>
-                      ✈ <strong>{selectedCourse.course_code}</strong> is an off-campus
-                      internship — no instructor, venue, schedule, or section needed.
-                      The course already exists in the term sidebar; no section
-                      record is required.
+                    <div className="sm-info-box sm-info-accent">
+                      <Ico name="info" />
+                      <span><strong>{selectedCourse.course_code}</strong> is an off-campus internship — no instructor, venue, schedule, or section row is needed. It already appears in the term sidebar.</span>
                     </div>
                   )}
                 </div>
 
-                {/* NEW-FU-277 (Phase 53 #2): Gender selector. KFUPM keeps
-                    M and F sections as disjoint pools (same numeric range
-                    01–49 / 50–99 but different audience). The display
-                    layer reconstructs "F11" from gender='F' + number='11'. */}
+                {/* NEW-FU-277 (Phase 53 #2): Gender — KFUPM keeps M and F
+                    sections as disjoint pools; the label rebuilds "F11" from
+                    gender='F' + number='11'. */}
                 <div className="sm-field">
                   <label>Gender</label>
-                  <div style={{display:'flex', gap:8}}>
-                    {[['M','Male (§)'], ['F','Female (F)']].map(([g, lbl]) => (
+                  <div className="sm-pill-group">
+                    {[['M','Male'], ['F','Female']].map(([g, lbl]) => (
                       <button key={g} type="button"
-                        className={`sm-daymode-btn ${form.gender===g?'active':''}`}
+                        className={`sm-pill ${form.gender===g?'active':''}`}
+                        aria-pressed={form.gender===g}
                         onClick={()=>setForm(f=>({...f, gender: g}))}>
                         {lbl}
                       </button>
@@ -639,48 +815,66 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   </div>
                 </div>
 
+                {/* NEW-FU-411 (Phase 102 item 4): gender + type aware. Female
+                    sections show the F- prefix; the digits are range-scoped to the
+                    type (Lec 01–49, Lab 50–99) for both genders. */}
                 <div className="sm-field">
-                  <label>Section #</label>
-                  {/* NEW-FU-95 + NEW-FU-104 + NEW-FU-277 (Phase 53 #2):
-                      placeholder + help text are now type-and-gender-aware.
-                      Lec range is 01–49, Lab range is 50–99; the live preview
-                      below shows the final display label ("§01" vs "F01"). */}
-                  <input placeholder={form.sectionType === 'Lab' ? '50 (auto)' : '01 (auto)'}
-                    value={form.sectionNumber}
-                    pattern={form.sectionType === 'Lab' ? '[5-9][0-9]' : '0[1-9]|[1-4][0-9]'}
-                    title={`${form.sectionType} range: ${form.sectionType === 'Lab' ? '50–99' : '01–49'} (two-digit, zero-padded)`}
-                    onChange={e=>setForm(f=>({...f,sectionNumber:e.target.value}))} required />
-                  <small style={{color:'var(--slate-500)',fontSize:'.72rem'}}>
-                    {form.sectionType} range: <strong>{form.sectionType === 'Lab' ? '50–99' : '01–49'}</strong> &nbsp;·&nbsp;
-                    {/* NEW-FU-282 (Phase 56): match the §F-XX (hyphenated)
-                        convention used everywhere else. The old preview
-                        used "F01" (no §, no hyphen) which mismatched the
-                        sidebar + grid rendering — users saw the section
-                        listed differently in three different places. */}
-                    Display label: <strong>{sectionLabel({ gender: form.gender, sectionNumber: form.sectionNumber || '__' })}</strong>
-                  </small>
+                  <label htmlFor="sm-secnum">Section number</label>
+                  <div className={`sm-secnum-wrap${sectionNumError ? ' sm-secnum-wrap-invalid' : ''}`}>
+                    {form.gender === 'F' && <span className="sm-secnum-prefix">F-</span>}
+                    <input id="sm-secnum" className="sm-secnum-digits"
+                      placeholder={form.sectionType === 'Lab' ? '50' : '01'}
+                      value={form.sectionNumber} inputMode="numeric" maxLength={2}
+                      aria-invalid={!!sectionNumError}
+                      aria-describedby={sectionNumError ? 'sm-secnum-err' : 'sm-secnum-hint'}
+                      onChange={e=>setForm(f=>({...f,sectionNumber:e.target.value.replace(/\D/g,'').slice(0,2)}))} />
+                  </div>
+                  {/* NEW-FU-417 (Phase 103 items 3+4): live, styled, role=alert error
+                      the moment the value goes out of range — not on Save. */}
+                  {sectionNumError
+                    ? <p className="sm-inline-error" id="sm-secnum-err" role="alert"><Ico name="alert" /> <span>{sectionNumError}</span></p>
+                    : sectionNumberMissing
+                    ? <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>Enter a section number.</span></p>
+                    : <p className="sm-hint" id="sm-secnum-hint">
+                        {form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} range <strong>{form.sectionType === 'Lab' ? (form.gender==='F'?'F-50–F-99':'50–99') : (form.gender==='F'?'F-01–F-49':'01–49')}</strong>
+                        {' · shows as '}
+                        <strong>{sectionLabel({ gender: form.gender, sectionNumber: form.sectionNumber || '__' })}</strong>
+                      </p>}
                 </div>
 
-                {/* NEW-FU-104: Lec/Lab selector — only shown for courses
-                    that have has_lab=true. For lecture-only courses the
-                    field is hidden and the section is implicitly Lec. */}
-                {courseHasLab && (
-                  <div className="sm-field">
-                    <label>Section type</label>
-                    <div style={{display:'flex', gap:8}}>
-                      {['Lec','Lab'].map(t => (
-                        <button key={t} type="button"
-                          className={`sm-daymode-btn ${form.sectionType===t?'active':''}`}
-                          onClick={()=>setForm(f=>({...f,sectionType:t}))}>
-                          {t === 'Lec' ? '📘 Lecture' : '🧪 Lab'}
-                        </button>
-                      ))}
+                {/* NEW-FU-104 / NEW-FU-498 (Phase 122): section-type selector.
+                    Lec always; Lab for has_lab courses; Prj (Project) and Ths
+                    (Thesis) for capstone courses. Shown only when >1 type applies. */}
+                {(() => {
+                  const TYPE_META = {
+                    Lec: { icon: 'book',   label: 'Lecture' },
+                    Lab: { icon: 'flask',  label: 'Lab' },
+                    Prj: { icon: 'layers', label: 'Project' },
+                    Ths: { icon: 'edit',   label: 'Thesis' },
+                  };
+                  const opts = ['Lec',
+                    ...(courseHasLab ? ['Lab'] : []),
+                    ...(courseIsCapstone ? ['Prj', 'Ths'] : [])];
+                  if (opts.length < 2) return null;
+                  return (
+                    <div className="sm-field">
+                      <label>Section type</label>
+                      <div className="sm-pill-group">
+                        {opts.map(t => (
+                          <button key={t} type="button"
+                            className={`sm-pill ${form.sectionType===t?'active':''}`}
+                            aria-pressed={form.sectionType===t}
+                            onClick={()=>setForm(f=>({...f,sectionType:t}))}>
+                            <Ico name={TYPE_META[t].icon} /> {TYPE_META[t].label}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="sm-hint">{courseIsCapstone
+                        ? 'Projects/thesis meet in long blocks and can use any venue.'
+                        : 'Labs go in Laboratory venues; lectures in Lecture Halls.'}</p>
                     </div>
-                    <small style={{color:'var(--slate-500)',fontSize:'.72rem'}}>
-                      Lab sections should go in Laboratory venues; lectures in Lecture Halls.
-                    </small>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* NEW-FU-277 (Phase 53 #1): full day-template pill grid.
                     Walks every key in DAY_TEMPLATES and renders one button
@@ -693,7 +887,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     entirely (they meet wherever convenient). */}
                 {!courseIsCapstone ? (
                   <div className="sm-field">
-                    <label>Schedule type</label>
+                    <label>Schedule pattern</label>
                     <div className="sm-daymode-group">
                       {Object.entries(DAY_TEMPLATES).map(([key, tmpl]) => {
                         const legal = selectedCourse
@@ -711,7 +905,8 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                               : undefined);
                         return (
                           <button key={key} type="button"
-                            className={`sm-daymode-btn ${form.dayMode===key?'active':''}`}
+                            className={`sm-pill ${form.dayMode===key?'active':''}`}
+                            aria-pressed={form.dayMode===key}
                             disabled={disabled}
                             title={tip}
                             onClick={()=>setForm(f=>({...f, dayMode: key}))}>
@@ -721,51 +916,59 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                       })}
                     </div>
                     {form.dayMode === 'single' && (
-                      <select value={form.day} onChange={e=>setForm(f=>({...f,day:e.target.value}))}
-                        style={{marginTop:6}}>
+                      <select className="sm-subselect" value={form.day} onChange={e=>setForm(f=>({...f,day:e.target.value}))}>
                         {DAYS.map(d=><option key={d} value={d}>{d}</option>)}
                       </select>
                     )}
                   </div>
                 ) : (
-                  <div className="sm-info-box" style={{marginTop:4}}>
-                    ◇ <strong>Capstone</strong> — meeting time is flexible.
-                    The Schedule Type pills are hidden; just pick a day +
-                    start time below if the team has a fixed meeting slot.
-                    Otherwise leave at defaults.
+                  <div className="sm-info-box sm-info-accent">
+                    <Ico name="info" />
+                    <span><strong>Capstone</strong> — meeting time is flexible. Pick a day + start time below if the team has a fixed slot; otherwise leave the defaults.</span>
                   </div>
                 )}
 
                 <div className="sm-row">
                   <div className="sm-field">
-                    <label>Start time</label>
-                    <input type="time" value={form.startTime}
+                    <label htmlFor="sm-start">Start time</label>
+                    <input id="sm-start" type="time" value={form.startTime}
+                      min={timeWindow ? fromMinutes(timeWindow.start) : undefined} max={timeWindow ? fromMinutes(timeWindow.end) : undefined}
+                      aria-invalid={!!timeError}
                       onChange={e=>setForm(f=>({...f,startTime:e.target.value}))} required />
+                    {timeError && <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>{timeError}</span></p>}
                   </div>
                   <div className="sm-field">
-                    <label>Duration (min)</label>
-                    {/* NEW-FU-113: per-type quick-pick buttons followed by a
-                        numeric input bounded to the type's legal range. Lec
-                        offers 50/75; Lab offers 50/75/165. The numeric input
-                        accepts any integer in [min, max] for the type — the
-                        user can type any value the spec allows. */}
-                    <div style={{display:'flex', gap:4, marginBottom:4}}>
+                    <label>Duration</label>
+                    {/* NEW-FU-113: per-type quick-picks + a bounded numeric input. */}
+                    <div className="sm-pill-group sm-pill-group-sm">
                       {DURATION_DEFAULTS_BY_TYPE[form.sectionType].map(d => (
                         <button key={d} type="button"
-                          className={`sm-daymode-btn ${form.duration===String(d)?'active':''}`}
-                          style={{padding:'4px 8px', fontSize:'.75rem'}}
+                          className={`sm-pill sm-pill-sm ${form.duration===String(d)?'active':''}`}
+                          aria-pressed={form.duration===String(d)}
                           onClick={()=>setForm(f=>({...f, duration: String(d)}))}>
                           {d}m
                         </button>
                       ))}
                     </div>
-                    <input type="number" value={form.duration}
+                    <input type="number" className="sm-dur-input" value={form.duration}
                       min={DURATION_LIMITS_BY_TYPE[form.sectionType].min}
                       max={DURATION_LIMITS_BY_TYPE[form.sectionType].max}
-                      onChange={e=>setForm(f=>({...f,duration:e.target.value}))} required />
-                    <small style={{color:'var(--slate-500)', fontSize:'.7rem'}}>
-                      {form.sectionType} range: {DURATION_LIMITS_BY_TYPE[form.sectionType].min}–{DURATION_LIMITS_BY_TYPE[form.sectionType].max} min
-                    </small>
+                      aria-invalid={!!durationError}
+                      onChange={e=>{
+                        // NEW-FU-453 (Phase 108): clamp the UPPER bound at INPUT so a typed/
+                        // pasted value (e.g. 999999999) can never overflow the end-time, and
+                        // reject letters/symbols. Below-min is allowed while typing but flagged.
+                        const raw = e.target.value;
+                        if (raw === '') { setForm(f=>({...f,duration:''})); return; }
+                        if (!/^\d+$/.test(raw)) return;
+                        const n = Math.min(parseInt(raw,10), DURATION_LIMITS_BY_TYPE[form.sectionType].max);
+                        setForm(f=>({...f,duration:String(n)}));
+                      }} required aria-label="Duration in minutes" />
+                    {durationError
+                      ? <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>{durationError}</span></p>
+                      : <p className="sm-hint">
+                          {form.sectionType} {DURATION_LIMITS_BY_TYPE[form.sectionType].min}–{DURATION_LIMITS_BY_TYPE[form.sectionType].max} min
+                        </p>}
                   </div>
                   <div className="sm-field">
                     <label>End time</label>
@@ -776,18 +979,14 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
             )}
 
             <div className="sm-field">
-              <label>
-                Instructor <span className="sm-optional">(soft warning if empty)</span>
-                {/* NEW-FU-275 (Phase 52 #6): inline + New instructor */}
-                <button type="button" className="sm-inline-add" onClick={quickCreateInstructor}
-                  style={{marginLeft:8, fontSize:'.7rem', padding:'2px 8px',
-                          background:'var(--slate-50)', border:'1px solid var(--slate-300)',
-                          borderRadius:4, cursor:'pointer'}}>+ New</button>
+              <label htmlFor="sm-instr" className="sm-label-row">
+                <span>Instructor <span className="sm-optional">(required)</span></span>
+                <button type="button" className="sm-inline-add" onClick={quickCreateInstructor}>
+                  <Ico name="plus" /> New
+                </button>
               </label>
-              {/* NEW-FU-277 (Phase 53 #3): split into prior (taught this
-                  course before) and other. Prior pool lands first with a
-                  header so the user picks the natural candidate. */}
-              <select value={form.instructorId} onChange={e=>setForm(f=>({...f,instructorId:e.target.value}))}>
+              {/* NEW-FU-277 (Phase 53 #3): prior (taught this course) first, then other. */}
+              <select id="sm-instr" value={form.instructorId} onChange={e=>setForm(f=>({...f,instructorId:e.target.value}))}>
                 <option value="">— No instructor —</option>
                 {groupedInstructors.prior.length > 0 && (
                   <optgroup label="Taught this course before">
@@ -802,25 +1001,20 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   )}
                 </optgroup>
               </select>
+              {instructorMissing && <p className="sm-inline-error" role="alert"><span>An instructor is required for every section.</span></p>}
             </div>
 
-            {/* NEW-FU-275 (Phase 52 #6): hide the venue field entirely when
-                a capstone course is selected — venue doesn't apply. */}
+            {/* NEW-FU-275 (Phase 52 #6): venue hidden for capstone courses. */}
             {!courseIsCapstone && (
               <div className="sm-field">
-                <label>
-                  Venue <span className="sm-optional">(optional)</span>
-                  <button type="button" className="sm-inline-add" onClick={quickCreateVenue}
-                    style={{marginLeft:8, fontSize:'.7rem', padding:'2px 8px',
-                            background:'var(--slate-50)', border:'1px solid var(--slate-300)',
-                            borderRadius:4, cursor:'pointer'}}>+ New</button>
+                <label htmlFor="sm-venue" className="sm-label-row">
+                  <span>Venue <span className="sm-optional">(required)</span></span>
+                  <button type="button" className="sm-inline-add" onClick={quickCreateVenue}>
+                    <Ico name="plus" /> New
+                  </button>
                 </label>
-                {/* NEW-FU-277 (Phase 53 #3): group venues by type and
-                    mark venues busy at the form's day/time slot. Busy
-                    venues are still selectable (the user may want to
-                    override) but the "(busy)" suffix warns them they'll
-                    trigger an R-05 conflict. */}
-                <select value={form.venueId} onChange={e=>setForm(f=>({...f,venueId:e.target.value}))}>
+                {/* NEW-FU-277 (Phase 53 #3): grouped by type; busy venues flagged. */}
+                <select id="sm-venue" value={form.venueId} onChange={e=>setForm(f=>({...f,venueId:e.target.value}))}>
                   <option value="">— No venue —</option>
                   {['LectureHall', 'Multipurpose', 'Laboratory'].map(typeGroup => {
                     const vs = venues.filter(v => v.type === typeGroup);
@@ -839,83 +1033,108 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     );
                   })}
                 </select>
+                {venueMissing && <p className="sm-inline-error" role="alert"><span>A venue is required for every section.</span></p>}
               </div>
             )}
 
-            {/* NEW-FU-277 (Phase 53 #4): conflict preview. Shows the user
-                which rules would fire if they submitted with the current
-                form values. Doesn't block submit — same UX as the soft-
-                confirm flow elsewhere. */}
+            {/* NEW-FU-277 (Phase 53 #4): add-mode conflict preview. */}
             {conflictPreview && conflictPreview.length > 0 && (
-              <div className="sm-info-box" style={{
-                marginTop: 8,
-                background: 'var(--amber-50, #fffbeb)',
-                border: '1px solid var(--amber-200, #fde68a)',
-              }}>
-                <strong>Submitting would create {conflictPreview.length} conflict{conflictPreview.length !== 1 ? 's' : ''}:</strong>
-                <ul style={{margin:'4px 0 0 16px', padding:0, fontSize:'.78rem'}}>
+              <div className="sm-info-box sm-info-warn">
+                <strong><Ico name="alert" /> Submitting would create {conflictPreview.length} conflict{conflictPreview.length !== 1 ? 's' : ''}:</strong>
+                <ul className="sm-conflict-list">
                   {conflictPreview.map((f, i) => (
                     <li key={i}>
-                      <strong>{f.rule}</strong> ({f.severity}) — {f.msg}
+                      <span className={`sm-sev sm-sev-${f.severity.toLowerCase()}`}>{f.severity}</span>
+                      {/* NEW-FU-475: plain message only — no raw rule code on screen */}{f.msg}
                     </li>
                   ))}
                 </ul>
               </div>
             )}
-            {conflictPreview && conflictPreview.length === 0 && form.courseId && !courseIsExternal && (
-              <div className="sm-info-box" style={{
-                marginTop: 8,
-                background: 'var(--green-50, #f0fdf4)',
-                border: '1px solid var(--green-200, #bbf7d0)',
-                fontSize:'.78rem',
-              }}>
-                ✓ No conflicts would be created.
-              </div>
+            {conflictPreview && conflictPreview.length === 0 && form.courseId && !courseIsExternal && !durationError && !timeError && (
+              <div className="sm-info-box sm-info-ok"><Ico name="check" /> <span>No conflicts would be created.</span></div>
             )}
 
             {mode==='edit' && (
               <>
+                {/* NEW-FU-411 (Phase 102 item 4): gender + type aware section number.
+                    Female sections carry the F- prefix; the digits are range-scoped
+                    to the section's (now immutable) type — Lec 01–49, Lab 50–99. */}
                 <div className="sm-field">
-                  <label>Section # <span className="sm-optional">(updates all days in group)</span></label>
-                  <input value={form.sectionNumber}
-                    pattern="0[1-9]|[1-9][0-9]" title="Two-digit zero-padded, 01–99"
-                    onChange={e=>setForm(f=>({...f,sectionNumber:e.target.value}))} />
+                  <label htmlFor="sm-secnum-e">Section number <span className="sm-optional">(updates all days in group)</span></label>
+                  <div className={`sm-secnum-wrap${sectionNumError ? ' sm-secnum-wrap-invalid' : ''}`}>
+                    {form.gender === 'F' && <span className="sm-secnum-prefix">F-</span>}
+                    <input id="sm-secnum-e" className="sm-secnum-digits" value={form.sectionNumber}
+                      inputMode="numeric" maxLength={2}
+                      aria-invalid={!!sectionNumError}
+                      aria-describedby={sectionNumError ? 'sm-secnum-e-err' : 'sm-secnum-e-hint'}
+                      onChange={e=>setForm(f=>({...f,sectionNumber:e.target.value.replace(/\D/g,'').slice(0,2)}))} />
+                  </div>
+                  {/* NEW-FU-417 (Phase 103 items 3+4): live, styled, role=alert error.
+                      NEW-FU-493 (Phase 119 item 3): also flag when field is cleared. */}
+                  {sectionNumError
+                    ? <p className="sm-inline-error" id="sm-secnum-e-err" role="alert"><Ico name="alert" /> <span>{sectionNumError}</span></p>
+                    : sectionNumberMissing
+                    ? <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>Enter a section number.</span></p>
+                    : <p className="sm-hint" id="sm-secnum-e-hint">
+                        {form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} range <strong>{form.sectionType === 'Lab' ? (form.gender==='F'?'F-50–F-99':'50–99') : (form.gender==='F'?'F-01–F-49':'01–49')}</strong>
+                        {' · shows as '}
+                        <strong>{sectionLabel({ gender: form.gender, sectionNumber: form.sectionNumber || '__' })}</strong>
+                      </p>}
                 </div>
-                {/* NEW-FU-104: Lec/Lab selector for edit mode — only shown
-                    when the underlying course has has_lab=true. Updates
-                    propagate to all sibling days via updateSectionInfo. */}
-                {courseHasLab && (
+                {/* NEW-FU-410 (Phase 102 item 2): section TYPE is fixed at creation
+                    and immutable here. Switching Lec↔Lab after creation broke the
+                    type↔number range invariant (DB constraint errors), so it is now
+                    a read-only display; change the type only by re-creating. */}
+                {/* NEW-FU-498 (Phase 122): also display Prj/Ths for capstone sections
+                    (still read-only — type is fixed at creation per FU-410). */}
+                {(courseHasLab || courseIsCapstone) && (
                   <div className="sm-field">
-                    <label>Section type <span className="sm-optional">(updates all days in group)</span></label>
-                    <div style={{display:'flex', gap:8}}>
-                      {['Lec','Lab'].map(t => (
-                        <button key={t} type="button"
-                          className={`sm-daymode-btn ${form.sectionType===t?'active':''}`}
-                          onClick={()=>setForm(f=>({...f,sectionType:t}))}>
-                          {t === 'Lec' ? '📘 Lecture' : '🧪 Lab'}
-                        </button>
-                      ))}
+                    <label>Section type</label>
+                    <div className="sm-readonly sm-type-readonly">
+                      <Ico name={form.sectionType==='Lab'?'flask':form.sectionType==='Prj'?'layers':form.sectionType==='Ths'?'edit':'book'} />
+                      <span>{form.sectionType==='Lab'?'Lab':form.sectionType==='Prj'?'Project':form.sectionType==='Ths'?'Thesis':'Lecture'}</span>
+                      <span className="sm-optional sm-type-fixed">· fixed for this section</span>
                     </div>
                   </div>
                 )}
               </>
             )}
 
-            {error && <div className="sm-error">{error}</div>}
+            {/* NEW-FU-401 (Phase 101): EDIT-mode live conflict panel — the real
+                backend conflicts this section's group is involved in. */}
+            {mode==='edit' && sectionConflicts.length > 0 && (
+              <div className="sm-info-box sm-info-warn">
+                <strong><Ico name="alert" /> This section is in {sectionConflicts.length} conflict{sectionConflicts.length!==1?'s':''}:</strong>
+                <ul className="sm-conflict-list">
+                  {sectionConflicts.map((c, i) => (
+                    <li key={i}>
+                      <span className={`sm-sev sm-sev-${(c.severity||'').toLowerCase()}`}>{c.severity}</span>
+                      {/* NEW-FU-472: plain description only — no raw rule code */}{c.description}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {mode==='edit' && sectionConflicts.length === 0 && (
+              <div className="sm-info-box sm-info-ok"><Ico name="check" /> <span>No conflicts for this section.</span></div>
+            )}
+
+            {error && <div className="sm-error" role="alert"><Ico name="alert" /> <span>{error}</span></div>}
             <div className="sm-actions">
               {mode==='edit' && (
-                <button type="button" className="sm-btn-delete" onClick={handleDelete} disabled={busy}>Delete all</button>
+                <button type="button" className="sm-btn-delete" onClick={()=>setConfirmingDelete(true)} disabled={busy}>
+                  <Ico name="trash" /> Delete
+                </button>
               )}
               <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              {/* NEW-FU-275 (Phase 52 #6) + NEW-FU-277 (Phase 53 #5):
-                  external courses (SWE 399) need no section row. Submit
-                  is wired to just close the modal — no API call, no DB
-                  insert. Button label flips to "OK, course noted" to
-                  match the no-op behavior. */}
-              <button type="submit" className="sm-btn-save" disabled={busy}>
-                {busy ? '…' : mode==='add'
-                  ? (courseIsExternal ? 'OK, course noted' : 'Add Section')
-                  : 'Save Info'}
+              {/* External courses (SWE 399) need no section row — submit just closes. */}
+              <button type="submit" className="sm-btn-save"
+                disabled={busy || scheduleLocked || courseMissing || sectionNumberMissing || !!sectionNumError || !!durationError || !!timeError || instructorMissing || venueMissing}
+                title={scheduleLocked ? lockedMsg : courseMissing ? 'Choose a course first' : sectionNumberMissing ? 'Enter a section number first' : durationError || timeError || (instructorMissing ? 'Choose an instructor first' : venueMissing ? 'Choose a venue first' : sectionNumError ? 'Fix the section number first' : undefined)}>
+                {busy ? 'Saving…' : mode==='add'
+                  ? (courseIsExternal ? 'OK, course noted' : 'Add section')
+                  : 'Save'}
               </button>
             </div>
           </form>
@@ -923,14 +1142,15 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
 
         {/* ── EDIT TIME tab ── */}
         {mode==='edit' && tab==='time' && (
-          <form className="sm-form" onSubmit={handleSubmitTime}>
-            <div className="sm-info-box">
-              Moving the time will shift <strong>all days</strong> in this group to the same start/end time.
+          <form className="sm-form" noValidate onSubmit={handleSubmitTime}>
+            <div className="sm-info-box sm-info-accent">
+              <Ico name="info" />
+              <span>Moving the time shifts <strong>all days</strong> in this group to the same start/end time.</span>
             </div>
             <div className="sm-row">
               <div className="sm-field">
-                <label>Day</label>
-                <select value={form.day} onChange={e=>setForm(f=>({...f,day:e.target.value}))}>
+                <label htmlFor="sm-day">Day</label>
+                <select id="sm-day" value={form.day} onChange={e=>setForm(f=>({...f,day:e.target.value}))}>
                   {existingGroup && existingGroup!=='single'
                     ? GROUP_DAYS[existingGroup].map(d=><option key={d} value={d}>{d}</option>)
                     : DAYS.map(d=><option key={d} value={d}>{d}</option>)
@@ -938,42 +1158,91 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                 </select>
               </div>
               <div className="sm-field">
-                <label>Start time</label>
-                <input type="time" value={form.startTime}
+                <label htmlFor="sm-start-t">Start time</label>
+                <input id="sm-start-t" type="time" value={form.startTime}
+                  min={timeWindow ? fromMinutes(timeWindow.start) : undefined} max={timeWindow ? fromMinutes(timeWindow.end) : undefined}
+                  aria-invalid={!!timeError}
                   onChange={e=>setForm(f=>({...f,startTime:e.target.value}))} required />
               </div>
               <div className="sm-field">
-                <label>Duration (min)</label>
-                {/* NEW-FU-113: type-scoped quick-picks + bounded input on
-                    edit too. The form.sectionType comes from the existing
-                    section (so editing a Lab shows [50, 75, 165]). */}
-                <div style={{display:'flex', gap:4, marginBottom:4}}>
+                <label>Duration</label>
+                {/* NEW-FU-113: type-scoped quick-picks + bounded numeric input. */}
+                <div className="sm-pill-group sm-pill-group-sm">
                   {DURATION_DEFAULTS_BY_TYPE[form.sectionType].map(d => (
                     <button key={d} type="button"
-                      className={`sm-daymode-btn ${form.duration===String(d)?'active':''}`}
-                      style={{padding:'4px 8px', fontSize:'.75rem'}}
+                      className={`sm-pill sm-pill-sm ${form.duration===String(d)?'active':''}`}
+                      aria-pressed={form.duration===String(d)}
                       onClick={()=>setForm(f=>({...f, duration: String(d)}))}>
                       {d}m
                     </button>
                   ))}
                 </div>
-                <input type="number" value={form.duration}
+                <input type="number" className="sm-dur-input" value={form.duration}
                   min={DURATION_LIMITS_BY_TYPE[form.sectionType].min}
                   max={DURATION_LIMITS_BY_TYPE[form.sectionType].max}
-                  onChange={e=>setForm(f=>({...f,duration:e.target.value}))} required />
+                  onChange={e=>setForm(f=>({...f,duration:e.target.value}))} required aria-label="Duration in minutes" />
               </div>
             </div>
             <div className="sm-field sm-end-preview">
               End time: <strong>{computeEnd()}</strong>
             </div>
-            {error && <div className="sm-error">{error}</div>}
+            {/* NEW-FU-478 (Phase 115): out-of-window / out-of-range time is flagged inline
+                and blocks Save (the edit tab was previously unguarded). */}
+            {(timeError || durationError) && (
+              <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>{timeError || durationError}</span></p>
+            )}
+            {/* NEW-FU-401 (Phase 101): live conflict panel on the Time tab too. */}
+            {sectionConflicts.length > 0 && (
+              <div className="sm-info-box sm-info-warn">
+                <strong><Ico name="alert" /> This section is in {sectionConflicts.length} conflict{sectionConflicts.length!==1?'s':''}:</strong>
+                <ul className="sm-conflict-list">
+                  {sectionConflicts.map((c, i) => (
+                    <li key={i}>
+                      <span className={`sm-sev sm-sev-${(c.severity||'').toLowerCase()}`}>{c.severity}</span>
+                      {/* NEW-FU-472: plain description only — no raw rule code */}{c.description}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {error && <div className="sm-error" role="alert"><Ico name="alert" /> <span>{error}</span></div>}
             <div className="sm-actions">
+              <button type="button" className="sm-btn-delete" onClick={()=>setConfirmingDelete(true)} disabled={busy}>
+                <Ico name="trash" /> Delete
+              </button>
               <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              <button type="submit" className="sm-btn-save" disabled={busy}>
-                {busy ? '…' : 'Move All Days'}
+              {/* NEW-FU-412 (Phase 102 item 3): "Move all days" overstated the
+                  action — the user is editing one section's meeting time. */}
+              {/* NEW-FU-493 (Phase 119 item 3): add sectionNumberMissing so clearing
+                  the section number in edit mode also disables Save (parity with add). */}
+              <button type="submit" className="sm-btn-save"
+                disabled={busy || scheduleLocked || sectionNumberMissing || !!timeError || !!durationError}
+                title={scheduleLocked ? lockedMsg : sectionNumberMissing ? 'Enter a section number first' : timeError || durationError || undefined}>
+                {busy ? 'Saving…' : 'Save'}
               </button>
             </div>
           </form>
+        )}
+
+        {/* NEW-FU-401 (Phase 101): in-app delete confirmation — replaces the
+            native window.confirm(). Sits inside the card with the same chassis. */}
+        {confirmingDelete && (
+          <div className="sm-confirm-scrim" onClick={e=>e.target===e.currentTarget && setConfirmingDelete(false)}>
+            <div className="sm-confirm-card" role="alertdialog" aria-modal="true" aria-label="Confirm delete">
+              <div className="sm-confirm-icon"><Ico name="trash" /></div>
+              <h3 className="sm-confirm-title">Delete this section?</h3>
+              <p className="sm-confirm-text">
+                <strong>{existing ? `${existing.courseCode??existing.course_code} ${sectionLabel(existing)}` : 'This section'}</strong>
+                {' '}and all linked days in its group will be removed. This can’t be undone.
+              </p>
+              <div className="sm-confirm-actions">
+                <button type="button" className="sm-btn-cancel" onClick={()=>setConfirmingDelete(false)} disabled={busy}>Keep it</button>
+                <button type="button" className="sm-btn-delete sm-btn-delete-solid" onClick={handleDelete} disabled={busy}>
+                  {busy ? 'Deleting…' : 'Delete section'}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>

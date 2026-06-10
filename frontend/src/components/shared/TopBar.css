@@ -120,12 +120,16 @@
   cursor: not-allowed;
 }
 
-.topbar-btn.export {
+/* NEW-FU-228 (Phase 97): Import shares Export's neutral toolbar styling so the
+   data-in / data-out pair reads as a matched set. */
+.topbar-btn.export,
+.topbar-btn.import {
   background: rgba(15,31,61,.09);
   border-color: rgba(15,31,61,.22);
   color: #1F2937;
 }
-.topbar-btn.export:hover:not(:disabled) { background: rgba(15,31,61,.16); }
+.topbar-btn.export:hover:not(:disabled),
+.topbar-btn.import:hover:not(:disabled) { background: rgba(15,31,61,.16); }
 
 .topbar-user {
   display: flex;

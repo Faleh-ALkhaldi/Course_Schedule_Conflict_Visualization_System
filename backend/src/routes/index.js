@@ -107,6 +107,8 @@ router.get   ('/instructors',                               ctrl.getInstructors)
 router.post  ('/instructors',                               requireRole('admin'), refuseIfActiveTermArchived, ctrl.createInstructor);
 router.put   ('/instructors/:instructorId',                 requireRole('admin'), refuseIfActiveTermArchived, ctrl.updateInstructor);
 router.delete('/instructors/:instructorId',                 requireRole('admin'), refuseIfActiveTermArchived, ctrl.deleteInstructor);
+// NEW-FU-461 (Phase 109): suggested default office-hours for the Add-Instructor panel.
+router.get   ('/office-hours/suggested',                    ctrl.getSuggestedOfficeHour);
 router.get   ('/instructors/:instructorId/office-hours',    ctrl.getOfficeHours);
 // NEW-FU-28: addOfficeHour is now admin-only, matching DELETE (already
 // admin) and matching the smoke test's implicit assumption that adding an
@@ -134,7 +136,7 @@ router.delete('/venues/:venueId',requireRole('admin'), refuseIfActiveTermArchive
 // ── Schedules ─────────────────────────────────────────────────────────────────
 // NEW-C3: schedule creation stays open to schedulers — the boot flow auto-
 // provisions the working draft on first load. Department-membership ownership
-// is a deferred design item; see TODO in controllers.createSchedule.
+// is a deferred design item (ownership not yet enforced).
 router.get ('/departments/:departmentId/schedules', ctrl.listSchedules);
 router.post('/schedules',                           ctrl.createSchedule);
 

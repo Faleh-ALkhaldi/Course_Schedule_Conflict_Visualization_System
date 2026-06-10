@@ -227,7 +227,33 @@ app.use((err, req, res, next) => {
   let status = err.status || 500;
   // M-1: Sanitize PostgreSQL internal error messages so DB schema details never leak.
   let message = err.message || 'Internal server error.';
-  if (err.code?.startsWith('23')) message = 'Database constraint violation.';
+  // NEW-FU-410 (Phase 102): give the common integrity violations a clear,
+  // human-readable message + a 4xx status instead of an opaque "Database
+  // constraint violation" 500. When editing a section the most-hit cases are
+  // the UNIQUE (duplicate section number on the same course/day) and CHECK
+  // (section number outside its Lec/Lab range) constraints.
+  if (err.code?.startsWith('23')) {
+    status = 400;
+    if (err.code === '23505') {
+      // NEW-FU-456 (Phase 108): attribute the UNIQUE violation to the right entity.
+      // A duplicate COURSE CODE was wrongly showing the section-number message
+      // inside the Add-Course modal; differentiate by the violated constraint.
+      const c = `${err.constraint || ''} ${err.detail || ''}`;
+      message = /course_code/.test(c)
+        ? 'A course with this code already exists. Pick a different code.'
+        // NEW-FU-477 (Phase 115): a duplicate VENUE name was wrongly showing the
+        // section-number message inside the Add-Venue modal — attribute it to the venue.
+        : /venue/i.test(c)
+        ? 'A room with this building and room number already exists. Pick a different one.'
+        : 'That section number is already used for this course on one of these days. Pick a different number.';
+    } else if (err.code === '23514') {
+      message = 'Section number is outside the allowed range for its type (Lecture 01–49, Lab 50–99).';
+    } else if (err.code === '23503') {
+      message = 'A referenced record no longer exists — refresh and try again.';
+    } else {
+      message = 'That change conflicts with an existing record. Adjust the values and try again.';
+    }
+  }
   // NEW-C2: surface multer upload-limit failures as 400 with a friendly message
   // instead of letting them bubble up as generic 500s.
   else if (err.name === 'MulterError') {
@@ -235,6 +261,14 @@ app.use((err, req, res, next) => {
     message = err.code === 'LIMIT_FILE_SIZE'
       ? 'Uploaded file is too large (max 5 MB).'
       : `Upload rejected: ${err.code}.`;
+  }
+  // NEW-FU-470 (Phase 113): a malformed JSON body makes body-parser throw with
+  // status 400 + a parser-position message ("Expected ',' … at position 12").
+  // The 500-only sanitizer below let that internal detail reach the client; give
+  // it a clean plain-language message instead.
+  else if (err.type === 'entity.parse.failed') {
+    status  = 400;
+    message = 'The request could not be read — please try again.';
   }
   else if (process.env.NODE_ENV === 'production' && status === 500) message = 'Internal server error.';
   res.status(status).json({ error: message });

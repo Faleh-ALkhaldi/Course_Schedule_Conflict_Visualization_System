@@ -52,9 +52,11 @@ const DISCONTINUED_FROM_261 = new Set(['SWE412']);
 
 const DAY_MAP = { U: 'Sunday', M: 'Monday', T: 'Tuesday', W: 'Wednesday', R: 'Thursday' };
 
-// PRJ and SEM are scheduled meetings — they bucket as 'Lec'. LAB stays Lab.
-// THS / ST never have a schedule and are dropped before they get here.
-const ACTIVITY_TO_SECTION_TYPE = { LEC: 'Lec', LAB: 'Lab', PRJ: 'Lec', SEM: 'Lec' };
+// NEW-FU-498 (Phase 122): PRJ now buckets as its own 'Prj' type (capstone
+// projects), and THS as 'Ths' (thesis) — matching the registrar. SEM (seminar)
+// stays 'Lec'. LAB stays Lab. THS rows usually have no schedule and are dropped
+// before they reach here, but the mapping is kept for completeness/fidelity.
+const ACTIVITY_TO_SECTION_TYPE = { LEC: 'Lec', LAB: 'Lab', PRJ: 'Prj', THS: 'Ths', SEM: 'Lec' };
 
 // ── Load raw data once ─────────────────────────────────────────────────────
 const catalog = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'catalog-swe-ug.json'), 'utf8'));

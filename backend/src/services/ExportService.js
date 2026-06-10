@@ -392,6 +392,23 @@ async function commitRows(rowData, scheduleId) {
     );
     for (const c of allCoursesRes.rows) courseByCode.set(c.course_code?.toLowerCase(), c);
 
+    // NEW-FU-459 (Phase 109): validate imported course codes/names. The Add-Course
+    // path validates (Phase 108) but Import inserted raw rows — so garbage codes like
+    // "lklsh 292-1" and gibberish names could persist via a file upload. Reject the
+    // whole import up front; the surrounding transaction rolls back, so the term's
+    // existing courses/sections are never lost.
+    const { courseCodeError, courseNameError } = require('../domain/courseFormat');
+    const badCourses = [];
+    for (const row of rowData) {
+      const ce = courseCodeError(row.courseCode), ne = courseNameError(row.courseName);
+      if (ce || ne) badCourses.push(`"${row.courseCode} — ${row.courseName}": ${ce || ne}`);
+    }
+    if (badCourses.length) {
+      const err = new Error(`Import canceled — ${badCourses.length} course(s) have an invalid code or name, so nothing was changed:\n• ${[...new Set(badCourses)].slice(0, 10).join('\n• ')}`);
+      err.status = 400;
+      throw err;
+    }
+
     for (const row of rowData) {
       const key = row.courseCode.toLowerCase();
       if (!courseByCode.has(key)) {
@@ -552,15 +569,16 @@ async function parseExcelToRows(buffer) {
     // NEW-M13 + NEW-FU-24 + NEW-FU-68: lowercased optional-column lookup.
     const creditsCol = headers['credits'];
     const creditsCell = creditsCol ? row.getCell(creditsCol)?.value : undefined;
-    const credits = Number.isFinite(Number(creditsCell)) ? parseInt(creditsCell, 10) : 3;
+    const credits = Number.isFinite(parseInt(creditsCell, 10)) ? parseInt(creditsCell, 10) : 3;
 
     // NEW-FU-100: read Section Type with 'Lec' default. Files exported
     // from older versions (no Section Type column) treat every row as a
     // lecture — consistent with the migration 009 default. We validate
     // against the allowed set so a stray "Tutorial" or typo lands as 'Lec'
     // rather than tripping the DB CHECK at insert.
+    // NEW-FU-498 (Phase 122): recognize all four types (Lec/Lab/Prj/Ths); unknown → Lec.
     const rawSectionType = getStr('Section Type');
-    const sectionType = (rawSectionType === 'Lab' ? 'Lab' : 'Lec');
+    const sectionType = (['Lec','Lab','Prj','Ths'].includes(rawSectionType) ? rawSectionType : 'Lec');
     rowData.push({
       courseCode,
       courseName:    getStr('Course Name')    || courseCode,

@@ -90,7 +90,20 @@ export const logout = () =>
 // ── Reference data ────────────────────────────────────────────────────────────
 // NEW-FU-274 (Phase 51 #5): optional `term` arg scopes the result to that
 // term's schedule. Without it, the backend returns the global list.
-export const getCourses     = (term) => api.get('/courses',     { params: term ? { term } : {} }).then(r => r.data);
+// NEW-FU-415 (Phase 103 item 1): getCourses defaults `term` to the active URL
+// term (so even a no-arg call is curriculum-filtered), and supports
+// opts.scope='catalog' for the full program catalog (minus invalid-for-term
+// courses) — the Suggest modal uses this to keep revealing Graduate courses.
+function activeUrlTerm() {
+  try { return new URLSearchParams(window.location.search).get('term') || null; } catch { return null; }
+}
+export const getCourses = (term, opts = {}) => {
+  const t = term ?? activeUrlTerm();
+  const params = {};
+  if (t) params.term = t;
+  if (opts.scope) params.scope = opts.scope;
+  return api.get('/courses', { params }).then(r => r.data);
+};
 export const getInstructors = (term) => api.get('/instructors', { params: term ? { term } : {} }).then(r => r.data);
 export const getVenues      = (term) => api.get('/venues',      { params: term ? { term } : {} }).then(r => r.data);
 
@@ -262,6 +275,9 @@ export default api;
 // ── Office Hours ──────────────────────────────────────────────────────────────
 export const getInstructorOfficeHours   = (instructorId) =>
   api.get(`/instructors/${instructorId}/office-hours`).then(r => r.data);
+// NEW-FU-461 (Phase 109): suggested default office-hours for the Add-Instructor panel.
+export const getSuggestedOfficeHour     = () =>
+  api.get('/office-hours/suggested').then(r => r.data);
 export const addInstructorOfficeHour    = (instructorId, data) =>
   api.post(`/instructors/${instructorId}/office-hours`, data).then(r => r.data);
 // NEW-FU-41: atomic update — preferred over the legacy add+delete pattern
@@ -290,6 +306,9 @@ export const suggestSchedule = (scheduleId, courseConfigs, applyToCourseIds, max
     // one. Response includes .relaxed (bool) + .relaxedConfigs (the
     // alternative configs used, or null when the original won).
     ...(options.relaxIfConflicts ? { relaxIfConflicts: true } : {}),
+    // NEW-FU-425 (Phase 104 item 2): let the auto-fix invent term-local
+    // placeholder instructors/venues to keep every section instead of dropping.
+    ...(options.allowDummyResources ? { allowDummyResources: true } : {}),
   }).then(r => r.data);
 
 // NEW-FU-264: read-only recommendation. The SuggestModal calls this on mount
@@ -300,11 +319,19 @@ export const suggestSchedule = (scheduleId, courseConfigs, applyToCourseIds, max
 // re-recommend with updated section counts (e.g., user bumped
 // SWE301 from 1 → 3). Backend folds the hint into the per-course
 // saturation contribution and re-picks the pattern accordingly.
-export const suggestRecommend = (scheduleId, { sectionsHint } = {}) => {
-  const params = sectionsHint && Object.keys(sectionsHint).length > 0
-    ? { sectionsHint: JSON.stringify(sectionsHint) }
-    : undefined;
-  return api.get(`/schedules/${scheduleId}/suggest-recommend`, { params }).then(r => r.data);
+// NEW-FU-381 (Phase 99 item 2 + 5): the live auto-choose passes the modal's
+// current per-course `configs`, the user-`lockedCourseIds` to honour, and
+// `fast` (skip the heavy greedy server-side). `signal` is an AbortSignal so a
+// superseded live call is cancelled in-flight rather than piling up and
+// exhausting the DB pool.
+export const suggestRecommend = (scheduleId, opts = {}) => {
+  const { sectionsHint, configs, lockedCourseIds, fast, signal } = opts;
+  const params = {};
+  if (sectionsHint && Object.keys(sectionsHint).length > 0) params.sectionsHint = JSON.stringify(sectionsHint);
+  if (Array.isArray(configs) && configs.length)             params.configs = JSON.stringify(configs);
+  if (Array.isArray(lockedCourseIds) && lockedCourseIds.length) params.lockedCourseIds = JSON.stringify(lockedCourseIds);
+  if (fast) params.fast = '1';
+  return api.get(`/schedules/${scheduleId}/suggest-recommend`, { params, signal }).then(r => r.data);
 };
 
 // ── Import ────────────────────────────────────────────────────────────────────

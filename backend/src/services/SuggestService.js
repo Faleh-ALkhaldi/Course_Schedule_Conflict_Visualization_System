@@ -5,8 +5,8 @@
  *   - Max 4 courses in the same time slot (5 acceptable, 6+ rejected)
  *   - Instructor must be free at the assigned time (no double booking)
  *   - Instructor must not have office hours at the assigned time
- *   - GR courses: 17:00–22:00 only
- *   - UG courses: 07:00–17:00 only
+ *   - GR courses: 17:20–22:00 only   (windows live in constants.TIME_WINDOWS,
+ *   - UG courses: 07:00–17:10 only    the single source of truth shared with R-06)
  *
  * Algorithm: greedy + instructor assignment
  *   1. Delete all existing sections
@@ -22,7 +22,7 @@ const InstructorRepository = require('../repositories/InstructorRepository');
 const Section              = require('../domain/Section');
 // NEW-FU-25: use the constant instead of the literal 'Finalized'. Same value
 // today; insulates from a future status-enum rename.
-const { SCHEDULE_STATUS, ACADEMIC_LEVELS: ACADEMIC_LEVEL_NUM }  = require('../config/constants');
+const { SCHEDULE_STATUS, ACADEMIC_LEVELS: ACADEMIC_LEVEL_NUM, TIME_WINDOWS }  = require('../config/constants');
 
 const engine      = new ConflictEngine();
 const sectionRepo = new SectionRepository();
@@ -41,10 +41,12 @@ const MAX_PARALLEL_HARD = 4; // 5+ not allowed (hard reject); 4 = max ideal
 function fromMin(m) {
   return `${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
 }
+// NEW-FU-468 (Phase 113): NaN for empty/malformed (mirrors Section.toMinutes /
+// FU-466) so a bad time never manufactures a phantom 00:00 overlap in the greedy.
 function toMin(t) {
-  if (!t) return 0;
+  if (!t) return NaN;
   const [h,m] = t.substring(0,5).split(':').map(Number);
-  return h*60+m;
+  return (Number.isFinite(h) && Number.isFinite(m)) ? h*60+m : NaN;
 }
 function timesOverlap(s1, e1, s2, e2) {
   return toMin(s1) < toMin(e2) && toMin(s2) < toMin(e1);
@@ -63,11 +65,14 @@ function generateSlots(pattern, category) {
     return [];
   }
   const { dayCombos, duration } = resolved;
-  const startH = category === 'GR' ? 17 : 7;
-  const endH   = category === 'GR' ? 22 : 17;
+  // Slot bounds come from constants.TIME_WINDOWS (UG 07:00–17:10, GR 17:20–22:00)
+  // so the suggester never emits a slot R-06 would reject. These used to
+  // disagree: this generator hardcoded the GR start at 17:00, but R-06 requires
+  // GR ≥ 17:20 — so the greedy could place a GR section the engine then flagged.
+  const win = TIME_WINDOWS[category === 'GR' ? 'GR' : 'UG'];
   const slots = [];
   for (const days of dayCombos) {
-    for (let start = startH * 60; start + duration <= endH * 60; start += 30) {
+    for (let start = win.start; start + duration <= win.end; start += 30) {
       slots.push({
         days,
         startTime: fromMin(start),
@@ -94,11 +99,12 @@ const ALL_WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
 function generateLabSlots(category, { day, duration } = {}) {
   const dur = Number(duration) || LAB_DURATION;
   const days = day ? [day] : ALL_WEEKDAYS;
-  const startH = category === 'GR' ? 17 : 7;
-  const endH   = category === 'GR' ? 22 : 17;
+  // Same TIME_WINDOWS source as generateSlots — keep lab placement inside the
+  // R-06 window (UG 07:00–17:10, GR 17:20–22:00) instead of the old 17:00/22:00.
+  const win = TIME_WINDOWS[category === 'GR' ? 'GR' : 'UG'];
   const slots = [];
   for (const d of days) {
-    for (let start = startH * 60; start + dur <= endH * 60; start += 30) {
+    for (let start = win.start; start + dur <= win.end; start += 30) {
       slots.push({ days: [d], startTime: fromMin(start), endTime: fromMin(start + dur) });
     }
   }
@@ -226,21 +232,42 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
   // multi-restart loop prefers attempts that minimize the high-impact
   // rules (R-02, R-15) over attempts that just minimize the count.
   let weighted = 0;
-  for (const c of engineResult.conflicts) weighted += ruleWeight(c.ruleId);
+  // NEW-FU-400 (Phase 101): track HARD conflicts separately. The auto-fix
+  // ("Adjust for me") must reach ZERO HARD conflicts — soft advisories (R-02
+  // adjacency when an escape exists, and ALL of R-09..R-15) are inherent for a
+  // full multi-tier selection and are acceptable. Engine conflicts carry a
+  // severity ('Hard'/'Soft'); the advisory rules added below are all Soft (see
+  // constants.js), so they never increment `hard`.
+  let hard = 0;
+  // NEW-FU-230 (Phase 97): also collect the SET of rule IDs present so the
+  // preview's residualConflictRuleIds reflects the SAME conflicts this counter
+  // sees (including the advisory rules R-09..R-15). ROOT CAUSE of items 9/10:
+  // the dry-run previously derived residualConflictRuleIds from
+  // engine.evaluateAll ALONE (strategy rules R-01/02/04/05/06 only), so an
+  // all-advisory result (e.g. R-09 missing-instructor when the greedy runs out
+  // of instructors) reported residualConflicts > 0 but residualConflictRuleIds
+  // === [] → the frontend decision flow (which keys off the rule IDs) never
+  // fired → Suggest shipped a conflicting schedule silently.
+  const ruleIds = new Set();
+  for (const c of engineResult.conflicts) {
+    weighted += ruleWeight(c.ruleId);
+    if (c.ruleId) ruleIds.add(c.ruleId);
+    if (c.severity === 'Hard') hard++;   // NEW-FU-400 (Phase 101)
+  }
 
   // R-09 — no instructor (deduped by canonical course|section).
   const seen09 = new Set();
   for (const sec of rows) {
     if (sec.instructorId) continue;
     const k = `${sec.courseId}|${sec.sectionNumber}`;
-    if (!seen09.has(k)) { seen09.add(k); total++; weighted += ruleWeight('R-09'); }
+    if (!seen09.has(k)) { seen09.add(k); total++; weighted += ruleWeight('R-09'); ruleIds.add('R-09'); }
   }
   // R-10 — no venue.
   const seen10 = new Set();
   for (const sec of rows) {
     if (sec.venueId) continue;
     const k = `${sec.courseId}|${sec.sectionNumber}`;
-    if (!seen10.has(k)) { seen10.add(k); total++; weighted += ruleWeight('R-10'); }
+    if (!seen10.has(k)) { seen10.add(k); total++; weighted += ruleWeight('R-10'); ruleIds.add('R-10'); }
   }
   // R-11 — Lab section in non-Lab venue.
   const seen11 = new Set();
@@ -248,7 +275,7 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
     if (!sec.venueId || !sec.venueType) continue;
     if (sec.sectionType !== 'Lab' || sec.venueType === 'Laboratory') continue;
     const k = `${sec.courseId}|${sec.sectionNumber}`;
-    if (!seen11.has(k)) { seen11.add(k); total++; weighted += ruleWeight('R-11'); }
+    if (!seen11.has(k)) { seen11.add(k); total++; weighted += ruleWeight('R-11'); ruleIds.add('R-11'); }
   }
   // R-12 — Lec section in Lab venue.
   const seen12 = new Set();
@@ -256,14 +283,18 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
     if (!sec.venueId || !sec.venueType) continue;
     if (sec.sectionType !== 'Lec' || sec.venueType !== 'Laboratory') continue;
     const k = `${sec.courseId}|${sec.sectionNumber}`;
-    if (!seen12.has(k)) { seen12.add(k); total++; weighted += ruleWeight('R-12'); }
+    if (!seen12.has(k)) { seen12.add(k); total++; weighted += ruleWeight('R-12'); ruleIds.add('R-12'); }
   }
   // R-13 — instructor with no office hours.
   const seen13 = new Set();
   for (const sec of rows) {
     if (!sec.instructorId) continue;
+    // NEW-FU-425 (Phase 104 item 2): dummy/placeholder instructors are exempt
+    // from R-13 (they're stand-ins the user will replace with real, OH-having
+    // instructors — the advisory tells them how many to add).
+    if (String(sec.instructorId).startsWith('__dummy')) continue;
     if (seen13.has(sec.instructorId)) continue;
-    if (!ohMap.has(sec.instructorId)) { seen13.add(sec.instructorId); total++; weighted += ruleWeight('R-13'); }
+    if (!ohMap.has(sec.instructorId)) { seen13.add(sec.instructorId); total++; weighted += ruleWeight('R-13'); ruleIds.add('R-13'); }
   }
   // R-14 — has_lab course missing Lec or Lab.
   const courseStatus = new Map();
@@ -275,7 +306,7 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
     if (sec.sectionType === 'Lab') s.hasLab = true;
   }
   for (const s of courseStatus.values()) {
-    if (!(s.hasLec && s.hasLab)) { total++; weighted += ruleWeight('R-14'); }
+    if (!(s.hasLec && s.hasLab)) { total++; weighted += ruleWeight('R-14'); ruleIds.add('R-14'); }
   }
 
   // NEW-FU-392 (Phase 37): R-15 detection — credit coverage. The
@@ -302,10 +333,10 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
   for (const g of grp15.values()) {
     const effectiveCredits = g.hasLab ? Math.max(1, g.credits - 1) : g.credits;
     const required = effectiveCredits * 50;
-    if (g.totalMinutes < required) { total++; weighted += ruleWeight('R-15'); }
+    if (g.totalMinutes < required) { total++; weighted += ruleWeight('R-15'); ruleIds.add('R-15'); }
   }
 
-  return { total, weighted };
+  return { total, weighted, ruleIds, hard };
 }
 
 function makeVirtualRows(task, slot, scheduleId, instructorId) {
@@ -451,6 +482,7 @@ function scoreCombo(task, slot, instructorId, working, ohMap) {
 // defaults from the rule table — same source of truth the modal uses for
 // its pattern catalog (FU-240).
 const { legalDurationsForCourse, legalDayTemplatesForCourse } = require('../domain/sectionPattern');
+const { filterCoursesForTerm } = require('../domain/courseTermValidity');
 const { CourseRepository } = require('../repositories/repositories');
 const courseRepo = new CourseRepository();
 
@@ -471,11 +503,39 @@ class SuggestService {
   async recommend(scheduleId, options = {}) {
     const sectionsHint = options.sectionsHint && typeof options.sectionsHint === 'object'
       ? options.sectionsHint : {};
+    // NEW-FU-381 (Phase 99 item 2 + 5): live auto-choose support.
+    //   • fast            — skip the heavy dry-run greedy (capacityWarnings).
+    //                       The live modal only needs the per-course pattern
+    //                       recommendations (cheap saturation scoring); the
+    //                       O(attempts × tasks × slots) greedy is what made the
+    //                       per-change recommend hang. Mount + Run pass
+    //                       fast=false so they still get capacity warnings.
+    //   • configs         — the modal's CURRENT per-course picks. Used to seed
+    //                       the saturation map with the LOCKED courses' chosen
+    //                       days so the re-picked (unlocked) courses spread
+    //                       AROUND them — "tweak the OTHER courses to stay
+    //                       conflict-free".
+    //   • lockedCourseIds — courses the user manually edited: their pattern is
+    //                       echoed back unchanged ("respect my choice"); only
+    //                       the OTHER selected courses are re-picked.
+    const fast = options.fast === true;
+    const lockedCourseIds = Array.isArray(options.lockedCourseIds)
+      ? new Set(options.lockedCourseIds) : new Set();
+    const panelConfigById = Array.isArray(options.configs)
+      ? new Map(options.configs.filter(c => c && c.courseId).map(c => [c.courseId, c]))
+      : null;
     // Load every course that lives in the same department as this
     // schedule. The suggester operates on the GLOBAL courses table
     // (courses aren't per-term in this schema), so we read them all
     // and let the user opt-out via the modal's per-course checkbox.
-    const allCourses = await courseRepo.findAll();
+    // NEW-FU-415 (Phase 103 item 1): then drop courses that are NOT offered in
+    // this term per the curriculum rules (SWE 412 after 252, SWE 399 outside
+    // Summer) so they never surface in the Suggest modal / recommendations for
+    // an out-of-window term.
+    const allCoursesRaw = await courseRepo.findAll();
+    const schedSemRow = await query(`SELECT semester FROM schedules WHERE id = $1`, [scheduleId]);
+    const recTermCode = schedSemRow.rows[0]?.semester ?? null;
+    const allCourses = filterCoursesForTerm(allCoursesRaw, recTermCode);
     if (allCourses.length === 0) {
       return { recommendations: [], capacityWarnings: [] };
     }
@@ -526,6 +586,23 @@ class SuggestService {
       ST:      ['Sunday', 'Tuesday'],
       TT:      ['Tuesday', 'Thursday'],
     };
+
+    // NEW-FU-381 (Phase 99 item 2): seed the saturation map with the LOCKED
+    // courses' currently-chosen days, so the unlocked courses re-pick AROUND
+    // them (avoiding the days the user has committed). Their sections also
+    // count, so a 4-section locked course loads its days heavily.
+    if (panelConfigById) {
+      for (const cid of lockedCourseIds) {
+        const pc = panelConfigById.get(cid);
+        if (!pc) continue;
+        const n = Math.max(1, Number(pc.sections) || 1);
+        const lockedDays = pc.dayPattern === 'ONE_DAY'
+          ? (pc.day ? [pc.day] : [])
+          : (TEMPLATE_DAYS[pc.dayPattern] ?? []);
+        for (const d of lockedDays) workingSatPerDay.set(d, (workingSatPerDay.get(d) ?? 0) + n);
+        if (pc.labDay) workingSatPerDay.set(pc.labDay, (workingSatPerDay.get(pc.labDay) ?? 0) + n);
+      }
+    }
 
     // Deterministic small-integer hash from a string. Used to break
     // genuine ties so identical courses don't all pick the first
@@ -686,6 +763,29 @@ class SuggestService {
       const hintedSections = Number(sectionsHint[c.id]);
       const numSections = Number.isFinite(hintedSections) && hintedSections >= 1
         ? Math.floor(hintedSections) : 1;
+      // NEW-FU-381 (Phase 99 item 2): a LOCKED course keeps the user's exact
+      // pick — echo it back (its days were already seeded into the saturation
+      // map above, so we DON'T re-bump here). Only UNLOCKED courses get a
+      // freshly-picked best pattern below. Guard on a well-formed config so a
+      // malformed lock can't poison the (non-fast) greedy.
+      if (lockedCourseIds.has(c.id) && panelConfigById?.has(c.id)) {
+        const pc = panelConfigById.get(c.id);
+        if (pc.duration && pc.dayPattern) {
+          const cfg = {
+            courseId:   c.id,
+            sections:   numSections,
+            duration:   pc.duration,
+            dayPattern: pc.dayPattern,
+          };
+          if (pc.dayPattern === 'ONE_DAY') cfg.day = pc.day ?? 'Sunday';
+          if (Boolean(c.has_lab)) {
+            cfg.labDuration = pc.labDuration ?? 50;
+            cfg.labDay      = pc.labDay ?? 'Sunday';
+          }
+          defaultConfigs.push(cfg);
+          continue;
+        }
+      }
       const best = pickBestPattern(c);
       const cfg = {
         courseId:   c.id,
@@ -718,7 +818,15 @@ class SuggestService {
 
     // Run the same greedy as suggest() but in dry-run mode — no DB
     // writes, just the assignment + forcedPlacements count.
-    const greedy = await this.suggest(scheduleId, defaultConfigs, { dryRun: true });
+    // NEW-FU-381 (Phase 99 item 5): the LIVE auto-choose path passes fast=true
+    // and SKIPS this greedy entirely — it is the O(attempts × tasks × slots)
+    // cost that made the per-change recommend hang under a full catalog. The
+    // pattern recommendations (pickBestPattern, above) are all the live modal
+    // needs; capacity warnings are recomputed by the non-fast mount recommend
+    // and by the actual Run, so nothing is permanently lost.
+    const greedy = fast
+      ? { assignments: [] }
+      : await this.suggest(scheduleId, defaultConfigs, { dryRun: true });
 
     // Map assignments back to per-course recommendation. Multiple
     // tasks (Lec + Lab) collapse into one recommendation entry. Field
@@ -852,6 +960,37 @@ class SuggestService {
     const instructors = await instrRepo.findAll();
     const instrIds    = instructors.map(i => i.id);
     const ohMap       = await instrRepo.getOfficeHoursMap(instrIds);
+
+    // NEW-FU-413 (Phase 102 item 5): instructor ACCOUNTABILITY. Bias section
+    // assignment toward the SPECIALISTS — instructors who have taught THIS
+    // course before (in this term's current sections or any prior term). Courses
+    // are global (one course_id across all terms), so a single GROUP BY over
+    // `sections` gives, per course, the instructors who've taught it and how
+    // often (frequency = specialist strength). `priorInstructorsByCourse` is
+    // ordered most-experienced-first; the greedy prefers these, distributes a
+    // course's sections evenly among them, caps each at 3, and only overflows to
+    // a fresh instructor once every specialist is full. The repo (instrRepo) has
+    // no such cross-course history query, so we read it directly here.
+    const priorInstructorsByCourse = new Map(); // courseId → [instructorId] (specialist-ordered)
+    try {
+      const priorRes = await query(
+        `SELECT s.course_id, s.instructor_id, COUNT(*)::int AS cnt
+           FROM sections s
+           JOIN instructors i ON i.id = s.instructor_id
+          WHERE s.course_id = ANY($1) AND s.instructor_id IS NOT NULL
+            AND i.is_dummy = false   -- NEW-FU-425: never bias toward placeholder instructors
+          GROUP BY s.course_id, s.instructor_id
+          ORDER BY course_id, cnt DESC`,
+        [courseConfigs.map(c => c.courseId)]
+      );
+      for (const row of priorRes.rows) {
+        const arr = priorInstructorsByCourse.get(row.course_id) ?? [];
+        arr.push(row.instructor_id);            // already sorted by cnt DESC
+        priorInstructorsByCourse.set(row.course_id, arr);
+      }
+    } catch { /* history is advisory — degrade to load-balanced assignment */ }
+    // Per-course CAP on how many of a course's sections one instructor may teach.
+    const MAX_SECTIONS_PER_INSTRUCTOR_PER_COURSE = 3;
 
     // NEW-L9: load venues so we can attempt to assign one per section. We
     // partition by venue type loosely (LectureHall preferred for UG/GR; Lab
@@ -1048,26 +1187,55 @@ class SuggestService {
     // Early-exit: stop as soon as we find a zero-conflict assignment. The
     // K cap protects against pathological CPU blowup; realistic schedules
     // typically converge in 1–3 attempts.
-    const MAX_ATTEMPTS = 10;
+    // NEW-FU-390 (Phase 100): callers can cap the multi-start attempts to trade
+    // a little placement quality for big speed — each attempt is a full
+    // O(tasks×slots) greedy pass, so 3 attempts ≈ 3× faster than 10. The
+    // relaxation's many "which variant fits?" previews use a low cap; the actual
+    // apply keeps the full default so the persisted schedule stays high quality.
+    const MAX_ATTEMPTS = Number.isInteger(options.maxAttempts) && options.maxAttempts > 0
+      ? options.maxAttempts : 10;
 
     // NEW-FU-115/116: the candidate-instructor sort is shared across all
     // greedy attempts. Hoisted here so the inner runOneAttempt can call
     // it cleanly with the attempt-local instrLoad map.
-    function sortCandidateInstructors(slot, workingSet, preferredInstr, instrLoad) {
+    // NEW-FU-413 (Phase 102 item 5): instructor accountability. The candidate
+    // list is now (a) FILTERED to instructors under the per-course cap, and
+    // (b) ORDERED specialists-first, then by fewest sections of THIS course
+    // (even distribution), then strongest specialist, then office-hours, then
+    // global load. `courseCount` is the attempt-local Map<courseId,
+    // Map<instructorId,count>> of how many of each course's sections each
+    // instructor already holds in this attempt.
+    function sortCandidateInstructors(slot, workingSet, task, instrLoad, courseCount) {
+      const prior     = priorInstructorsByCourse.get(task.courseId) ?? [];
+      const priorRank = new Map(prior.map((id, i) => [id, i]));   // 0 = strongest specialist
+      const counts    = courseCount.get(task.courseId) ?? new Map();
+      const cap        = MAX_SECTIONS_PER_INSTRUCTOR_PER_COURSE;
       return instructors
         .filter(i => instructorIsFree(i, slot, workingSet, ohMap))
+        // Per-course cap: an instructor already at `cap` sections of THIS
+        // course is excluded → forces the overflow to spread to others.
+        .filter(i => (counts.get(i.id) ?? 0) < cap)
         .sort((a, b) => {
-          // Tier 1 — preferred (same-course) instructor wins.
-          if (a.id === preferredInstr?.id) return -1;
-          if (b.id === preferredInstr?.id) return  1;
-          // NEW-FU-115: Tier 2 — prefer instructors WITH at least one OH
-          // over instructors with zero OHs. The latter would fire R-13
-          // (FU-99) if assigned a section, so we make them a last-resort
-          // tie-breaker rather than the historical "first by load".
+          const aPrior = priorRank.has(a.id);
+          const bPrior = priorRank.has(b.id);
+          // Tier 1 — SPECIALISTS first (have taught this course before).
+          if (aPrior !== bPrior) return aPrior ? -1 : 1;
+          // Tier 2 — EVEN distribution: fewest sections of THIS course first.
+          const ac = counts.get(a.id) ?? 0;
+          const bc = counts.get(b.id) ?? 0;
+          if (ac !== bc) return ac - bc;
+          // Tier 3 — among equal specialists, the more-experienced one first.
+          if (aPrior && bPrior) {
+            const ar = priorRank.get(a.id);
+            const br = priorRank.get(b.id);
+            if (ar !== br) return ar - br;
+          }
+          // NEW-FU-115: Tier 4 — prefer instructors WITH at least one OH over
+          // instructors with zero OHs (the latter would fire R-13 if assigned).
           const aHasOH = ohMap.has(a.id);
           const bHasOH = ohMap.has(b.id);
           if (aHasOH !== bHasOH) return aHasOH ? -1 : 1;
-          // Tier 3 — load ascending (the historical primary key).
+          // Tier 5 — global load ascending (balance overall teaching load).
           return (instrLoad.get(a.id) ?? 0) - (instrLoad.get(b.id) ?? 0);
         });
     }
@@ -1086,7 +1254,17 @@ class SuggestService {
       const placementSkipped = [];
       const instrLoad        = new Map(instructors.map(i => [i.id, 0]));
       const venueLoad        = new Map(venues.map(v => [v.id, 0]));
-      const courseInstructor = new Map();
+      // NEW-FU-413 (Phase 102 item 5): per-course instructor counts —
+      // Map<courseId, Map<instructorId, count>>. Drives even distribution +
+      // the ≤3-per-instructor-per-course cap. Replaces the old single-
+      // instructor-per-course map (which sent EVERY section of a course to the
+      // first instructor picked).
+      const courseInstrCount = new Map();
+      const bumpCourseInstr = (courseId, instrId) => {
+        let m = courseInstrCount.get(courseId);
+        if (!m) { m = new Map(); courseInstrCount.set(courseId, m); }
+        m.set(instrId, (m.get(instrId) ?? 0) + 1);
+      };
       const venueBusyAttempt = new Map(venues.map(v => [v.id, []]));
       // NEW-FU-296 (Phase 26): track how many sections have been placed
       // at each (day, startTime) bucket so the scorer can penalize
@@ -1195,6 +1373,36 @@ class SuggestService {
         }
       }
 
+      // NEW-FU-425 (Phase 104 item 2): term-local DUMMY resource pools — only
+      // when options.allowDummyResources. When the greedy can't find a free real
+      // instructor/venue for a section, it grabs a placeholder instead of leaving
+      // the section unassigned (R-09/R-10) or forcing a drop. Dummies are reused
+      // across non-overlapping slots so the advisory reports the MINIMUM number
+      // of new instructors/venues actually needed. Dummy instructors carry no
+      // office hours (R-13 is exempted for them in countAttemptConflicts); dummy
+      // venues are created with the correct type so R-11/R-12 never fire.
+      const allowDummy = options.allowDummyResources === true;
+      const dummyInstrs = [];
+      const dummyVenues = [];
+      function getDummyInstructor(slot) {
+        let d = dummyInstrs.find(di => instructorIsFree(di, slot, working, ohMap));
+        if (!d) {
+          d = { id: `__dummy_instr_${dummyInstrs.length}__`, name: `NEW INSTRUCTOR ${dummyInstrs.length + 1}`, is_dummy: true };
+          dummyInstrs.push(d);
+        }
+        return d;
+      }
+      function getDummyVenue(slot, sectionType) {
+        const wantType = sectionType === 'Lab' ? 'Laboratory' : 'LectureHall';
+        let d = dummyVenues.find(dv => dv.type === wantType && attemptVenueIsFree(dv.id, slot));
+        if (!d) {
+          d = { id: `__dummy_venue_${dummyVenues.length}__`, name: `22-${900 + dummyVenues.length}`, type: wantType, is_dummy: true };
+          dummyVenues.push(d);
+          venueBusyAttempt.set(d.id, []);
+        }
+        return d;
+      }
+
       for (const task of taskOrder) {
         let bestSlot       = null;
         let bestInstructor = null;
@@ -1202,7 +1410,10 @@ class SuggestService {
         // tie-break axis for soft conflicts. bestScore.soft kept for
         // logging/debug only.
         let bestScore      = { hard: Infinity, weighted: Infinity, soft: Infinity, parallel: Infinity, load: Infinity };
-        const preferredInstr = courseInstructor.get(task.courseId) ?? null;
+        // NEW-FU-413 (Phase 102 item 5): the set of specialists (prior/current
+        // instructors) for this course — used to give a scorer tie-break bonus
+        // so a specialist wins over an equally-scoring stranger.
+        const specialistSet = new Set(priorInstructorsByCourse.get(task.courseId) ?? []);
         const minLoad = Math.min(...Array.from(instrLoad.values()), 0);
 
         // NEW-FU-296 (Phase 26): track the lowest-saturation tie-break
@@ -1212,20 +1423,20 @@ class SuggestService {
         let bestSlotUsage = Infinity;
 
         for (const slot of task.slots) {
-          const freeInstrs = sortCandidateInstructors(slot, working, preferredInstr, instrLoad);
+          const freeInstrs = sortCandidateInstructors(slot, working, task, instrLoad, courseInstrCount);
           const candidateInstrs = [...freeInstrs, null];
 
           for (const instr of candidateInstrs) {
             const score = scoreCombo(task, slot, instr?.id ?? null, working, ohMap);
             if (!score) continue;
             const load = instr ? (instrLoad.get(instr.id) ?? 0) - minLoad : 999;
-            const isSameCourseInstr = instr && preferredInstr && instr.id === preferredInstr.id;
-            // NEW-FU-340 (Phase 32): apply the same-course-instructor
-            // bonus to BOTH soft and weighted so the tie-break ladder
-            // still prefers reusing the course's existing teacher when
-            // all else is equal.
-            const effectiveSoft     = isSameCourseInstr ? Math.max(0, score.soft - 1) : score.soft;
-            const effectiveWeighted = isSameCourseInstr ? Math.max(0, score.weighted - 1) : score.weighted;
+            // NEW-FU-413 (Phase 102 item 5): a SPECIALIST (prior/current
+            // instructor of this course) earns the tie-break bonus that the
+            // old "same-course instructor" heuristic gave — so when two
+            // candidates score equally, the course's established teacher wins.
+            const isSpecialist = instr && specialistSet.has(instr.id);
+            const effectiveSoft     = isSpecialist ? Math.max(0, score.soft - 1) : score.soft;
+            const effectiveWeighted = isSpecialist ? Math.max(0, score.weighted - 1) : score.weighted;
             const curLoad = bestInstructor ? (instrLoad.get(bestInstructor.id) ?? 0) - minLoad : 999;
             // NEW-FU-296: how saturated is THIS slot's time bucket?
             // When the schedule is empty all slots tie at 0 and 07:00
@@ -1334,16 +1545,22 @@ class SuggestService {
           });
           continue;
         }
-        const bestVenue = attemptPickVenue(bestSlot, task.sectionType);
+        // NEW-FU-425 (Phase 104 item 2): no real instructor free → assign a
+        // term-local DUMMY instead of leaving the section instructor-less (R-09).
+        if (allowDummy && !bestInstructor && bestSlot) bestInstructor = getDummyInstructor(bestSlot);
+        let bestVenue = attemptPickVenue(bestSlot, task.sectionType);
+        // No real venue of the right type free → use a typed DUMMY venue (R-10).
+        if (allowDummy && !bestVenue && bestSlot) bestVenue = getDummyVenue(bestSlot, task.sectionType);
         if (bestVenue) attemptReserveVenue(bestVenue.id, bestSlot);
 
         assignments.push({ task, slot: bestSlot, instructor: bestInstructor, venue: bestVenue, forced: wasForced });
 
         if (bestInstructor) {
           instrLoad.set(bestInstructor.id, (instrLoad.get(bestInstructor.id) ?? 0) + 1);
-          if (!courseInstructor.has(task.courseId)) {
-            courseInstructor.set(task.courseId, bestInstructor);
-          }
+          // NEW-FU-413 (Phase 102 item 5): record this course→instructor
+          // assignment so the next section of the same course distributes to a
+          // DIFFERENT (or less-loaded) specialist and the ≤3 cap is enforced.
+          bumpCourseInstr(task.courseId, bestInstructor.id);
         }
         // NEW-FU-296 (Phase 26): record this slot's usage so the next
         // task to score this bucket sees the bump. Critical for the
@@ -1355,7 +1572,7 @@ class SuggestService {
         working.push(...placed);
       }
 
-      return { assignments, forcedPlacements, placementSkipped };
+      return { assignments, forcedPlacements, placementSkipped, dummyInstrs, dummyVenues };
     }
 
     // NEW-FU-116: multi-start outer loop. Attempt 0 uses the existing
@@ -1382,6 +1599,15 @@ class SuggestService {
     let bestConflictTotal = Infinity;
     let attemptsActuallyRun = 0;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      // NEW-FU-380 (Phase 99 item 5): yield to the event loop between attempts.
+      // runOneAttempt + countAttemptConflicts are synchronous and CPU-heavy
+      // (O(tasks × slots × instructors) + O(rows²)); a heavy run (many courses,
+      // multi-section, +grad) blocked the Node event loop for seconds, so even
+      // GET /health and the full-catalog fetch timed out — the "backend stops
+      // responding / Graduate tier disappears" symptom. A setImmediate break per
+      // attempt lets pending I/O (health, catalog, other requests) interleave
+      // without measurably slowing the greedy.
+      if (attempt > 0) await new Promise(resolve => setImmediate(resolve));
       const orderedTasks = attempt === 0 ? tasks : seededShuffle(tasks, attempt);
       const run = runOneAttempt(orderedTasks);
       const { total, weighted } = countAttemptConflicts(run.assignments, scheduleId, ohMap, engine);
@@ -1408,37 +1634,63 @@ class SuggestService {
     // status checks needed — those gates only matter when we'd
     // actually be writing.
     if (options.dryRun) {
-      // NEW-FU-361 (Phase 35): also emit the unique rule IDs that fire
-      // in the best attempt's final state. The frontend uses this to
-      // build the warn-before-conflict dialog. Built by running the
-      // full evaluateAll on the in-memory assignment.
-      const dryRunRows = [];
-      for (const { task, slot, instructor, venue } of (bestRun?.assignments ?? [])) {
-        for (const day of slot.days) {
-          dryRunRows.push(new Section({
-            id: `dry-${task.courseId}-${task.sectionNumber}-${day}`,
-            scheduleId, courseId: task.courseId,
-            instructorId: instructor?.id ?? null, venueId: venue?.id ?? null,
-            sectionNumber: task.sectionNumber, day,
-            startTime: slot.startTime, endTime: slot.endTime,
-            sectionType: task.sectionType, courseCode: task.courseCode,
-            academicLevel: task.academicLevel, category: task.category,
-            numSections: task.totalSections, hasLab: task.hasLab,
-            venueType: venue?.type ?? null,
-          }));
+      // NEW-FU-361 (Phase 35): emit the unique rule IDs that fire in the best
+      // attempt's final state — the frontend uses these to build the warn-
+      // before-conflict dialog.
+      // NEW-FU-230 (Phase 97): ROOT FIX for items 9/10. Derive the rule IDs from
+      // the SAME comprehensive counter that produced bestConflictCount
+      // (countAttemptConflicts = engine R-01..R-06 PLUS advisory R-09..R-15),
+      // instead of engine.evaluateAll ALONE. The old path saw only strategy
+      // rules, so an all-advisory result (e.g. R-09 missing-instructor) returned
+      // residualConflicts>0 but residualConflictRuleIds=[] → the decision flow
+      // never fired → Suggest shipped conflicts silently. Now the two are always
+      // consistent: ruleIds is non-empty whenever residualConflicts > 0.
+      const fullCount = countAttemptConflicts(bestRun?.assignments ?? [], scheduleId, ohMap, engine);
+      const residualConflictRuleIds = Array.from(fullCount.ruleIds).sort();
+      // NEW-FU-414 (Phase 102b): conflict ATTRIBUTION for the guaranteed-0-total
+      // drop solver. When the caller asks (attributeConflicts), find the single
+      // placed section whose removal most reduces the conflict total — the
+      // "worst" section. This is the hitting-set heuristic; doing it HERE (where
+      // engine + ohMap live) is essentially free (in-memory re-count over ~30
+      // virtual rows, no re-greedy). A clean section's removal doesn't lower the
+      // total, so only genuinely-conflicting sections are ever returned; R-14
+      // self-protects (removing a lone lec/lab of a has_lab course RAISES the
+      // total, so it's never the minimum).
+      let worstDropCourseId = null, worstDropResidual = null;
+      if (options.attributeConflicts && (bestRun?.assignments?.length ?? 0) > 0 && bestConflictCount > 0) {
+        const asg = bestRun.assignments;
+        let bestIdx = -1, bestTotal = Infinity, bestSecCount = -1;
+        for (let i = 0; i < asg.length; i++) {
+          const without = asg.slice(0, i).concat(asg.slice(i + 1));
+          const t = countAttemptConflicts(without, scheduleId, ohMap, engine).total;
+          const secCount = asg[i].task?.totalSections ?? 1;   // thin multi-section courses first on ties
+          if (t < bestTotal || (t === bestTotal && secCount > bestSecCount)) {
+            bestTotal = t; bestIdx = i; bestSecCount = secCount;
+          }
+        }
+        if (bestIdx >= 0) {
+          worstDropCourseId = asg[bestIdx].task.courseId;
+          worstDropResidual = bestTotal;
         }
       }
-      const finalEval = engine.evaluateAll(dryRunRows, ohMap);
-      const residualConflictRuleIds = Array.from(new Set(
-        (finalEval.conflicts ?? []).map(c => c.ruleId).filter(Boolean)
-      )).sort();
       return {
         assignments,
         forcedPlacements,
         placementSkipped,
         attemptsActuallyRun,
         residualConflicts: bestConflictCount,
+        // NEW-FU-400 (Phase 101): expose the HARD-only count so the relaxation +
+        // decision flow can target ZERO HARD (soft advisories are acceptable).
+        residualHardConflicts: fullCount.hard,
         residualConflictRuleIds,
+        // NEW-FU-414 (Phase 102b): hitting-set guidance (only when requested).
+        worstDropCourseId,
+        worstDropResidual,
+        // NEW-FU-425 (Phase 104 item 2): term-local dummy resources the greedy
+        // had to invent to keep every section (capacity overflow). Drives the
+        // "add X instructors / Y venues" advisory.
+        dummyInstructors: bestRun?.dummyInstrs ?? [],
+        dummyVenues:      bestRun?.dummyVenues ?? [],
       };
     }
 
@@ -1500,6 +1752,13 @@ class SuggestService {
           // Empty filter == "apply nothing". Return early with
           // the current state's revalidation.
           await client.query('COMMIT');
+          // NEW-FU-380 (Phase 99 item 5): release THIS client before calling
+          // revalidateSchedule, which acquires its OWN pooled client. Holding
+          // both at once needlessly pinned 2 of the pool's connections per
+          // empty-apply request — under concurrency that halved the effective
+          // pool and helped starve it. The `finally` below double-releases
+          // safely (getClient guards with a `released` flag).
+          client.release();
           const ScheduleService = require('./ScheduleService');
           const conflictResult = await ScheduleService.revalidateSchedule(scheduleId);
           return Object.assign(conflictResult.toJSON(), {
@@ -1516,6 +1775,56 @@ class SuggestService {
       } else {
         await client.query(`DELETE FROM sections WHERE schedule_id = $1`, [scheduleId]);
       }
+
+      // NEW-FU-425 (Phase 104 item 2): persist the term-local DUMMY instructors /
+      // venues the greedy invented (capacity overflow), tagged is_dummy +
+      // owner_semester, and build a synthetic→real id map so the section inserts
+      // below reference real FK rows. Orphaned dummies from a previous apply of
+      // this term (their sections were just wiped) are pruned first so they don't
+      // accumulate.
+      const dummyIdMap = new Map();
+      {
+        const semRow = await client.query(`SELECT semester FROM schedules WHERE id = $1`, [scheduleId]);
+        const ownerSem = semRow.rows[0]?.semester ?? null;
+        await client.query(`DELETE FROM instructors WHERE is_dummy AND owner_semester = $1 AND id NOT IN (SELECT instructor_id FROM sections WHERE instructor_id IS NOT NULL)`, [ownerSem]);
+        await client.query(`DELETE FROM venues      WHERE is_dummy AND owner_semester = $1 AND id NOT IN (SELECT venue_id      FROM sections WHERE venue_id      IS NOT NULL)`, [ownerSem]);
+        const writeAssigns = assignments.filter(a => !applyToCourseIds || applyToCourseIds.has(a.task.courseId));
+        const { pickDummyOfficeHours, nextDummyVenueName } = require('../domain/dummyResources'); // NEW-FU-429/431 (Phase 106)
+        // NEW-FU-429 (Phase 106 item 4): gather EVERY teaching slot per synthetic
+        // dummy instructor so its office-hours block can avoid its own sections —
+        // a persisted placeholder must satisfy R-13 (has OH) without creating
+        // R-04 (a section overlapping its own instructor's OH).
+        const dummyInstrInfo = new Map(); // syntheticId -> { name, slots:[{day,start,end}] }
+        const seenV = new Set();
+        for (const a of writeAssigns) {
+          if (a.instructor?.is_dummy) {
+            let info = dummyInstrInfo.get(a.instructor.id);
+            if (!info) { info = { name: a.instructor.name, slots: [] }; dummyInstrInfo.set(a.instructor.id, info); }
+            for (const day of a.slot.days) info.slots.push({ day, start: a.slot.startTime, end: a.slot.endTime });
+          }
+          if (a.venue?.is_dummy && !seenV.has(a.venue.id)) {
+            seenV.add(a.venue.id);
+            const vname = await nextDummyVenueName(client); // NEW-FU-431: globally-unique name
+            const r = await client.query(
+              `INSERT INTO venues (name, type, capacity, is_dummy, owner_semester) VALUES ($1,$2,30,true,$3) RETURNING id`,
+              [vname, a.venue.type, ownerSem]);
+            dummyIdMap.set(a.venue.id, r.rows[0].id);
+          }
+        }
+        for (const [synthId, info] of dummyInstrInfo) {
+          const r = await client.query(
+            `INSERT INTO instructors (name, email, is_dummy, owner_semester)
+             VALUES ($1, 'dummy-' || gen_random_uuid() || '@placeholder.local', true, $2) RETURNING id`,
+            [info.name, ownerSem]);
+          const realId = r.rows[0].id;
+          dummyIdMap.set(synthId, realId);
+          const oh = pickDummyOfficeHours(info.slots);
+          await client.query(
+            `INSERT INTO office_hours (instructor_id, day, start_time, end_time) VALUES ($1,$2,$3,$4)`,
+            [realId, oh.day, oh.startTime, oh.endTime]);
+        }
+      }
+
       for (const { task, slot, instructor, venue } of assignments) {
         // NEW-FU-262: skip tasks for courses not in the apply filter.
         if (applyToCourseIds && !applyToCourseIds.has(task.courseId)) continue;
@@ -1534,8 +1843,10 @@ class SuggestService {
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
           `, [
             scheduleId, task.courseId,
-            instructor?.id ?? null,
-            venue?.id ?? null,
+            // NEW-FU-425 (Phase 104 item 2): remap synthetic dummy ids → the real
+            // rows just persisted; real ids pass through unchanged.
+            instructor?.id ? (dummyIdMap.get(instructor.id) ?? instructor.id) : null,
+            venue?.id ? (dummyIdMap.get(venue.id) ?? venue.id) : null,
             task.sectionNumber, day, slot.startTime, slot.endTime,
             task.sectionType ?? 'Lec',
           ]);
@@ -1564,14 +1875,25 @@ class SuggestService {
     // conflicts remain (typically because input forced them)". The
     // residual count reflects the best multi-start attempt's authoritative
     // conflict total — what the schedule WILL show when reloaded.
-    return Object.assign(conflictResult.toJSON(), {
+    const postApply = conflictResult.toJSON();
+    return Object.assign(postApply, {
       forcedPlacements,
-      residualConflicts: bestConflictCount,
+      // NEW-FU-451 (Phase 107 D1): report the AUTHORITATIVE post-apply conflict
+      // count (what the grid will actually show on reload), not the pre-apply
+      // preview count (bestConflictCount). The greedy apply re-runs with MORE
+      // attempts than the preview so it's at least as good — but the response must
+      // never claim a residual count the persisted schedule contradicts.
+      residualConflicts: (postApply.conflicts ?? []).length,
       attemptsTried:     attemptsActuallyRun,
       // NEW-FU-316 (Phase 29): structured "couldn't place these
       // sections without creating too many conflicts" array. Empty
       // when `maxConflictsPerSection` wasn't set or every section fit.
       placementSkipped,
+      // NEW-FU-425 (Phase 104 item 2): how many term-local dummy resources were
+      // created on this apply → drives the post-apply "add X instructors / Y
+      // venues" advisory.
+      dummyInstructors: bestRun?.dummyInstrs ?? [],
+      dummyVenues:      bestRun?.dummyVenues ?? [],
     });
   }
 
@@ -1592,7 +1914,7 @@ class SuggestService {
   //
   // The Phase 35 version had an 8-variant cap and a flat (duration ×
   // dayPattern) cartesian. That worked for shallow conflicts but
-  // saturated schedules (e.g., 5 Graduate courses + 16:00–22:00 window)
+  // saturated schedules (e.g., 5 Graduate courses + 17:20–22:00 window)
   // never found a zero-conflict variant and silently returned a
   // non-zero `residualConflicts` plan — which the frontend then
   // persisted, violating the "find alternative must never create
@@ -1617,11 +1939,78 @@ class SuggestService {
   async suggestWithRelaxation(scheduleId, courseConfigs, options = {}) {
     const PASS_A_CAP = 200;   // ≤ 200 (duration × pattern) variants per attempt
     const ALT_DURATIONS    = [50, 75];
-    const ALT_DAY_PATTERNS = ['STT', 'MW', 'ST', 'MWF', 'ONE_DAY'];
+    // NEW-FU-409 (Phase 102): 'MWF' is NOT a real KFUPM day-template (the valid
+    // set is {MW, ONE_DAY, ST, STT, TT}); 'TT' was missing. The relaxation calls
+    // preview() in-process, which BYPASSES the controller's resolvePattern
+    // validator — so an out-of-set combo (e.g. STT_75: STT is 50-only) passes
+    // the dry-run but the real apply 400s with "Invalid pattern". comboValid()
+    // gates every (duration × dayPattern) the search generates against the same
+    // PATTERN_DEFS the apply enforces, so a found 0-total plan always applies.
+    const ALT_DAY_PATTERNS = ['STT', 'MW', 'ST', 'TT', 'ONE_DAY'];
+    const comboValid = (dur, dp) => !!resolvePattern({ dayPattern: dp, duration: dur });
 
-    // First attempt: the user's configs as-is. Zero-conflict → return.
+    // NEW-FU-390 (Phase 100): BOUND the search. Pass A–E ran hundreds of full
+    // (10-start) greedy previews — Pass B is maxBudget×10, Pass D/E are per-
+    // course — so a heavy multi-section selection took MINUTES. The "Adjust for
+    // me" path then appeared to hang, and the exhausted backend made the post-
+    // apply view reload fail (stale grid / empty-on-refresh). Two bounds:
+    //   • cheap previews — fold maxAttempts:3 into `options` so EVERY this.preview
+    //     below runs a 3-start greedy (~3× faster). The FINAL apply (a separate
+    //     suggest() call) keeps the full 10 attempts, so quality is preserved.
+    //   • a wall-clock deadline — once exceeded we stop exploring further variants
+    //     (each pass checks overBudget()) and fall through to the best-so-far /
+    //     last-resort return. Pass A (duration×pattern, the most effective) always
+    //     completes within the budget, so realistic selections still resolve fast.
+    // NEW-FU-409 (Phase 102 item 1): the explicit "fix it for me" is allowed to
+    // solve as long as it needs (the UI keeps a blocking overlay up), so the
+    // budget is generous — 20 s default vs the Phase-100 4 s. Reaching ZERO
+    // TOTAL conflicts is a HARDER target than zero-hard (more variants fail the
+    // success gate), so we also raise the per-preview attempts from the cheap 3
+    // to 6 for better placement quality on each variant. The FINAL apply (a
+    // separate suggest() call) still runs the full 10 attempts.
+    const RELAX_BUDGET_MS = options.relaxBudgetMs ?? 25000;
+    const RELAX_START     = Date.now();
+    const RELAX_DEADLINE  = RELAX_START + RELAX_BUDGET_MS;
+    // NEW-FU-409 (Phase 102 item 1): SPLIT the budget. The search passes
+    // (A global, A2 per-course polish, B reduce, C lab) run until the SOFT
+    // deadline (65% of budget); the remaining 35% is RESERVED for Pass D/E so a
+    // drop/reduce plan is ALWAYS computed when 0-total is unreachable. The
+    // red-team showed a single deadline let Pass A/B eat the whole budget,
+    // starving Pass E → the user hit a dead-end with NO actionable drop.
+    const EXPLORE_DEADLINE = RELAX_START + Math.round(RELAX_BUDGET_MS * 0.50);
+    const overBudget  = () => Date.now() > RELAX_DEADLINE;    // hard stop (search passes A–C)
+    const overExplore = () => Date.now() > EXPLORE_DEADLINE;  // soft (search passes)
+    // NEW-FU-416 (Phase 103 item 2): the GUARANTEED drop phase (Phase F) must
+    // NEVER be cut short — a cut leaves the user with the "No conflict-free plan"
+    // dead-end the feature exists to avoid. Phase F is self-bounded (it drops one
+    // section per round, so it reaches 0-total within totalSections rounds), so
+    // it cannot hang; this large absolute backstop only guards a pathological
+    // over-load that the user said logically can't occur.
+    const PHASE_F_DEADLINE = RELAX_START + 90000;
+    const overPhaseF = () => Date.now() > PHASE_F_DEADLINE;
+    options = { ...options, maxAttempts: options.relaxMaxAttempts ?? 6 };
+    // Cheaper previews for the breadth-first coordinate-descent polish (Pass A2)
+    // and the drop search — many single-tweak trials where breadth beats depth.
+    // The FINAL apply re-runs the full 10-attempt greedy, so quality is kept.
+    const cheapOptions = { ...options, maxAttempts: 3 };
+
+    // NEW-FU-409 (Phase 102 item 1): REVERT Phase 101's hard-only target. The
+    // user rejected shipping ANY conflict — soft or hard — from a feature that
+    // promises conflict-free schedules. A variant is "solved" only at ZERO
+    // TOTAL conflicts (0 hard AND 0 soft). `better` still ranks the best-effort
+    // by fewest hard then fewest total (so an infeasible fallback is at least
+    // hard-free), but `solved` is the success gate, and `hardOf` is kept ONLY
+    // for Pass D's structural-blocker detection (a course that is HARD-
+    // infeasible even alone). Soft residue (R-02 adjacency, R-13/R-15…) no
+    // longer counts as "good enough" — it triggers the drop/reduce path.
+    const hardOf  = r => r.residualHardConflicts ?? r.residualConflicts ?? Infinity;
+    const totalOf = r => r.residualConflicts ?? Infinity;
+    const better  = (a, b) => hardOf(a) !== hardOf(b) ? hardOf(a) < hardOf(b) : totalOf(a) < totalOf(b);
+    const solved  = r => totalOf(r) === 0;
+
+    // First attempt: the user's configs as-is. Zero TOTAL conflicts → done.
     const base = await this.preview(scheduleId, courseConfigs, options);
-    if ((base.residualConflicts ?? 0) === 0) {
+    if (solved(base)) {
       return { ...base, relaxed: false, relaxedConfigs: null, feasible: true, pass: 'base' };
     }
 
@@ -1629,6 +2018,7 @@ class SuggestService {
     const passAVariants = [];
     for (const dur of ALT_DURATIONS) {
       for (const dp of ALT_DAY_PATTERNS) {
+        if (!comboValid(dur, dp)) continue;   // NEW-FU-409 (Phase 102): never generate a combo the apply rejects
         if (passAVariants.length >= PASS_A_CAP) break;
         const sameAsOrig = courseConfigs.every(c =>
           (c.duration ?? 50) === dur && (c.dayPattern ?? 'STT') === dp
@@ -1643,15 +2033,72 @@ class SuggestService {
     }
     let best = { ...base, relaxed: false, relaxedConfigs: null, pass: 'base' };
     for (const variant of passAVariants) {
+      if (overExplore()) break;   // NEW-FU-409 (Phase 102): soft deadline — leave room for Pass E
       try {
         const r = await this.preview(scheduleId, variant, options);
-        if ((r.residualConflicts ?? 0) === 0) {
+        if (solved(r)) {
           return { ...r, relaxed: true, relaxedConfigs: variant, feasible: true, pass: 'A' };
         }
-        if ((r.residualConflicts ?? Infinity) < (best.residualConflicts ?? Infinity)) {
+        if (better(r, best)) {
           best = { ...r, relaxed: true, relaxedConfigs: variant, pass: 'A' };
         }
       } catch { /* validator rejected this variant — skip */ }
+    }
+
+    // ── Pass A2 — per-course coordinate-descent polish ─────────────
+    // NEW-FU-409 (Phase 102 item 1): Pass A applies ONE (duration, pattern) to
+    // EVERY course at once — too coarse to clear the last 1–2 residual
+    // conflicts (the red-team showed realistic loads landing "1 away" from
+    // 0-total: a lone R-02 / R-15 / R-14). This pass holds the best arrangement
+    // and re-tunes ONE course at a time (duration × pattern × a ±1 section
+    // nudge), keeping any change that lowers the total. Cheap, breadth-first
+    // previews; ≤2 sweeps; soft-deadline bound. Coordinate descent like this
+    // routinely drives a near-feasible arrangement to exactly zero without
+    // dropping or reducing anything — exactly the user's "spread courses to
+    // avoid R-02 / fix R-15 coverage" intent.
+    if (!solved(best) && !overExplore()) {
+      let cur = (best.relaxedConfigs ? best.relaxedConfigs : courseConfigs).map(c => ({ ...c }));
+      let curResid = totalOf(best);
+      for (let sweep = 0; sweep < 2 && curResid > 0 && !overExplore(); sweep++) {
+        let improvedThisSweep = false;
+        for (let i = 0; i < cur.length && !overExplore() && curResid > 0; i++) {
+          // Candidate single-course tweaks: every (dur, pattern), plus a
+          // section ±1 nudge (more sections can cover R-15 credit; fewer can
+          // relieve R-02 contention). Skip the no-op (current) combo.
+          const candidates = [];
+          for (const dur of ALT_DURATIONS) {
+            for (const dp of ALT_DAY_PATTERNS) {
+              if (!comboValid(dur, dp)) continue;   // NEW-FU-409 (Phase 102): apply-valid combos only
+              candidates.push({ duration: dur, dayPattern: dp, sections: cur[i].sections });
+            }
+          }
+          // Only an ADDITIVE +1 nudge (covers an under-served R-15 credit gap).
+          // We deliberately never silently SHRINK a course here — a reduction is
+          // a visible compromise and belongs to Pass B (which reports it via
+          // `downsized`), not a hidden coordinate-descent step.
+          const baseSecs = cur[i].sections ?? 1;
+          candidates.push({ duration: cur[i].duration, dayPattern: cur[i].dayPattern, sections: baseSecs + 1 });
+          for (const cand of candidates) {
+            if (overExplore()) break;
+            if ((cur[i].duration ?? 50) === cand.duration &&
+                (cur[i].dayPattern ?? 'STT') === cand.dayPattern &&
+                (cur[i].sections ?? 1) === cand.sections) continue;
+            const trial = cur.map((c, j) => j === i ? { ...c, ...cand } : c);
+            const r = await this.preview(scheduleId, trial, cheapOptions).catch(() => null);
+            if (!r) continue;
+            if (totalOf(r) < curResid) {
+              cur = trial; curResid = totalOf(r);
+              best = { ...r, relaxed: true, relaxedConfigs: trial, pass: 'A2' };
+              improvedThisSweep = true;
+              if (solved(r)) {
+                return { ...r, relaxed: true, relaxedConfigs: trial, feasible: true, pass: 'A2' };
+              }
+              break; // accept the first improving tweak for this course; move on
+            }
+          }
+        }
+        if (!improvedThisSweep) break; // converged — no single-course tweak helps
+      }
     }
 
     // ── Pass B — also reduce per-course sections count ─────────────
@@ -1664,6 +2111,7 @@ class SuggestService {
     const maxBudget = reductionLevels.reduce((s, n) => s + n, 0);
     outerB:
     for (let budget = 1; budget <= maxBudget; budget++) {
+      if (overExplore()) break outerB;   // NEW-FU-409 (Phase 102): soft deadline — Pass B is heaviest, cut first
       // Generate per-course reductions that sum to `budget`. Round-
       // robin distribution keeps the changes shallow rather than
       // gutting one course.
@@ -1684,6 +2132,7 @@ class SuggestService {
       // reduced section counts.
       for (const dur of ALT_DURATIONS) {
         for (const dp of ALT_DAY_PATTERNS) {
+          if (!comboValid(dur, dp)) continue;   // NEW-FU-409 (Phase 102): apply-valid combos only
           const variant = courseConfigs.map((c, i) => ({
             ...c,
             duration:   dur,
@@ -1692,7 +2141,7 @@ class SuggestService {
           }));
           try {
             const r = await this.preview(scheduleId, variant, options);
-            if ((r.residualConflicts ?? 0) === 0) {
+            if (solved(r)) {
               const downsized = courseConfigs
                 .map((c, i) => reduceBy[i] > 0
                   ? { courseId: c.courseId, from: c.sections ?? 1, to: variant[i].sections }
@@ -1705,7 +2154,7 @@ class SuggestService {
                 downsized,
               };
             }
-            if ((r.residualConflicts ?? Infinity) < (best.residualConflicts ?? Infinity)) {
+            if (better(r, best)) {
               best = { ...r, relaxed: true, relaxedConfigs: variant, pass: 'B' };
             }
           } catch { /* skip rejected variant */ }
@@ -1715,20 +2164,21 @@ class SuggestService {
 
     // ── Pass C — relax lab overrides ───────────────────────────────
     const hasLabOverrides = courseConfigs.some(c => c.labDay || c.labDuration);
-    if (hasLabOverrides) {
+    if (hasLabOverrides && !overExplore()) {   // NEW-FU-409 (Phase 102): soft deadline
       const cleared = courseConfigs.map(c => {
         const { labDay, labDuration, ...rest } = c;
         return rest;
       });
       for (const dur of ALT_DURATIONS) {
         for (const dp of ALT_DAY_PATTERNS) {
+          if (!comboValid(dur, dp)) continue;   // NEW-FU-409 (Phase 102): apply-valid combos only
           const variant = cleared.map(c => ({ ...c, duration: dur, dayPattern: dp }));
           try {
             const r = await this.preview(scheduleId, variant, options);
-            if ((r.residualConflicts ?? 0) === 0) {
+            if (solved(r)) {
               return { ...r, relaxed: true, relaxedConfigs: variant, feasible: true, pass: 'C' };
             }
-            if ((r.residualConflicts ?? Infinity) < (best.residualConflicts ?? Infinity)) {
+            if (better(r, best)) {
               best = { ...r, relaxed: true, relaxedConfigs: variant, pass: 'C' };
             }
           } catch { /* skip */ }
@@ -1736,105 +2186,106 @@ class SuggestService {
       }
     }
 
-    // ── Pass D — identify structural troublemakers ────────────────
-    // Run the suggester per-course in isolation; the courses that
-    // STILL produce conflicts alone are the "structural" blockers
-    // (their requirements exceed time / venue / instructor capacity).
-    const suggestedRemovals = [];
-    for (const c of courseConfigs) {
-      try {
-        const r = await this.preview(scheduleId, [c], options);
-        if ((r.residualConflicts ?? 0) > 0) {
-          suggestedRemovals.push({
-            courseId: c.courseId,
-            residualConflicts: r.residualConflicts,
-            ruleIds: r.residualConflictRuleIds ?? [],
-          });
-        }
-      } catch { /* skip */ }
-    }
-
-    // ── Pass E (NEW-FU-397, Phase 39) — compute the last-resort
-    // drop plan. Mirrors Quick Fix's Phase 39 generalization: when
-    // no non-destructive resolution exists, present DROP as the
-    // opt-in last-resort path. Strategy:
-    //   1. Rank suggestedRemovals by impact (highest weighted
-    //      conflicts first — those are the structural blockers).
-    //   2. Iteratively exclude them until the remaining course set
-    //      produces a feasible (zero-conflict) plan with the
-    //      relaxed configs from Pass A.
-    //   3. Stop at the minimum set that yields feasibility.
-    //
-    // The plan is RETURNED, not auto-applied. The controller leaves
-    // feasible:false on the response so the frontend's existing
-    // "no auto-persist on infeasibility" guard fires, but a sibling
-    // `lastResortPlan` field gives the frontend an opt-in path to
-    // present to the user.
+    // ── Phase F — GUARANTEED 0-total by dropping the fewest sections ──
+    // NEW-FU-414 (Phase 102b): "always conflict-free, by any means, dropping the
+    // least-needed sections". This is an INTELLIGENT CONFLICT HITTING-SET. Each
+    // round we re-greedy the current configs (so the kept plan is ALWAYS a real
+    // placement the apply reproduces verbatim), and if it isn't yet 0-total the
+    // preview tells us — via in-memory leave-one-out, essentially free — which
+    // placed section's removal most reduces the conflict total
+    // (`worstDropCourseId`). We SHRINK that course's section count by one and
+    // re-place. Every round drops exactly one section, so the section set
+    // strictly shrinks ⇒ the loop is GUARANTEED to reach 0 total (worst case it
+    // thins to a trivially-feasible subset). Starting from the best pattern
+    // arrangement (Pass A/A2) and always thinning the MOST-conflicting course
+    // keeps the drop count minimal. R-14 self-protects (a has_lab course's lone
+    // lec/lab never minimises the residual, so it is never chosen). The kept
+    // configs we return are exactly the ones whose re-greedy came back `solved`.
     let lastResortPlan = null;
-    if (suggestedRemovals.length > 0) {
-      // Sort by residualConflicts desc — most disruptive first.
-      const rankedRemovals = [...suggestedRemovals]
-        .sort((a, b) => (b.residualConflicts ?? 0) - (a.residualConflicts ?? 0));
-      const excluded = [];
-      for (const removal of rankedRemovals) {
-        excluded.push(removal.courseId);
-        const remainingConfigs = courseConfigs.filter(c => !excluded.includes(c.courseId));
-        if (remainingConfigs.length === 0) break;
-        // Re-run Pass A on the reduced set: exhaustive duration ×
-        // pattern. First zero-conflict variant wins.
-        const baseTry = await this.preview(scheduleId, remainingConfigs, options).catch(() => null);
-        if (baseTry && (baseTry.residualConflicts ?? 0) === 0) {
-          lastResortPlan = {
-            droppedCourseIds: [...excluded],
-            keptConfigs: remainingConfigs,
-            assignments: baseTry.assignments,
-            residualConflicts: 0,
-            pass: 'E-base',
-          };
-          break;
-        }
-        // Try the same Pass A cartesian on the reduced set.
-        let bestReduced = null;
-        for (const dur of ALT_DURATIONS) {
-          for (const dp of ALT_DAY_PATTERNS) {
-            const variant = remainingConfigs.map(c => ({
-              ...c, duration: dur, dayPattern: dp,
-            }));
-            const r = await this.preview(scheduleId, variant, options).catch(() => null);
-            if (!r) continue;
-            if ((r.residualConflicts ?? 0) === 0) {
-              bestReduced = { configs: variant, result: r };
-              break;
-            }
-          }
-          if (bestReduced) break;
-        }
-        if (bestReduced) {
-          lastResortPlan = {
-            droppedCourseIds: [...excluded],
-            keptConfigs: bestReduced.configs,
-            assignments: bestReduced.result.assignments,
-            residualConflicts: 0,
-            pass: 'E-relaxed',
-          };
-          break;
-        }
+    const suggestedRemovals = [];
+    let feasibleViaShrink = null;
+    // NEW-FU-416 (Phase 103 item 2): Phase F runs WHENEVER the best effort still
+    // has conflicts — it is NOT gated on the explore budget, so it can never be
+    // skipped into a dead-end. It is self-bounded (≤ totalSections rounds), uses
+    // cheap previews for speed, and the absolute PHASE_F_DEADLINE is only a
+    // pathological backstop.
+    if (totalOf(best) > 0) {
+      let configs = (best.relaxedConfigs ? best.relaxedConfigs : courseConfigs).map(c => ({ ...c }));
+      const droppedSections = [];
+      // NEW-FU-424 (Phase 104 item 1): courseId → {code,name} so the drop plan
+      // labels every dropped course with its real code AND name — the frontend's
+      // term-scoped list omits catalog courses not yet sectioned here (e.g. SWE
+      // 445), which previously surfaced as a raw UUID.
+      const courseMeta = new Map();
+      try {
+        const cm = await query(`SELECT id, course_code, name FROM courses WHERE id = ANY($1)`,
+          [courseConfigs.map(c => c.courseId)]);
+        for (const r of cm.rows) courseMeta.set(r.id, { code: r.course_code, name: r.name });
+      } catch { /* labels degrade gracefully */ }
+      const totalSections = courseConfigs.reduce((s, c) => s + Math.max(1, c.sections ?? 1), 0);
+      let solvedAssignments = null, solvedConfigs = null;
+      // Adaptive preview depth: small/realistic loads use the full 6-attempt
+      // greedy for MINIMAL drops; very dense loads (many rounds × slow greedy)
+      // drop to 2 attempts so the loop still converges well inside the backstop
+      // (speed over minimality only when the load is unrealistically large).
+      const roundOpts = { ...(totalSections > 35 ? { ...options, maxAttempts: 2 } : options), attributeConflicts: true };
+      for (let round = 0; round <= totalSections && !overPhaseF(); round++) {
+        const v = await this.preview(scheduleId, configs, roundOpts).catch(() => null);
+        if (!v) break;
+        if (solved(v)) { solvedAssignments = v.assignments ?? []; solvedConfigs = configs; break; }
+        // worstDropCourseId is non-null whenever conflicts + placements exist
+        // (a clean section never minimises the residual). If it is somehow null,
+        // force progress by thinning the course with the most sections so the
+        // loop still converges (never a dead-end).
+        const victimCourseId = v.worstDropCourseId
+          ?? [...configs].sort((a, b) => (b.sections ?? 1) - (a.sections ?? 1))[0]?.courseId;
+        if (!victimCourseId) break;
+        const victimAsg = (v.assignments ?? []).find(a => a.task?.courseId === victimCourseId);
+        const meta = courseMeta.get(victimCourseId);
+        const victimCode = victimAsg?.task?.courseCode ?? meta?.code ?? null;
+        configs = configs
+          .map(c => c.courseId === victimCourseId ? { ...c, sections: (c.sections ?? 1) - 1 } : c)
+          .filter(c => (c.sections ?? 0) > 0);
+        droppedSections.push({ courseId: victimCourseId, courseCode: victimCode, courseName: meta?.name ?? null });
+        suggestedRemovals.push({ courseId: victimCourseId, kind: 'hitting-set' });
+        if (configs.length === 0) break;
+      }
+      if (solvedAssignments && droppedSections.length === 0) {
+        // Best config re-greedied clean with no drops → genuinely feasible.
+        feasibleViaShrink = { ...best, relaxed: true, relaxedConfigs: solvedConfigs, feasible: true, pass: 'F-clean', assignments: solvedAssignments };
+      } else if (solvedAssignments && droppedSections.length > 0) {
+        const keptCourseIds = new Set(solvedConfigs.map(c => c.courseId));
+        lastResortPlan = {
+          droppedSections,
+          droppedCount: droppedSections.length,
+          // Courses that lost ≥1 section (for labels) and those fully removed.
+          droppedCourseIds: [...new Set(droppedSections.map(d => d.courseId))],
+          fullyDroppedCourseIds: [...new Set(droppedSections.map(d => d.courseId))].filter(id => !keptCourseIds.has(id)),
+          keptConfigs: solvedConfigs,
+          assignments: solvedAssignments,
+          residualConflicts: 0,
+          pass: 'F-hittingset',
+        };
       }
     }
+    if (feasibleViaShrink) return feasibleViaShrink;
 
     return {
       feasible: false,
       relaxed: false,
       relaxedConfigs: null,
       pass: 'D',
-      reason:
-        suggestedRemovals.length
-          ? `No conflict-free plan exists even after relaxing all configs. ` +
-            (lastResortPlan
-              ? `Last-resort plan available: drop ${lastResortPlan.droppedCourseIds.length} course(s) and the remainder fits cleanly.`
-              : `Consider removing ${suggestedRemovals.length} course(s) — their requirements cannot be satisfied within available capacity.`)
-          : `No conflict-free plan exists with the given courses and constraints. ` +
-            `The best attempt left ${best.residualConflicts} residual conflict(s) (${(best.residualConflictRuleIds ?? []).join(', ')}).`,
+      // NEW-FU-414 (Phase 102b): the hitting-set ALWAYS yields a 0-total plan
+      // when one exists by dropping sections, so this branch normally carries a
+      // precise "drop N section(s)" plan. The bare-message fallback only fires
+      // if the loop was cut by the budget before converging.
+      reason: lastResortPlan
+        ? `No conflict-free plan keeps every section. Dropping ${lastResortPlan.droppedCount} ` +
+          `section(s) lets the rest fit with zero conflicts.`
+        : `No fully conflict-free plan exists for this exact selection. ` +
+          `The best attempt still leaves ${best.residualConflicts} conflict(s) ` +
+          `(${(best.residualConflictRuleIds ?? []).join(', ') || 'soft'}). ` +
+          `Reduce the section count or remove a course, then re-run.`,
       suggestedRemovals,
       // NEW-FU-397 (Phase 39): opt-in last-resort plan.
       lastResortPlan,

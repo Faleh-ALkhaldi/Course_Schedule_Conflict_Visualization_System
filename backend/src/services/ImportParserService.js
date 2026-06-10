@@ -54,15 +54,16 @@ function normalizeRow(raw) {
   const et = (raw['end time']     ?? '').trim().substring(0, 5);
   if (!cc || !sn || !dd || !st || !et) return null;
 
+  // NEW-FU-498 (Phase 122): recognize all four types (Lec/Lab/Prj/Ths); unknown → Lec.
   const rawType = (raw['section type'] ?? '').trim();
-  const sectionType = rawType === 'Lab' ? 'Lab' : 'Lec';
+  const sectionType = ['Lec','Lab','Prj','Ths'].includes(rawType) ? rawType : 'Lec';
 
   return {
     courseCode:    cc,
     courseName:    (raw['course name']    ?? '').trim() || cc,
     academicLevel: (raw['academic level'] ?? '').trim() || 'Freshman',
     category:      (raw['category']       ?? '').trim() || 'UG',
-    credits:       Number.isFinite(Number(raw['credits'])) ? parseInt(raw['credits'], 10) : 3,
+    credits:       Number.isFinite(parseInt(raw['credits'], 10)) ? parseInt(raw['credits'], 10) : 3,
     sectionNumber: sn,
     sectionType,
     days:          dd.split(/[,;/\s]+/).map(d => d.trim()).filter(Boolean),

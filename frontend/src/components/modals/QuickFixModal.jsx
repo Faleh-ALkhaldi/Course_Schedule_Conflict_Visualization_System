@@ -28,6 +28,9 @@ const OP_TYPE_LABEL = {
   'move':                'Move Time Slot',
   'compound':            'Move + Reassign',
   'drop':                'Drop Section',
+  // NEW-FU-426 (Phase 105): placeholder-resource ops (parity with Suggest).
+  'add-dummy-instructor':'Add Placeholder Instructor',
+  'add-dummy-venue':     'Add Placeholder Venue',
 };
 
 const OP_TYPE_COLOR = {
@@ -37,6 +40,10 @@ const OP_TYPE_COLOR = {
   'move':                '#0369a1',  // blue — shifts time, moderate disruption
   'compound':            '#0369a1',  // blue — multi-step but still non-destructive
   'drop':                '#b91c1c',  // red — destructive
+  // NEW-FU-426 (Phase 105): amber — adds a placeholder resource (matches the
+  // sidebar's "placeholder" badge); constructive, far better than a drop.
+  'add-dummy-instructor':'#b45309',
+  'add-dummy-venue':     '#b45309',
 };
 
 export default function QuickFixModal({ scheduleId, onClose, onApplied, showToast }) {

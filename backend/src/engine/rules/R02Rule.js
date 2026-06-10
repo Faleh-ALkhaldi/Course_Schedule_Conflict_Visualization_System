@@ -22,10 +22,12 @@ const Conflict = require('../../domain/Conflict');
 // rule-logic change).
 const { sectionLabel } = require('../../domain/sectionLabel');
 
+// NEW-FU-468 (Phase 113): NaN for empty/malformed (mirrors Section.toMinutes /
+// FU-466) so a bad time can never fabricate a 00:00 overlap.
 function toMin(t) {
-  if (!t) return 0;
+  if (!t) return NaN;
   const [h, m] = t.substring(0,5).split(':').map(Number);
-  return h*60+m;
+  return (Number.isFinite(h) && Number.isFinite(m)) ? h*60+m : NaN;
 }
 
 function logicalOverlaps(rowsA, rowsB) {

@@ -12,10 +12,14 @@ const Conflict = require('../../domain/Conflict');
 // NEW-FU-282 (Phase 56): shared label helper for §F-XX rendering.
 const { sectionLabel } = require('../../domain/sectionLabel');
 
+// NEW-FU-468 (Phase 113): empty/malformed → NaN (not 00:00) so overlap math
+// (x < NaN === false) can never manufacture a phantom 00:00 conflict — the same
+// hardening Section.toMinutes got in FU-466. The three standalone toMin helpers
+// (here, R02Rule, SuggestService) had been left coercing a bad time to midnight.
 function toMin(t) {
-  if (!t) return 0;
+  if (!t) return NaN;
   const [h, m] = t.substring(0,5).split(':').map(Number);
-  return h*60+m;
+  return (Number.isFinite(h) && Number.isFinite(m)) ? h*60+m : NaN;
 }
 
 function logicalOverlaps(rowsA, rowsB) {
@@ -67,6 +71,13 @@ function evaluate(changed, allSections) {
 
     const otherLevel = otherLogical[0][0]?.academicLevel;
     if (otherLevel !== changed.academicLevel) continue;
+
+    // NEW-FU-468 (Phase 113): grad-grad overlap is ALLOWED per user directive —
+    // mirrors R-02's FU-275 exemption. At the Graduate tier students elect
+    // between courses, so a same-slot grad↔grad overlap is a choice, not a hard
+    // block. R-01 (multi-section; both sides are Graduate here since the levels
+    // matched above) was missing this and raised a false "cannot save".
+    if (changed.academicLevel === 'Graduate') continue;
 
     const pairKey = [changed.courseId, otherCourseId].sort().join('|');
     if (reportedPairs.has(pairKey)) continue;

@@ -34,6 +34,12 @@
   --font-display: var(--font-system);
   --font-body:    var(--font-system);
   --font-mono:    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* NEW-FU-208 (Phase 85): card typography uses JetBrains Mono (loaded in
+     index.html) for a genuinely heavier 800 weight + small-size legibility.
+     Falls back to the system mono stack if the web font fails to load, so cards
+     degrade gracefully. Scoped to schedule-card text only — every other mono
+     surface keeps --font-mono unchanged. */
+  --font-card-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
   /* Semantic text colors — every text use should reference one of these.
      All pass WCAG AA on white. */

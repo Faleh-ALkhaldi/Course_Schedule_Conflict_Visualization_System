@@ -31,7 +31,7 @@ function inferImportFormat(file) {
   return null;
 }
 
-export default function ExportModal({ onExport, onExportImage, onClose, showToast }) {
+export default function ExportModal({ onExport, onExportImage, onClose, showToast, initialTab = 'export' }) {
   // NEW-FU-35: Escape dismisses the modal, matching the established pattern
   // in SoftConflictModal / OfficeHourModal / GroupChangeModal.
   useEffect(() => {
@@ -42,7 +42,9 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
 
   const { view, filterId, instructors, venues, schedule, loadView, loadReference, dispatch } = useApp();
 
-  const [tab,      setTab]      = useState('export'); // 'export' | 'import'
+  // NEW-FU-228 (Phase 97): open on the caller's tab so the top-bar "Import"
+  // button lands directly on Import instead of burying it behind Export.
+  const [tab,      setTab]      = useState(initialTab); // 'export' | 'import'
   const [choice,   setChoice]   = useState('full');
   const [format,   setFormat]   = useState('xlsx');
   const [instrId,  setInstrId]  = useState(filterId ?? '');

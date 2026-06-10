@@ -10,7 +10,7 @@ class InstructorRepository {
   async findAll(termCode = null) {
     if (termCode) {
       const res = await query(
-        `SELECT DISTINCT i.id, i.name, i.email, i.created_at, i.updated_at
+        `SELECT DISTINCT i.id, i.name, i.email, i.is_dummy, i.created_at, i.updated_at
          FROM instructors i
          JOIN sections s   ON s.instructor_id = i.id
          JOIN schedules sc ON sc.id = s.schedule_id
@@ -21,7 +21,7 @@ class InstructorRepository {
       return res.rows;
     }
     const res = await query(
-      `SELECT id, name, email, created_at, updated_at FROM instructors ORDER BY name`
+      `SELECT id, name, email, is_dummy, created_at, updated_at FROM instructors WHERE is_dummy = false ORDER BY name`
     );
     return res.rows;
   }

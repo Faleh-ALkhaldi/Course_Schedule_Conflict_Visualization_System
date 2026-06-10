@@ -29,8 +29,10 @@ function evaluate(changed, allSections, officeHours = []) {
       id: null, scheduleId: changed.scheduleId,
       ruleId: RULE_IDS.R04, severity: SEVERITY.HARD,
       description:
-        `Hard Conflict (R-04): ${changed.instructorName ?? changed.instructorId} ` +
-        `is assigned to two overlapping sections: ${changed.label} and ${other.label}.`,
+        // NEW-FU-472 (Phase 113): drop the raw "Hard Conflict (R-04):" code prefix
+        // — plain-language mandate, no internal rule codes in user-facing text.
+        `${changed.instructorName ?? changed.instructorId} ` +
+        `is assigned to two overlapping sections at the same time: ${changed.label} and ${other.label}.`,
       sectionAId: changed.id, sectionBId: other.id,
     }));
   }

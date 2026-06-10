@@ -56,11 +56,15 @@ export function abbreviateInstructorName(name) {
   return `${parts[0][0]}. ${parts.slice(1).join(' ')}`;
 }
 
-export default function SectionBlock({ section, conflicts, onClick, onDelete, isDragging, height, tier = 'spacious' }) {
+export default function SectionBlock({ section, conflicts, onClick, onDelete, isDragging, height, tier = 'spacious', uniform = false }) {
   // NEW-FU-207: archived schedules disable section drag + change the cursor.
   // Click is gated upstream in SchedulerPage.handleBlockClick.
+  // NEW-FU-483 (Phase 117): also disable drag when finalized (archived_at may be null for
+  // Finalized terms — backend assertSchedulerEditableLocked refuses writes on EITHER condition,
+  // so the drag affordance must mirror both). Previously only archived_at was checked, which
+  // left finalized-term section blocks draggable (ghost appeared, then snapped back on drop).
   const { schedule } = useApp();
-  const isArchived = Boolean(schedule?.archived_at);
+  const isArchived = Boolean(schedule?.archived_at) || schedule?.status === 'Finalized';
   const { attributes, listeners, setNodeRef, transform, isDragging: activeDragging } =
     useDraggable({ id: section.id, disabled: isDragging || isArchived });
 
@@ -151,6 +155,17 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
   // continues to shrink fonts + hide the §badge to free room.
   const [isNarrow, setIsNarrow] = useState(false);
   useEffect(() => {
+    // NEW-FU-218 (Phase 92): Readable-mode cards are a uniform READABLE width by design,
+    // so they are never "narrow" — and forcing it OFF avoids a vicious oscillation: a
+    // readable card's content-box sits right at the 120px threshold, the `narrow` CSS
+    // nudges the padding, the content-box re-crosses 120, isNarrow flips, React
+    // re-renders (which wipes useFitCard's imperative sb-* classes → content reflows →
+    // re-fit), and it never settles. That boundary loop was the Readable "pulsing".
+    // NEW-FU-221 (Phase 95): keyed on `uniform` (covers Readable mode AND Instructor/
+    // Venue) — a uniform-typography card is never "narrow"; forcing it OFF also avoids
+    // the 120px-boundary oscillation. Instructor/Venue cards are wide (~235px) so this
+    // is a no-op there, but it keeps the behaviour consistent for every uniform card.
+    if (uniform) { setIsNarrow(false); return; }
     const el = cardRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     setIsNarrow(el.getBoundingClientRect().width < 120);
@@ -161,7 +176,7 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [uniform]);
 
   const courseCode = section.courseCode    ?? section.course_code    ?? '';
   const secNum     = section.sectionNumber ?? section.section_number ?? '';
@@ -297,6 +312,11 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
       /* NEW-FU-200 (Phase 79): zoom-invariant meeting duration (minutes) read by
          useFitCard to split green (long) vs red (short) large near-square cards. */
       data-dur-min={durMin}
+      /* NEW-FU-221 (Phase 95): publish whether this card wants UNIFORM typography
+         (Readable mode OR Instructor/Venue views) so useFitCard runs the base, uniform
+         fit (s=1, frozen --sb-code-px) and the CSS pins fixed font sizes. Decoupled from
+         the layout viewMode — Instructor/Venue use the overview layout + uniform type. */
+      data-uniform-type={uniform ? '1' : '0'}
       {...listeners}
       {...attributes}
     >
@@ -311,9 +331,11 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
           transform:scale() applied to .sblock-fit never distorts them. They are
           absolutely positioned in the corners (CSS) and sized from --sb-code-px /
           --sb-chrome-px published by useFitCard. */}
+      {/* NEW-FU-498 (Phase 122): per-type badge colors — Lec=blue, Lab=amber,
+          Prj=violet, Ths=green. badgeText is the uppercased type (LEC/LAB/PRJ/THS). */}
       <span className="sblock-type-badge" style={{
-        background: secType === 'Lab' ? '#fde68a' : '#dbeafe',
-        color:      secType === 'Lab' ? '#78350f' : '#1e3a8a',
+        background: secType === 'Lab' ? '#fde68a' : secType === 'Prj' ? '#ddd6fe' : secType === 'Ths' ? '#d1fae5' : '#dbeafe',
+        color:      secType === 'Lab' ? '#78350f' : secType === 'Prj' ? '#5b21b6' : secType === 'Ths' ? '#065f46' : '#1e3a8a',
       }}>{badgeText}</span>
       {/* NEW-FU-272: per-day quick-delete (✕). Removes ONLY this meeting row,
           leaving the rest of the section group intact. Disabled on archived

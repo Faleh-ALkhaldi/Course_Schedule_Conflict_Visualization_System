@@ -39,8 +39,14 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
   // not per-term, so this UI guard is the only thing that prevents the
   // confusing "I'm adding to an archived term, why does it show up
   // everywhere else?" experience.
-  const isArchived = Boolean(schedule?.archived_at);
-  const lockedTitle = 'Term is archived — unarchive to make changes.';
+  // NEW-FU-482 (Phase 116): lock on EITHER archived OR finalized — the backend refuses
+  // writes in both (assertSchedulerEditableLocked), so every mutating control here must be
+  // disabled up front in both states, not only when archived.
+  const isFinalized = schedule?.status === 'Finalized';
+  const isArchived  = Boolean(schedule?.archived_at) || isFinalized;
+  const lockedTitle = isFinalized
+    ? 'Term is finalized — unlock it first (Save button → Unlock) to make changes.'
+    : 'Term is archived — unarchive to make changes.';
 
   const [collapsed, setCollapsed] = useState(false);
   const [openForm, setOpenForm] = useState(null); // 'section'|'instructor'|'venue'|'course'
@@ -134,12 +140,23 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
     }
   }, [filterId, view]);
 
+  // NEW-FU-496 (Phase 120): office hours are 08:00–16:00. clampOH keeps the
+  // inputs inside the window (runtime prevention); handleAddOH checks the window
+  // FIRST (priority + named) then ordering, so the secretary is never left guessing.
+  const OH_MIN = '08:00', OH_MAX = '16:00';
+  const clampOH = v => !v ? v : (v < OH_MIN ? OH_MIN : v > OH_MAX ? OH_MAX : v);
+  const ohOutOfWindow = t => t && (t < OH_MIN || t > OH_MAX);
+
   async function handleAddOH(e) {
     e.preventDefault();
     if (!filterId) return;
-    // H-9: client-side time-order guard
+    // NEW-FU-496 (Phase 120): window check first (names 8:00 AM–4:00 PM), then order.
+    if (ohOutOfWindow(ohForm.startTime) || ohOutOfWindow(ohForm.endTime)) {
+      setFormError('Office hours can only be between 8:00 AM and 4:00 PM.');
+      return;
+    }
     if (ohForm.endTime <= ohForm.startTime) {
-      setFormError('End time must be after start time.');
+      setFormError('End time must be after start time (office hours are 8:00 AM–4:00 PM).');
       return;
     }
     setBusy(true); setFormError('');
@@ -234,8 +251,12 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
         {collapsed ? '›' : '‹'}
       </button>
 
+      {/* NEW-FU-418 (Phase 103 item 5): the scrolling content lives in an inner
+          wrapper so the collapse handle (a direct child of .sp-root, which no
+          longer scrolls) stays pinned to the panel's visible vertical centre at
+          every scroll position. */}
       {!collapsed && (
-      <>
+      <div className="sp-scroll">
 
       {/* ── Conflict summary ─────────────────────────────────────────────── */}
       <div className="sp-section">
@@ -287,7 +308,9 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   title="Click to expand"
                 >
                   <div className="sp-conflict-header">
-                    <span className="sp-conflict-rule">{conflict.ruleId}</span>
+                    {/* NEW-FU-472 (Phase 113): no raw rule code (e.g. "R-04") on screen —
+                        the severity tag + the plain description below convey the clash.
+                        The non-technical secretary never needs the internal code. */}
                     <span className="sp-conflict-severity">{conflict.severity}</span>
                     {hasFixes && !isExpanded && (
                       <span className="sp-conflict-fix-hint" title="Quick fixes available">
@@ -347,6 +370,27 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
           <p className="sp-no-conflict">✓ No conflicts</p>
         )}
       </div>
+
+      {/* NEW-FU-433 (Phase 106 item 5): advisory — how many real instructors/
+          venues to add to replace the "dummy" placeholders Suggest/Quick Fix
+          created so the schedule can run for real. Shown in every view. */}
+      {schedule && (() => {
+        const dI = (instructors ?? []).filter(i => i.is_dummy).length;
+        const dV = (venues ?? []).filter(v => v.is_dummy).length;
+        if (!dI && !dV) return null;
+        const parts = [];
+        if (dI) parts.push(`${dI} instructor${dI > 1 ? 's' : ''}`);
+        if (dV) parts.push(`${dV} venue${dV > 1 ? 's' : ''}`);
+        return (
+          <div className="sp-dummy-advisory" role="status">
+            <span className="sp-dummy-advisory-icon" aria-hidden="true">🧩</span>
+            <div className="sp-dummy-advisory-text">
+              <strong>To implement this schedule for real, add {parts.join(' and ')}.</strong>
+              <span> These swap out the “dummy” placeholders Suggest added — creating a real instructor or venue replaces one automatically.</span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Sections (Course View) ───────────────────────────────────────── */}
       {view === VIEWS.COURSE && (
@@ -474,7 +518,11 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
           )}
 
           <ul className="sp-list">
-            {instructors.map(instr => (
+            {/* NEW-FU-420 (Phase 104 item 6): always render alphabetically,
+                case-insensitively — a newly-added instructor is appended to
+                state, so sorting at render keeps the list ordered without a
+                re-fetch. */}
+            {[...instructors].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })).map(instr => (
               <li key={instr.id}>
                 <button
                   className={`sp-filter-item ${filterId===instr.id?'selected':''}`}
@@ -486,8 +534,12 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   title={`${instr.name}${instr.email ? ` · ${instr.email}` : ''}`}
                   onClick={()=>selectFilter(instr.id)}
                 >
-                  <span className="sp-avatar">{instr.name.split(' ').pop()[0]}</span>
+                  {/* NEW-FU-421 (Phase 104 item 7): avatar = FIRST name's initial
+                      (was .pop() → last name). */}
+                  <span className={`sp-avatar${instr.is_dummy ? ' sp-avatar-dummy' : ''}`}>{((instr.name || '').trim().split(/\s+/)[0] || '?').charAt(0)}</span>
                   <FilterName>{instr.name}</FilterName>
+                  {/* NEW-FU-425 (Phase 104 item 2): clearly label placeholder instructors. */}
+                  {instr.is_dummy && <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real instructor to replace it">dummy</span>}
                   {filterId===instr.id && <span className="sp-check">✓</span>}
                 </button>
                 <button className="sp-del-btn"
@@ -529,10 +581,10 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                     {DAYS.map(d=><option key={d} value={d}>{d}</option>)}
                   </select>
                   <div style={{display:'flex',gap:6}}>
-                    <input type="time" value={ohForm.startTime}
-                      onChange={e=>setOhForm(f=>({...f,startTime:e.target.value}))} required />
-                    <input type="time" value={ohForm.endTime}
-                      onChange={e=>setOhForm(f=>({...f,endTime:e.target.value}))} required />
+                    <input type="time" min={OH_MIN} max={OH_MAX} value={ohForm.startTime}
+                      onChange={e=>setOhForm(f=>({...f,startTime:clampOH(e.target.value)}))} required />
+                    <input type="time" min={OH_MIN} max={OH_MAX} value={ohForm.endTime}
+                      onChange={e=>setOhForm(f=>({...f,endTime:clampOH(e.target.value)}))} required />
                   </div>
                   {formError && <div className="sp-form-error">{formError}</div>}
                   <div className="sp-form-actions">
@@ -617,7 +669,10 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                      : 'HALL'}
                   </span>
                   <FilterName role="venue">{v.name}</FilterName>
-                  <span className="sp-venue-cap">cap.{v.capacity}</span>
+                  {/* NEW-FU-425 (Phase 104 item 2): clearly label placeholder venues. */}
+                  {v.is_dummy
+                    ? <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real venue to replace it">dummy</span>
+                    : <span className="sp-venue-cap">cap.{v.capacity}</span>}
                   {filterId===v.id && <span className="sp-check">✓</span>}
                 </button>
                 <button className="sp-del-btn"
@@ -701,7 +756,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
         </div>
       </div>
 
-      </> /* end !collapsed */
+      </div> /* end .sp-scroll (!collapsed) */
       )}
     </aside>
   );

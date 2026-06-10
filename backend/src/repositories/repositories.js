@@ -147,18 +147,27 @@ class VenueRepository {
   async findAll(termCode = null) {
     if (termCode) {
       const res = await query(
-        `SELECT DISTINCT v.id, v.name, v.type, v.capacity, v.created_at
+        `SELECT DISTINCT v.id, v.name, v.type, v.capacity, v.is_dummy, v.created_at,
+                (SUBSTRING(v.name FROM '^[0-9]+'))::int          AS sort_bldg,
+                (SUBSTRING(v.name FROM '^[0-9]+-([0-9]+)'))::int AS sort_room
          FROM venues v
          JOIN sections s   ON s.venue_id   = v.id
          JOIN schedules sc ON sc.id        = s.schedule_id
          WHERE sc.semester = $1
-         ORDER BY v.name`,
+         -- NEW-FU-462 (Phase 110): order by building number then room number,
+         -- NUMERICALLY (so "7-220" sorts before "22-119", rooms ascend within a
+         -- building). SELECT DISTINCT requires the sort keys in the SELECT list, so
+         -- they ride along as harmless sort_bldg/sort_room columns the frontend ignores.
+         ORDER BY sort_bldg NULLS LAST, sort_room NULLS LAST, v.name`,
         [termCode]
       );
       return res.rows;
     }
     const res = await query(
-      `SELECT id, name, type, capacity, created_at FROM venues ORDER BY name`
+      `SELECT id, name, type, capacity, is_dummy, created_at FROM venues WHERE is_dummy = false
+       -- NEW-FU-462 (Phase 110): numeric building-then-room order (see findAll term-scoped).
+       ORDER BY (SUBSTRING(name FROM '^[0-9]+'))::int NULLS LAST,
+                (SUBSTRING(name FROM '^[0-9]+-([0-9]+)'))::int NULLS LAST, name`
     );
     return res.rows;
   }

@@ -1,0 +1,77 @@
+/* NEW-FU-223 (Phase 96): styling for the generic DecisionModal. Builds on the
+   shared .modal-* classes from SoftConflictModal.css and adds the plain-language
+   bullet list + the multi-tone action buttons the Suggest flow needs. */
+
+.decision-card {
+  max-width: 560px;
+}
+
+/* Plain-language conflict list — neutral (not the amber "warning row" look of
+   SoftConflictModal's list, since here the bullets explain a situation rather
+   than flag rows to fix). */
+.decision-bullets {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  background: var(--slate-50);
+  border: 1px solid var(--slate-200);
+  border-radius: 8px;
+  max-height: 230px;
+  overflow-y: auto;
+}
+.decision-bullet {
+  position: relative;
+  padding-left: 18px;
+  font-size: .84rem;
+  color: var(--slate-700);
+  line-height: 1.45;
+}
+.decision-bullet::before {
+  content: '•';
+  position: absolute;
+  left: 4px;
+  color: var(--slate-400);
+  font-weight: 700;
+}
+
+/* Action row: the new flow can show 2–3 buttons whose labels are full phrases
+   ("Adjust automatically — fewest changes"). Let them wrap and, when wrapped,
+   stretch full-width so the choice stays tap-friendly and never clips. */
+.decision-actions {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.decision-btn {
+  flex: 1 1 auto;
+  min-width: 150px;
+  white-space: normal;
+  line-height: 1.25;
+}
+
+/* Tones ------------------------------------------------------------------- */
+/* primary = the recommended, safe path (teal — matches the app accent). */
+.decision-btn.primary {
+  background: var(--teal-500, #0d9488);
+  color: #fff;
+  border-color: var(--teal-500, #0d9488);
+}
+.decision-btn.primary:hover { background: var(--teal-600, #0f766e); }
+
+/* danger = the user is choosing to keep a plan that WILL have conflicts. */
+.decision-btn.danger {
+  background: #fff;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+.decision-btn.danger:hover { background: #fef2f2; }
+
+/* neutral = back out / cancel. Reuses the shared .cancel palette. */
+.decision-btn.neutral {
+  background: var(--slate-100);
+  color: var(--slate-600);
+  border-color: var(--slate-200);
+}
+.decision-btn.neutral:hover { background: var(--slate-200); }

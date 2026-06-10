@@ -47,9 +47,19 @@ const pool = new Pool({
   user:     process.env.DB_USER     || 'scheduler_user',
   password: process.env.DB_PASSWORD || '',
   ssl:      resolveSslConfig(),
-  max:      20,          // max connections in pool
+  // NEW-FU-380 (Phase 99 item 5): pool resilience under heavy Suggest load.
+  // The Auto-Suggest greedy is CPU-heavy and the modal fired a recommend on
+  // every change; under that load the old `connectionTimeoutMillis: 2000` made
+  // any query that waited >2 s for a slot throw "Connection terminated due to
+  // connection timeout" — the reported "Suggest breaks suddenly". A wider pool
+  // plus a longer acquire deadline gives genuine queries (incl. the full-catalog
+  // fetch that feeds the Graduate tier) the headroom to wait out a transient
+  // spike instead of hard-failing. The deeper fix (fast/cancelable live
+  // recommend + event-loop yielding in the greedy) removes the pressure itself;
+  // this is the safety margin.
+  max:      30,          // max connections in pool
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 10000,
 });
 
 pool.on('error', (err) => {

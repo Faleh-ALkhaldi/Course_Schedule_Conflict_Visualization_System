@@ -932,7 +932,7 @@ class ScheduleService {
       result.add(new Conflict({
         id: null, scheduleId,
         ruleId: 'R-14', severity: 'Soft',
-        description: `${courseCode ?? 'A course'} is configured with lab+lecture (has_lab=true) but is missing a ${missing} section. Add at least one ${missing} section, or unset "has lab" on the course.`,
+        description: `${courseCode ?? 'A course'} is set up to have both lectures and labs, but it's missing a ${missing} section. Add at least one ${missing} section, or change the course so it no longer includes a lab.`,
         sectionAId: anySec.id, sectionBId: null,
       }));
     }

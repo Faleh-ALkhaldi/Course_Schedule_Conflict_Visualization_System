@@ -20,7 +20,9 @@ import OfficeHourModal  from '../components/modals/OfficeHourModal.jsx';
 import ExportModal      from '../components/modals/ExportModal.jsx';
 import GroupChangeModal from '../components/modals/GroupChangeModal.jsx';
 import SuggestModal     from '../components/modals/SuggestModal.jsx';
+import DecisionModal    from '../components/modals/DecisionModal.jsx';
 import QuickFixModal    from '../components/modals/QuickFixModal.jsx';
+import { conflictTypesPlain } from '../utils/conflictText.js';
 import './SchedulerPage.css';
 
 const DEPT_ID  = import.meta.env.VITE_DEPT_ID  || 'SWE-DEPT';
@@ -70,14 +72,48 @@ export default function SchedulerPage() {
           loadReference, loadView, saveSchedule, moveSection,
           // NEW-FU-283 (Phase 56): `venues` added so the audit effect
           // below can walk the loaded list.
-          sections, courses, venues, error, dispatch } = useApp();
+          sections, courses, venues, instructors, error, dispatch, unfinalizeSchedule, doLogout } = useApp();
+
+  // NEW-FU-482 (Phase 116): a term is locked (read-only) when archived OR finalized — the
+  // backend refuses writes in both. Gate every mutating entry point up front so a finalized
+  // term can't be edited then rejected after the fact.
+  const scheduleLocked = Boolean(schedule?.archived_at) || schedule?.status === 'Finalized';
+
+  // NEW-FU-480 (Phase 115): how many real instructors / venues still need registering —
+  // each placeholder ("dummy") gets auto-replaced by one real entity. Shown in the header.
+  const dummyInstrCount = (instructors || []).filter(i => i.is_dummy).length;
+  const dummyVenueCount = (venues || []).filter(v => v.is_dummy).length;
 
   const [showSoftModal, setShowSoftModal] = useState(false);
   const [toast,         setToast]         = useState(null);
   const [sectionModal,  setSectionModal]  = useState(null);
   const [ohModal,       setOhModal]       = useState(null);
   const [showExport,    setShowExport]    = useState(false);
+  // NEW-FU-228 (Phase 97): which tab the Schedule-Data modal opens on — the
+  // top-bar Export button → 'export', the new Import button → 'import'.
+  const [exportInitialTab, setExportInitialTab] = useState('export');
   const [showSuggest,   setShowSuggest]   = useState(false);
+  // NEW-FU-391 (Phase 100): blocking "applying…" overlay shown ONLY during the
+  // Suggest compute phases (preview / relaxation / apply+reload) — NOT while a
+  // decision dialog is open. It tells the user the run is working and prevents
+  // them from interacting (or giving up and refreshing) mid-apply. `withSuggestBusy`
+  // wraps each heavy await so the overlay brackets exactly the compute, leaving
+  // the decision modals interactive.
+  const [suggestBusy, setSuggestBusy] = useState(null); // null | { message }
+  async function withSuggestBusy(message, fn) {
+    setSuggestBusy({ message });
+    try { return await fn(); }
+    finally { setSuggestBusy(null); }
+  }
+  // NEW-FU-223 (Phase 96): in-app decision dialog. The Suggest flow used to
+  // drive its "your picks conflict — what now?" decisions through a chain of
+  // native window.confirm()/alert() calls (ugly, OK/Cancel-only, R-code-laden).
+  // `decision` holds the current dialog spec (incl. its resolve fn); askDecision
+  // lets the async flow `await` a user choice inline; DecisionModal renders it.
+  const [decision, setDecision] = useState(null);
+  function askDecision(spec) {
+    return new Promise(resolve => setDecision({ ...spec, resolve }));
+  }
   // NEW-FU-319 (Phase 29): Quick Fix preview modal. Opened from the
   // SidePanel's "Quick Fix conflicts" button when conflicts.length > 0.
   // The modal fetches the plan internally and applies the selected ops;
@@ -86,6 +122,15 @@ export default function SchedulerPage() {
   const [showQuickFix,  setShowQuickFix]  = useState(false);
   const [groupChangeModal, setGroupChangeModal] = useState(null); // { sec, newDay, newStartTime, duration }
   const [activeDrag,    setActiveDrag]    = useState(null); // { type:'section'|'course', id }
+  // NEW-FU-217 (Phase 91): schedule-grid VIEW MODE. 'overview' = the default
+  // fit-to-viewport view (whole week visible, dense cards shrink); 'readable' = fixed
+  // legible card sizing that scrolls. Lifted here (the common ancestor of the header
+  // toggle and <ScheduleGrid>) and persisted so the user's choice sticks across loads.
+  const [viewMode, setViewMode] = useState(() => {
+    try { return localStorage.getItem('sg-view-mode') === 'readable' ? 'readable' : 'overview'; }
+    catch { return 'overview'; }
+  });
+  useEffect(() => { try { localStorage.setItem('sg-view-mode', viewMode); } catch { /* ignore */ } }, [viewMode]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
@@ -224,7 +269,15 @@ export default function SchedulerPage() {
     // NEW-FU-286 (Phase 57): suffix expanded from [A-Z] to [A-Z0-9] so
     // legitimate digit-divided rooms like "24-240-1" / "42-114-2" no
     // longer trigger false-positive audit warnings.
-    const NAME_RE = /^\d{2}-(\d{3}(-[A-Z0-9])?|\d{4})$/;
+    // NEW-FU-222 (Phase 96): broadened to stop flagging the rest of the REAL
+    // KFUPM venue forms that fired this warning on every refresh — they are
+    // valid registrar designations, not data-entry mistakes:
+    //   • single-digit building numbers          → "7-220"
+    //   • letter suffix written WITHOUT a dash    → "24-236A"
+    //   • named special rooms (auditorium)        → "42-AUD"
+    // The audit still catches genuinely malformed names (3+-digit buildings,
+    // free-text junk), so legitimate-mistake detection is preserved.
+    const NAME_RE = /^\d{1,2}-(\d{3}(-?[A-Z0-9])?|\d{4}|AUD)$/;
     const bad = venues.filter(v => !NAME_RE.test(v.name || ''));
     if (bad.length === 0) return;
     const sample = bad.slice(0, 3).map(v => `"${v.name}"`).join(', ');
@@ -278,7 +331,7 @@ export default function SchedulerPage() {
     // useDraggable is already disabled by SectionBlock / DraggableCourse
     // when archived, so this should be unreachable — but if someone routes
     // a drag through some other path, the handler refuses to mutate.
-    if (schedule?.archived_at) return;
+    if (scheduleLocked) return;
 
     // Only act on drops over grid cells (id format: "Day|minutes")
     const overId = String(over.id);
@@ -296,7 +349,19 @@ export default function SchedulerPage() {
         const duration   = timeToMin(origEnd) - timeToMin(origStart);
         if (day === sec.day && startTime === origStart.substring(0,5)) return;
 
-        const origGroup = DAY_GROUPS[sec.day] ?? 'single';
+        // NEW-FU-371 (Phase 98 item 2): a LAB is single-day by definition
+        // (sectionPattern.LAB_RULE = 50/75/165 min on exactly ONE day). The
+        // day-GROUP machinery (MW / STT) exists only for multi-day LECTURE
+        // groups; routing a lab through it expands the move to the target
+        // group's 3 days, which the backend pattern validator then rejects
+        // ("Lab must be on a single day") — and, before the createSection fix,
+        // first tripped the false "section number must be 01–49" error. So a
+        // lab is treated as 'single' here: a cross-group lab drag becomes a
+        // clean single-day move (the moveSection path below) onto the dropped
+        // day, which is exactly what "move the lab to Sunday" should do.
+        // Lecture group moves are unaffected.
+        const draggedType = sec.sectionType ?? sec.section_type;
+        const origGroup = draggedType === 'Lab' ? 'single' : (DAY_GROUPS[sec.day] ?? 'single');
         const newGroup  = DAY_GROUPS[day]     ?? 'single';
 
         // If dropped onto a different day group → show confirmation first
@@ -336,6 +401,30 @@ export default function SchedulerPage() {
             `Day change ignored — a section of this group already exists on ${day}. Time updated only.`,
             'warn',
           );
+        }
+
+        // NEW-FU-494 (Phase 119 item 4): R-06 window guard on drag-drop.
+        // Prevents dragging a section outside its teaching window at the frontend
+        // so the user gets an instant toast instead of a backend 400 that
+        // would leave the grid in an unresolved conflict state.
+        // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00. Capstone is
+        // bound to the UG window (venue-exempt but NOT time-exempt); external exempt.
+        // NEW-FU-497 (Phase 121): SWE 412 is exempt from the R-06 window (evening capstone).
+        if (!sec.isExternal && sec.courseCode !== 'SWE 412') {
+          const dragEnd   = fromMinutes(timeToMin(startTime) + duration);
+          const sMin      = timeToMin(startTime);
+          const eMin      = timeToMin(dragEnd);
+          const isGR      = sec.category === 'GR';
+          const isCap     = sec.isCapstone;
+          const winStart  = isCap ? 7*60 : isGR ? 17*60 + 20 : 7*60;
+          const winEnd    = isCap ? 17*60 + 10 : isGR ? 22*60 : 17*60 + 10;
+          if (sMin < winStart || eMin > winEnd) {
+            const lbl = isCap ? '07:00–17:10 (Capstone)'
+                      : isGR  ? '17:20–22:00 (Graduate)'
+                               : '07:00–17:10 (Undergraduate)';
+            showToast(`Cannot move here — ${sec.courseCode ?? 'section'} must run within ${lbl}.`, 'error');
+            return;
+          }
         }
 
         await moveSection(sec.id, {
@@ -403,6 +492,13 @@ export default function SchedulerPage() {
         instructorId:  sec.instructorId  ?? sec.instructor_id,
         venueId:       sec.venueId       ?? sec.venue_id,
         sectionNumber: sec.sectionNumber ?? sec.section_number,
+        // NEW-FU-371 (Phase 98 item 2): forward the section TYPE so a
+        // cross-day-group move of a Lab section (§50–§99) re-creates as a Lab,
+        // not a Lec. Without this the backend used to default to 'Lec' and
+        // reject the §50 number with "must be in 01–49". Mirrors the payload
+        // SectionModal already sends; the backend now also derives type from
+        // the number as a second line of defence.
+        sectionType:   sec.sectionType   ?? sec.section_type,
         days:          newDays,
         day:           newDays[0],
         startTime:     newStartTime,
@@ -444,9 +540,45 @@ export default function SchedulerPage() {
     } catch { showToast('Save failed.', 'error'); }
   }
 
-  // ── Export ─────────────────────────────────────────────────────────────────
+  // NEW-FU-467 (Phase 112): un-finalize ("Unlock") parity with Save — the user
+  // gets the same bottom-of-screen confirmation Save shows, so the action is
+  // acknowledged the same way (Unlock previously changed state silently).
+  async function handleUnlock() {
+    try {
+      await unfinalizeSchedule();
+      showToast('🔓 Schedule unlocked — you can edit it again.', 'success');
+    } catch (err) {
+      showToast(err.response?.data?.error || 'Could not unlock the schedule.', 'error');
+    }
+  }
+
+  // NEW-FU-476 (Phase 114): confirm before logging out. The power button next to the
+  // username used to end the session on a single accidental click. Uses the app's own
+  // styled dialog (DecisionModal via askDecision), never the OS window.confirm().
+  async function handleLogout() {
+    const choice = await askDecision({
+      icon: '⏻',
+      title: 'Log out of SchedulerSWE?',
+      lead: "You'll need to sign in again to view or change schedules.",
+      options: [
+        { label: 'Yes, log out', value: 'yes', tone: 'danger' },
+        { label: 'Cancel',       value: 'cancel', tone: 'neutral' },
+      ],
+      dismissValue: 'cancel',
+    });
+    if (choice === 'yes') doLogout();
+  }
+
+  // ── Export / Import ──────────────────────────────────────────────────────
   function handleExport() {
     if (!schedule) return;
+    setExportInitialTab('export');
+    setShowExport(true);
+  }
+  // NEW-FU-228 (Phase 97): open the same Schedule-Data modal straight on Import.
+  function handleImport() {
+    if (!schedule) return;
+    setExportInitialTab('import');
     setShowExport(true);
   }
 
@@ -500,8 +632,8 @@ export default function SchedulerPage() {
   }
 
   function handleBlockClick(section) {
-    // NEW-FU-207: no-op on archived view. The banner already explains why.
-    if (schedule?.archived_at) return;
+    // NEW-FU-207/482: no-op on archived OR finalized view (read-only).
+    if (scheduleLocked) return;
     setSectionModal({ mode: 'edit', initial: { section } });
   }
 
@@ -514,7 +646,7 @@ export default function SchedulerPage() {
   // After success we reload the view so the deleted block (and any new
   // R-15 conflict on the surviving group) appear.
   async function handleSectionDelete(section, scope) {
-    if (!schedule || schedule.archived_at) return;
+    if (!schedule || scheduleLocked) return;
     const courseCode = section.courseCode ?? section.course_code ?? '';
     const secNum     = section.sectionNumber ?? section.section_number ?? '';
     const day        = section.day ?? '';
@@ -553,9 +685,9 @@ export default function SchedulerPage() {
     // Always reload after any modal action (add/edit/delete may affect siblings)
     if (schedule) loadView(schedule.id, view, filterId);
   }
-  function handleOpenAdd()            { setSectionModal({ mode: 'add',  initial: {} }); }
+  function handleOpenAdd()            { if (scheduleLocked) return; setSectionModal({ mode: 'add',  initial: {} }); }
   function handleSuggest() {
-    if (!schedule) return;
+    if (!schedule || scheduleLocked) return;
     setShowSuggest(true);
   }
   // NEW-FU-319 (Phase 29): open Quick Fix preview modal. The SidePanel
@@ -574,128 +706,255 @@ export default function SchedulerPage() {
   // the backend takes the legacy "apply to all" path). When non-null,
   // the backend wipes + regenerates ONLY those courses, preserving
   // existing sections of unchecked courses.
-  async function runSuggest(courseConfigs, applyToCourseIds, maxConflictsPerSection) {
+  async function runSuggest(courseConfigs, applyToCourseIds /* legacy 3rd arg removed */) {
     setShowSuggest(false);
     showToast('⏳ Calculating best schedule…', 'info');
+    // NEW-FU-223 (Phase 96): the Suggest flow is now CLEAN-FIRST. We never ask
+    // the user up-front "how many conflicts will you tolerate" — no sane
+    // scheduler WANTS conflicts. Instead we always try to honour their exact
+    // picks with ZERO conflicts; only if that's impossible do we explain the
+    // clashes in plain language and let them choose: adjust automatically
+    // (fewest changes) or keep their picks (with conflicts, after a warning).
+    // Placement tolerance is therefore fixed to 'any' (force-place the chosen
+    // OR relaxed configs); the real decision lives in the dialog, not a knob.
+    const TOL = 'any';
     try {
       const { suggestSchedule } = await import('../api/index.js');
-      // NEW-FU-361 (Phase 35): preview first. The backend runs the
-      // greedy without writing and returns residualConflictRuleIds.
-      // If non-empty we ask the user to confirm before persisting.
-      const preview = await suggestSchedule(
-        schedule.id, courseConfigs, applyToCourseIds,
-        maxConflictsPerSection, { previewOnly: true }
-      );
+
+      // Ask the backend's relax passes for a conflict-free plan that changes
+      // the FEWEST of the user's selections. Returns { proceed, configs }.
+      // Owns its own last-resort (drop courses) and dead-end dialogs/toasts.
+      // NEW-FU-432 (Phase 106 item 1): build the "drop N sections" bullets/count
+      // from a guaranteed hitting-set last-resort plan. Label order: term catalog
+      // (code+name) → backend code(+name) → safe label — NEVER a raw id (FU-424).
+      function dropPlanInfo(lrp) {
+        const courseList = (typeof courses !== 'undefined' && courses) || [];
+        const backendMeta = {};
+        (lrp.droppedSections ?? []).forEach(d => {
+          if (d.courseId && (d.courseCode || d.courseName)) backendMeta[d.courseId] = { code: d.courseCode, name: d.courseName };
+        });
+        const labelOf = id => {
+          const c = courseList.find(x => x.id === id);
+          if (c) return `${c.course_code}${c.name ? ' — ' + c.name : ''}`;
+          const m = backendMeta[id];
+          if (m && m.code) return `${m.code}${m.name ? ' — ' + m.name : ''}`;
+          return 'a course';
+        };
+        const count = lrp.droppedCount ?? (lrp.droppedSections?.length ?? (lrp.droppedCourseIds?.length ?? 0));
+        const fully = lrp.fullyDroppedCourseIds ?? [];
+        const tally = {};
+        (lrp.droppedSections ?? (lrp.droppedCourseIds ?? []).map(id => ({ courseId: id })))
+          .forEach(d => { tally[d.courseId] = (tally[d.courseId] || 0) + 1; });
+        const bullets = Object.entries(tally).map(([id, n]) =>
+          `${labelOf(id)} — ${fully.includes(id) ? 'removed' : `${n} section${n > 1 ? 's' : ''} dropped`}`);
+        return { count, bullets };
+      }
+
+      async function autoAdjust() {
+        showToast('⏳ Looking for a conflict-free arrangement…', 'info');
+        // NEW-FU-432 (Phase 106 item 1): the planner no longer silently decides
+        // between dropping and inventing placeholders. We dry-run BOTH directions
+        // and, when both are viable (a capacity shortage), let the USER pick:
+        //   Pass 1 — real resources only → if it must drop, that's the DROP plan.
+        //   Pass 2 — with placeholders   → the KEEP-ALL plan.
+        // Pass 1: real resources only (no placeholders).
+        const real = await withSuggestBusy('Finding a conflict-free arrangement…', () => suggestSchedule(
+          schedule.id, courseConfigs, applyToCourseIds, TOL, { relaxIfConflicts: true, allowDummyResources: false }
+        ));
+        if (real.feasible !== false) {
+          // Solvable with REAL resources — no drops, no placeholders, no choice.
+          if (real.relaxed) {
+            const n = (real.downsized ?? []).length;
+            const adjNote = n ? ` (reduced ${n} course${n > 1 ? 's' : ''} to fit)` : '';
+            showToast(`✓ Conflict-free plan found${adjNote} — applying.`, 'success');
+            return { proceed: true, configs: real.relaxedConfigs, allowDummy: false };
+          }
+          showToast('✓ Conflict-free plan found — applying.', 'success');
+          return { proceed: true, configs: courseConfigs, allowDummy: false };
+        }
+        // Real resources can't fit everything — capture the minimal DROP plan.
+        const lrp = real.lastResortPlan;
+        const hasDrop = lrp && (lrp.residualConflicts ?? 0) === 0;
+        // Pass 2: would PLACEHOLDERS keep every section? (capacity-bound test)
+        const withDummy = await withSuggestBusy('Checking a placeholder option…', () => suggestSchedule(
+          schedule.id, courseConfigs, applyToCourseIds, TOL, { relaxIfConflicts: true, allowDummyResources: true }
+        ));
+        const dummyWorks = withDummy.feasible !== false;
+        const nDI = (withDummy.dummyInstructors ?? []).length;
+        const nDV = (withDummy.dummyVenues ?? []).length;
+        const addParts = [];
+        if (nDI) addParts.push(`${nDI} instructor${nDI > 1 ? 's' : ''}`);
+        if (nDV) addParts.push(`${nDV} venue${nDV > 1 ? 's' : ''}`);
+        const addText = addParts.join(' and ') || 'placeholders';
+        const dummyConfigs = withDummy.relaxed ? withDummy.relaxedConfigs : courseConfigs;
+
+        // BOTH directions viable → the user chooses (Phase 106 item 1).
+        if (hasDrop && dummyWorks) {
+          const { count, bullets } = dropPlanInfo(lrp);
+          const choice = await askDecision({
+            icon: '🧩',
+            title: 'Not enough real instructors/venues for every section',
+            lead: 'Every section can stay conflict-free — you choose how:',
+            bullets: [
+              `Keep all courses — add ${addText} as clearly-labeled "dummy" placeholders (this term only)`,
+              `Keep everything real — drop ${count} section${count > 1 ? 's' : ''}: ${bullets.join('; ')}`,
+            ],
+            question: 'Which direction would you like?',
+            options: [
+              { label: `Keep all — add ${addText}`, value: 'placeholders', tone: 'primary' },
+              { label: `Keep real — drop ${count} section${count > 1 ? 's' : ''}`, value: 'drop', tone: 'danger' },
+              { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+            ],
+            dismissValue: 'cancel',
+          });
+          if (choice === 'cancel') { showToast('Suggest cancelled — no changes applied.', 'info'); return { proceed: false }; }
+          if (choice === 'placeholders') {
+            showToast(`✓ Keeping all sections with ${addText} — applying.`, 'success');
+            return { proceed: true, configs: dummyConfigs, allowDummy: true };
+          }
+          showToast(`✓ Conflict-free plan applied (dropped ${count} section${count > 1 ? 's' : ''}).`, 'success');
+          return { proceed: true, configs: lrp.keptConfigs, allowDummy: false };
+        }
+
+        // Only placeholders can save it (no viable drop plan) — advise + apply.
+        if (dummyWorks) {
+          await askDecision({
+            icon: 'ℹ️',
+            title: 'Kept every section using placeholders',
+            lead: `To fit all sections conflict-free, the planner added ${addText} as clearly-labeled "dummy" placeholders (only in this term). To run this schedule for real, add:`,
+            bullets: addParts,
+            options: [{ label: 'Apply with placeholders', value: 'ok', tone: 'primary' }],
+            dismissValue: 'ok',
+          });
+          showToast('✓ Conflict-free plan found — applying.', 'success');
+          return { proceed: true, configs: dummyConfigs, allowDummy: true };
+        }
+
+        // Only dropping works — even placeholders can't fix it (the clash is in
+        // the timing, not capacity). Existing drop dialog.
+        if (hasDrop) {
+          const { count, bullets } = dropPlanInfo(lrp);
+          const ok = await askDecision({
+            icon: '⚠️',
+            title: 'A few sections must be dropped to stay conflict-free',
+            lead: `Not every section fits, and no added instructor/venue can fix it (the clash is in the timing). The conflict-free plan drops ${count} section${count > 1 ? 's' : ''}:`,
+            bullets,
+            question: `Drop ${count} section${count > 1 ? 's' : ''} and apply the conflict-free plan?`,
+            options: [
+              { label: `Drop ${count} & apply`, value: 'drop', tone: 'primary' },
+              { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+            ],
+            dismissValue: 'cancel',
+          });
+          if (ok === 'drop') {
+            showToast(`✓ Conflict-free plan applied (dropped ${count} section${count > 1 ? 's' : ''}).`, 'success');
+            return { proceed: true, configs: lrp.keptConfigs, allowDummy: false };
+          }
+          showToast('Suggest cancelled — no changes applied.', 'info');
+          return { proceed: false };
+        }
+
+        // Genuine dead end.
+        await askDecision({
+          icon: '🚫',
+          title: 'No conflict-free plan is possible',
+          lead: 'These selections can’t be arranged without conflicts, even after trying alternative days, durations, and added placeholders. Try lowering some section counts or removing a course, then run Suggest again.',
+          options: [{ label: 'OK', value: 'ok', tone: 'neutral' }],
+          dismissValue: 'ok',
+        });
+        showToast('Suggest aborted — no conflict-free plan available.', 'error');
+        return { proceed: false };
+      }
+
+      // ── Clean-first preview ─────────────────────────────────────────────
+      // Dry-run the greedy (no write) to see whether the user's exact picks
+      // place with zero conflicts.
+      let applyAllowDummy = false; // NEW-FU-425: set when the auto-fix used placeholders
+      const preview = await withSuggestBusy('Checking your selections…', () => suggestSchedule(
+        schedule.id, courseConfigs, applyToCourseIds, TOL, { previewOnly: true }
+      ));
       const conflictRules = preview.residualConflictRuleIds ?? [];
       let effectiveConfigs = courseConfigs;
+
       if (conflictRules.length > 0) {
-        // NEW-FU-363 (Phase 35): three-way decision when the chosen config
-        // would create conflicts. Default = let Suggest find an alternative;
-        // override = apply with conflicts; abort = cancel. We sequence two
-        // window.confirm calls so the dialog stays native + a11y-friendly
-        // without dragging in a new modal component.
-        const tryRelax = window.confirm(
-          `Your choices would create ${conflictRules.length} conflict type(s) ` +
-          `(${conflictRules.join(', ')}).\n\n` +
-          `OK   = let Suggest try alternative duration / day-pattern combos.\n` +
-          `Cancel = decide what to do next.`
-        );
-        if (tryRelax) {
-          showToast('⏳ Searching for a conflict-free alternative…', 'info');
-          // suggestSchedule returns the relaxed preview when relaxIfConflicts
-          // is on. Phase 36 contract: response is EITHER a zero-conflict
-          // plan with `feasible: true`, OR `feasible: false` with
-          // `suggestedRemovals` — we MUST NOT persist anything in the
-          // latter case.
-          const relaxed = await suggestSchedule(
-            schedule.id, courseConfigs, applyToCourseIds,
-            maxConflictsPerSection, { relaxIfConflicts: true }
-          );
-          let lastResortAccepted = false;
-          if (relaxed.feasible === false) {
-            // NEW-FU-398 (Phase 39): if the backend's Pass E computed a
-            // last-resort plan (drop N courses and the rest fits
-            // cleanly), offer it as an opt-in confirm BEFORE aborting.
-            const lrp = relaxed.lastResortPlan;
-            if (lrp && (lrp.residualConflicts ?? 0) === 0) {
-              const courseList = (typeof courses !== 'undefined' && courses) || [];
-              const droppedLabels = lrp.droppedCourseIds.map(id => {
-                const c = courseList.find(x => x.id === id);
-                return c ? `${c.course_code} (${c.name ?? ''})`.trim() : id;
-              });
-              const ok = window.confirm(
-                `No conflict-free plan exists with all courses included.\n\n` +
-                `${relaxed.reason ?? ''}\n\n` +
-                `Last-resort plan available:\n` +
-                `  • Drop ${lrp.droppedCourseIds.length} course(s):\n      ${droppedLabels.join('\n      ')}\n` +
-                `  • Remaining ${lrp.keptConfigs.length} course(s) fit with 0 conflicts.\n\n` +
-                `OK = drop those courses and apply the conflict-free plan.\n` +
-                `Cancel = abort and keep the current schedule.`
-              );
-              if (ok) {
-                effectiveConfigs = lrp.keptConfigs;
-                lastResortAccepted = true;
-                const dropped = lrp.droppedCourseIds.length;
-                showToast(`✓ Applying last-resort plan (dropped ${dropped} course(s) to clear conflicts).`, 'success');
-              } else {
-                showToast('Suggest aborted — no changes applied.', 'info');
-                return;
-              }
-            } else {
-              // No last-resort plan available either — true dead end.
-              const removals = (relaxed.suggestedRemovals ?? [])
-                .map(r => r.courseId).join(', ');
-              const msg =
-                `No conflict-free plan exists for the chosen courses.\n\n` +
-                (relaxed.reason ?? '') +
-                (removals ? `\n\nCourses to consider removing:\n  ${removals}` : '') +
-                `\n\nOK = abort and keep current schedule.\n` +
-                `(Use the SuggestModal to adjust which courses are included.)`;
-              window.alert(msg);
-              showToast('Suggest aborted — no conflict-free plan available.', 'error');
-              return;
-            }
-          }
-          if (!lastResortAccepted) {
-            if ((relaxed.residualConflicts ?? 0) === 0 && relaxed.relaxed) {
-              effectiveConfigs = relaxed.relaxedConfigs;
-              const downsizedNote = (relaxed.downsized ?? []).length
-                ? ` (down-sized ${relaxed.downsized.length} course(s) to fit)`
-                : '';
-              showToast(`✓ Found a conflict-free alternative${downsizedNote} — applying.`, 'success');
-            } else if ((relaxed.residualConflicts ?? 0) === 0) {
-              showToast('✓ Conflict-free on retry — applying.', 'success');
-            } else {
-              window.alert(
-                `Suggest could not find a conflict-free plan ` +
-                `(best had ${relaxed.residualConflicts} residual conflicts). ` +
-                `No changes applied.`
-              );
-              showToast('Suggest aborted — no conflict-free plan.', 'error');
-              return;
-            }
-          }
-        } else {
-          const applyAsIs = window.confirm(
-            `Apply the original plan WITH ${conflictRules.length} conflict type(s)?\n\n` +
-            `OK   = apply as-is, conflicts will appear in the schedule.\n` +
-            `Cancel = abort, no changes.`
-          );
-          if (!applyAsIs) {
+        // Their exact picks would clash. Explain in plain language and offer
+        // the two real choices.
+        const choice = await askDecision({
+          icon: '⚠️',
+          title: 'Your selections can’t be scheduled without conflicts',
+          lead: 'Placing every course exactly as you set it would create these clashes:',
+          bullets: conflictTypesPlain(conflictRules),
+          question: 'How would you like to proceed?',
+          options: [
+            { label: 'Adjust for me — keep my picks, change the fewest needed', value: 'adjust', tone: 'primary' },
+            { label: 'Keep my exact selections', value: 'keep', tone: 'danger' },
+            { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+          ],
+          dismissValue: 'cancel',
+        });
+
+        if (choice === 'cancel') {
+          showToast('Suggest cancelled — no changes applied.', 'info');
+          return;
+        }
+
+        if (choice === 'keep') {
+          // Confirm they accept conflicts. If they back out, fall through to
+          // auto-adjust (the conflict-free path) rather than aborting —
+          // per the Phase-96 decision tree.
+          const sure = await askDecision({
+            icon: '⚠️',
+            title: 'This plan will contain conflicts',
+            lead: 'Keeping your exact selections saves the schedule with these unresolved clashes:',
+            bullets: conflictTypesPlain(conflictRules),
+            question: 'Apply your selections anyway?',
+            options: [
+              { label: 'Apply anyway — keep the conflicts', value: 'apply', tone: 'danger' },
+              { label: 'No — adjust it for me instead', value: 'adjust', tone: 'primary' },
+              { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+            ],
+            dismissValue: 'cancel',
+          });
+          if (sure === 'cancel') {
             showToast('Suggest cancelled — no changes applied.', 'info');
             return;
           }
+          if (sure === 'adjust') {
+            const adj = await autoAdjust();
+            if (!adj.proceed) return;
+            effectiveConfigs = adj.configs;
+            applyAllowDummy = adj.allowDummy === true;
+          }
+          // sure === 'apply' → keep effectiveConfigs = courseConfigs; the
+          // apply below force-places it and the conflicts surface in the grid.
+        } else {
+          // choice === 'adjust'
+          const adj = await autoAdjust();
+          if (!adj.proceed) return;
+          effectiveConfigs = adj.configs;
+          applyAllowDummy = adj.allowDummy === true; // NEW-FU-432: honor the chosen direction on apply
         }
       }
-      const result = await suggestSchedule(schedule.id, effectiveConfigs, applyToCourseIds, maxConflictsPerSection);
-      dispatch({ type:'SET_CONFLICTS', conflicts: result.conflicts ?? [] });
-      // NEW-FU-56: defensive — the Suggest button is now disabled in
-      // teacher/venue without a filter, but if the user somehow reaches
-      // this code path with that state, skip the post-run loadView to
-      // avoid an FU-47 400 toast that would mask the actual success.
-      if (!((view === VIEWS.TEACHER || view === VIEWS.VENUE) && !filterId)) {
-        await loadView(schedule.id, view, filterId);
-      }
+
+      // ── Apply ───────────────────────────────────────────────────────────
+      // A clean/relaxed effectiveConfigs places without conflicts; the kept
+      // (force-place) path surfaces the conflicts the user accepted.
+      // NEW-FU-391 (Phase 100): the apply WRITE and the post-apply grid reload
+      // run inside ONE busy span, so the "Applying…" overlay stays up until the
+      // new schedule is actually on screen. The reload is awaited (not fire-and-
+      // forget), which — now that the relaxation is bounded and the backend is no
+      // longer exhausted — makes the grid update in place with NO browser refresh.
+      const result = await withSuggestBusy('Applying the suggested schedule…', async () => {
+        const r = await suggestSchedule(schedule.id, effectiveConfigs, applyToCourseIds, TOL, { allowDummyResources: applyAllowDummy });
+        dispatch({ type:'SET_CONFLICTS', conflicts: r.conflicts ?? [] });
+        // NEW-FU-56: defensive — the Suggest button is disabled in teacher/venue
+        // without a filter; if we somehow reach here in that state, skip the
+        // reload to avoid an FU-47 400 toast that would mask the actual success.
+        if (!((view === VIEWS.TEACHER || view === VIEWS.VENUE) && !filterId)) {
+          await loadView(schedule.id, view, filterId);
+        }
+        return r;
+      });
       const hard   = (result.conflicts??[]).filter(c=>c.severity==='Hard').length;
       const soft   = (result.conflicts??[]).filter(c=>c.severity==='Soft').length;
       // NEW-L8: surface forced placements so operators know the suggester
@@ -720,7 +979,16 @@ export default function SchedulerPage() {
         showToast(`⚠ Skipped: ${head}${tail}. Add instructors / venues or lower section counts, then re-run Suggest.`, 'warn');
       }
     } catch(err) {
-      showToast('Suggest failed: ' + (err.response?.data?.error ?? err.message), 'error');
+      // NEW-FU-484 (Phase 118): sanitize the raw error before displaying —
+      // strip internal field-path strings (e.g. "courseConfig.sections")
+      // that leak implementation details to the user. Replace them with
+      // plain-language equivalents.
+      const rawErr = err.response?.data?.error ?? err.message ?? 'Unknown error';
+      const cleanErr = rawErr
+        .replace(/\bcourseConfig\.sections\b/g, 'section count')
+        .replace(/\bcourseConfig\.[a-zA-Z.]+\b/g, 'course setting')
+        .replace(/\breq\.body\.[a-zA-Z.]+\b/g, 'input field');
+      showToast('Suggest failed: ' + cleanErr, 'error');
     }
   }
   // NEW-M18: clear previous timer when a new toast arrives so rapid toasts
@@ -754,7 +1022,7 @@ export default function SchedulerPage() {
       onDragCancel={handleDragCancel}
     >
       <div className="scheduler-root">
-        <TopBar onSave={handleSave} onSuggest={handleSuggest} onExport={handleExport} onSwitchTerm={handleSwitchTerm} />
+        <TopBar onSave={handleSave} onSuggest={handleSuggest} onExport={handleExport} onImport={handleImport} onSwitchTerm={handleSwitchTerm} onUnlock={handleUnlock} onLogout={handleLogout} />
 
         <div className="scheduler-body">
           <SidePanel showToast={showToast} onAddSection={handleOpenAdd} onEditSection={sec => sec && setSectionModal({ mode:'edit', initial:{ section: sec } })} onQuickFix={handleQuickFix} />
@@ -773,6 +1041,17 @@ export default function SchedulerPage() {
                 </span>
               </div>
             )}
+            {/* NEW-FU-482 (Phase 116): finalized terms are read-only too — make it legible
+                up front (the controls are disabled) instead of only after a rejected click. */}
+            {!schedule?.archived_at && schedule?.status === 'Finalized' && (
+              <div className="scheduler-archived-banner" role="status" aria-live="polite">
+                <span className="scheduler-archived-icon" aria-hidden="true">🔒</span>
+                <span className="scheduler-archived-msg">
+                  This term is <strong>finalized</strong> and is read-only.
+                  Click <strong>Unlock</strong> in the top bar to make changes.
+                </span>
+              </div>
+            )}
             <div className="view-label">
               {/* NEW-FU-70: decouple label from filterId. The prior code
                   showed "Course View" any time filterId was null, even
@@ -787,16 +1066,63 @@ export default function SchedulerPage() {
               {(view === VIEWS.TEACHER || view === VIEWS.VENUE) && !filterId && (
                 <span className="view-hint"> — select a{view === VIEWS.TEACHER ? 'n instructor' : ' venue'} from the sidebar</span>
               )}
+              {/* NEW-FU-480 (Phase 115): tell the secretary how many real instructors/venues
+                  to register — placeholders ("dummies") still stand in for missing ones. */}
+              {view === VIEWS.COURSE && (dummyInstrCount > 0 || dummyVenueCount > 0) && (
+                <span className="view-dummy-advisory" role="status"
+                  style={{ marginLeft: 14, fontSize: '.78rem', fontWeight: 600, color: '#b45309',
+                    background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: '3px 10px' }}>
+                  🧩 To finalize this schedule, add{dummyInstrCount > 0 ? ` ${dummyInstrCount} more instructor${dummyInstrCount === 1 ? '' : 's'}` : ''}{dummyInstrCount > 0 && dummyVenueCount > 0 ? ' and' : ''}{dummyVenueCount > 0 ? ` ${dummyVenueCount} more venue${dummyVenueCount === 1 ? '' : 's'}` : ''}.
+                </span>
+              )}
+              {/* NEW-FU-483 (Phase 117): hint text adapts to lock state — dragging and editing are
+                  both disabled on finalized/archived terms, so the hint must not suggest them. */}
               <span className="view-hint" style={{ marginLeft:'auto', fontSize:'.73rem' }}>
-                Click a block to edit · Drag a course card to add a section
+                {scheduleLocked
+                  ? 'This term is read-only'
+                  : 'Click a block to edit · Drag a course card to add a section'}
               </span>
+              {/* NEW-FU-217 (Phase 91): Overview / Readable view-mode toggle. Overview
+                  fits the whole week in the window (dense cards shrink); Readable keeps
+                  every card legible and scrolls. Segmented control — the active mode is
+                  highlighted; click the other to switch.
+                  NEW-FU-221 (Phase 95): shown ONLY in Course View. Instructor & Venue
+                  views never have overlapping cards (an instructor/venue can't hold two
+                  classes at once), so Readable mode is meaningless there — the toggle is
+                  hidden and those views always use the overview layout (forced below). */}
+              {view === VIEWS.COURSE && (
+                <div className="sg-view-toggle" role="group" aria-label="Schedule view mode">
+                  <button
+                    type="button"
+                    className={`sg-vt-btn${viewMode === 'overview' ? ' active' : ''}`}
+                    aria-pressed={viewMode === 'overview'}
+                    title="Fit the whole week in the window (dense cards shrink)"
+                    onClick={() => setViewMode('overview')}
+                  >Overview mode</button>
+                  <button
+                    type="button"
+                    className={`sg-vt-btn${viewMode === 'readable' ? ' active' : ''}`}
+                    aria-pressed={viewMode === 'readable'}
+                    title="Keep every card legible — scroll to see the whole week"
+                    onClick={() => setViewMode('readable')}
+                  >Readable mode</button>
+                </div>
+              )}
             </div>
 
             <div className="grid-scroll-container" data-export-target="schedule-grid">
+              {/* NEW-FU-221 (Phase 95): Course View honours the persisted Overview/Readable
+                  choice; Instructor & Venue views always force the overview LAYOUT (no
+                  overlaps there → Readable is meaningless, and its persisted value must not
+                  leak in). uniformType drives UNIFORM TYPOGRAPHY (same duration ⇒ identical
+                  fonts) for Instructor/Venue regardless of layout — the Phase-95 decoupling
+                  of uniform fonts from the readable layout. */}
               <ScheduleGrid
                 onBlockClick={handleBlockClick}
                 onOHClick={handleOHClick}
                 onSectionDelete={handleSectionDelete}
+                viewMode={view === VIEWS.COURSE ? viewMode : 'overview'}
+                uniformType={view !== VIEWS.COURSE}
               />
             </div>
           </main>
@@ -850,6 +1176,52 @@ export default function SchedulerPage() {
         />
       )}
 
+      {/* NEW-FU-223 (Phase 96): in-app decision dialog for the clean-first
+          Suggest flow. Driven imperatively via askDecision — onChoose /
+          onDismiss clear the dialog and resolve the awaiting promise. */}
+      {decision && (
+        <DecisionModal
+          icon={decision.icon}
+          title={decision.title}
+          lead={decision.lead}
+          bullets={decision.bullets}
+          question={decision.question}
+          options={decision.options}
+          onChoose={(value) => { const r = decision.resolve; setDecision(null); r?.(value); }}
+          onDismiss={() => { const r = decision.resolve; setDecision(null); r?.(decision.dismissValue ?? 'cancel'); }}
+        />
+      )}
+
+      {/* NEW-FU-391 (Phase 100): blocking "applying…" overlay shown during the
+          Suggest compute phases (preview / relaxation / apply + grid reload).
+          It signals progress and prevents the user from interacting or giving
+          up and refreshing mid-apply. Never overlaps a decision dialog —
+          withSuggestBusy brackets only the compute, not askDecision. */}
+      {suggestBusy && (
+        <div role="status" aria-live="polite" style={{
+          position: 'fixed', inset: 0, zIndex: 4000,
+          background: 'rgba(15,31,61,0.45)', backdropFilter: 'blur(1.5px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <style>{`@keyframes suggest-busy-spin { to { transform: rotate(360deg); } }`}</style>
+          <div style={{
+            background: '#fff', borderRadius: 14, padding: '26px 34px', minWidth: 260,
+            boxShadow: '0 12px 40px rgba(0,0,0,0.25)',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
+          }}>
+            <div style={{
+              width: 34, height: 34, borderRadius: '50%',
+              border: '3px solid #d6dff0', borderTopColor: '#0d9488',
+              animation: 'suggest-busy-spin 0.8s linear infinite',
+            }} />
+            <div style={{ fontWeight: 600, color: '#0F1F3D', fontSize: 14.5, textAlign: 'center' }}>
+              {suggestBusy.message}
+            </div>
+            <div style={{ fontSize: 12, color: '#64748b' }}>Please wait — don’t refresh.</div>
+          </div>
+        </div>
+      )}
+
       {/* NEW-FU-319 (Phase 29): Quick Fix preview modal. Fetches a plan
           of remediation ops, lets the user opt out of any, then applies
           the selected subset atomically. On apply we reload the view so
@@ -881,6 +1253,7 @@ export default function SchedulerPage() {
             onExportImage={doExportImage}
             onClose={() => setShowExport(false)}
             showToast={showToast}
+            initialTab={exportInitialTab}
           />
         )}
 

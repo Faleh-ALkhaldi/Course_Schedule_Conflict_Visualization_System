@@ -45,6 +45,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../../context/AppContext.jsx';
+import * as api from '../../api/index.js';
 import './SectionModal.css';
 
 // True iff `s` is the string for an integer in [lo, hi].
@@ -91,11 +92,67 @@ export function buildVenueName({ building, room, section }) {
   // not just A–Z. Letter-divided sub-rooms (`24-101-A`) and number-
   // divided sub-rooms (`24-231-1`) both appear in the registrar data.
   if (sec) {
-    if (!/^[A-Z0-9]$/.test(sec))              return { name: preview, valid: false, reason: 'Section suffix must be a single character: A–Z or 0–9.' };
+    if (!/^[A-Z1-9]$/.test(sec))              return { name: preview, valid: false, reason: 'Sub-room suffix must be a single character A–Z or 1–9 (0 is not a valid sub-room).' };
     if (rm.length !== 3)                      return { name: preview, valid: false, reason: 'Section suffix is only allowed with 3-digit rooms (XX-YYY-Z).' };
   }
 
   return { name: preview, valid: true, reason: '' };
+}
+
+// NEW-FU-483 (Phase 117): parse a venue name into canonical integer parts.
+// Leading-zero padding on building and room is irrelevant ("002" ≡ "2" ≡ "0002").
+// Suffix "0" is NOT a valid sub-room suffix (blocked at input time in Phase 114),
+// so no special treatment needed here.
+function parseVenueParts(name) {
+  const parts = String(name || '').trim().split('-');
+  const bldg   = parseInt(parts[0], 10);
+  const room   = parseInt(parts[1], 10);
+  const suffix = (parts[2] || '').toUpperCase();
+  return { bldg, room, suffix };
+}
+
+// NEW-FU-483 (Phase 117): whole-room vs sub-room identity rule. A room may exist as
+// the whole room (no suffix) OR as one-or-more named sub-rooms (with suffixes) — never
+// both. Format variants ("01-002" vs "01-0002") still count as the same building+room.
+//
+// Rules for any given building+room:
+//   • Adding a whole room (no suffix):
+//       – blocked if a whole room entry already exists (any format)
+//       – blocked if sub-room entries already exist
+//   • Adding a sub-room (has suffix):
+//       – blocked if the whole room already exists
+//       – blocked if the same suffix already exists
+//       – allowed when only other suffixes exist (e.g. adding -2 when -1 already exists)
+//   • Nothing yet for that building+room → allow anything
+//
+// existingVenues may be an array of venue objects (with .name) or bare name strings.
+// Returns a plain-English error message, or null when the add is allowed.
+export function venueConflictError(newName, existingVenues) {
+  const { bldg: nb, room: nr, suffix: ns } = parseVenueParts(newName);
+  if (isNaN(nb) || isNaN(nr)) return null; // malformed — let the name validator catch it
+
+  const sameRoom = (existingVenues || []).filter(v => {
+    const { bldg, room } = parseVenueParts(v.name ?? v);
+    return bldg === nb && room === nr;
+  });
+
+  if (sameRoom.length === 0) return null; // nothing registered yet — allow
+
+  if (!ns) {
+    // Attempting to add the whole room (no suffix)
+    const hasWhole = sameRoom.some(v => !parseVenueParts(v.name ?? v).suffix);
+    if (hasWhole) return 'This room is already registered. Pick a different room number.';
+    return 'Sub-rooms of this room already exist. The whole room cannot be added alongside its sub-rooms — choose a different room or add another sub-room suffix.';
+  } else {
+    // Attempting to add a sub-room (has suffix)
+    const wholeExists = sameRoom.some(v => !parseVenueParts(v.name ?? v).suffix);
+    if (wholeExists)
+      return 'The whole room is already registered. Sub-rooms cannot be added once the whole room exists — remove it first, or pick a different room number.';
+    const sameSuffix = sameRoom.some(v => parseVenueParts(v.name ?? v).suffix === ns);
+    if (sameSuffix)
+      return 'A sub-room with this suffix already exists. Choose a different suffix.';
+    return null; // different suffix, no whole room — allowed
+  }
 }
 
 // `onCreated` (optional): if provided, the new venue object is passed
@@ -104,13 +161,27 @@ export function buildVenueName({ building, room, section }) {
 // SidePanel doesn't pass it — the new entry just appears in the
 // sidebar list via the ADD_VENUE reducer action.
 export default function AddVenueModal({ onClose, showToast, onCreated }) {
-  const { addVenue } = useApp();
+  const { addVenue, venues } = useApp();
 
   useEffect(() => {
     function onKeyDown(e) { if (e.key === 'Escape') onClose(); }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
+
+  // NEW-FU-483 (Phase 117): fetch ALL venues (no term filter) once on mount so the
+  // duplicate check below can see venues that have zero section references in the
+  // current term. The context `venues` list only contains venues that are actively
+  // used (VenueRepository.findAll(termCode) JOINs sections), so unreferenced venues
+  // like 01-002 are invisible to it — but they must still block conflicting adds.
+  // We fall back to the context list if the fetch fails (backend is always the
+  // authoritative guard anyway, so a stale client-side check is just UX polish).
+  const [allVenues, setAllVenues] = useState([]);
+  useEffect(() => {
+    api.getVenues()                          // no term → all non-dummy venues
+      .then(data => setAllVenues(Array.isArray(data) ? data : []))
+      .catch(() => setAllVenues([]));        // silently fall back to context list
+  }, []);                                    // run once on modal open
 
   const [building, setBuilding] = useState('');
   const [room,     setRoom]     = useState('');
@@ -123,10 +194,28 @@ export default function AddVenueModal({ onClose, showToast, onCreated }) {
   const verdict = useMemo(() => buildVenueName({ building, room, section }),
     [building, room, section]);
 
-  const capacityNum = parseInt(capacity, 10);
-  const capacityValid = Number.isInteger(capacityNum) && capacityNum >= 1 && capacityNum <= 10000;
+  // NEW-FU-483 (Phase 117): whole-room vs sub-room rule replaces the old canonical-key check.
+  // venueConflictError() handles format variants, whole-room blocking, sub-room coexistence.
+  //
+  // Use allVenues (the full DB list fetched on mount) so unreferenced venues — those with
+  // zero section refs in the current term — are visible to the check. Fall back to the
+  // term-scoped context list if allVenues hasn't loaded yet (empty array = no items
+  // returned from the fetch yet); this only delays the error by one render cycle but the
+  // backend will catch it on submit regardless.
+  const dupVenueError = useMemo(() => {
+    if (!verdict.valid) return null;
+    const checkList = allVenues.length > 0 ? allVenues : (venues || []);
+    return venueConflictError(verdict.name, checkList);
+  }, [verdict, venues, allVenues]);
 
-  const canSubmit = verdict.valid && capacityValid && !busy;
+  const capacityNum = parseInt(capacity, 10);
+  // NEW-FU-225 (Phase 97): cap lowered 10000 → 250. 10,000 seats is absurd for
+  // a KFUPM classroom; 250 comfortably covers the largest real KFUPM lecture
+  // hall / auditorium while rejecting nonsense entries. Mirrored in the backend
+  // venue validators (controllers/index.js create + update).
+  const capacityValid = Number.isInteger(capacityNum) && capacityNum >= 1 && capacityNum <= 250;
+
+  const canSubmit = verdict.valid && capacityValid && !dupVenueError && !busy;
 
   // Chip-pill helper, same visual contract as AddCourseModal.
   function Chip({ active, onClick, children, style, disabled }) {
@@ -149,7 +238,12 @@ export default function AddVenueModal({ onClose, showToast, onCreated }) {
         type,
         capacity: capacityNum,
       });
-      showToast(`✓ Venue ${venue.name} added.`, 'success');
+      // NEW-FU-434 (Phase 106 item 6): note when this real venue auto-replaced a placeholder.
+      showToast(
+        venue.replacedDummy
+          ? `✓ Venue ${venue.name} added — replaced placeholder ${venue.replacedDummy.name}.`
+          : `✓ Venue ${venue.name} added.`,
+        'success');
       if (onCreated) onCreated(venue);
       onClose();
     } catch (err) {
@@ -194,7 +288,7 @@ export default function AddVenueModal({ onClose, showToast, onCreated }) {
               <input placeholder="A or 1" maxLength={1}
                 value={section}
                 onChange={e => setSection(
-                  e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0,1)
+                  e.target.value.toUpperCase().replace(/[^A-Z1-9]/g, '').slice(0,1)
                 )}
                 aria-label="Section suffix (optional)" />
             </div>
@@ -204,6 +298,11 @@ export default function AddVenueModal({ onClose, showToast, onCreated }) {
             {!verdict.valid && (building || room || section) && (
               <div className="sm-group-badge" style={{ color: 'var(--red-500, #dc2626)' }}>
                 {verdict.reason}
+              </div>
+            )}
+            {verdict.valid && dupVenueError && (
+              <div className="sm-group-badge" style={{ color: 'var(--red-500, #dc2626)' }}>
+                {dupVenueError}
               </div>
             )}
           </div>
@@ -235,23 +334,20 @@ export default function AddVenueModal({ onClose, showToast, onCreated }) {
           <div className="sm-field">
             <label htmlFor="avm-capacity">
               Capacity
-              <span className="sm-optional"> &nbsp;1–10000 seats</span>
+              <span className="sm-optional"> &nbsp;1–250 seats</span>
             </label>
-            <input id="avm-capacity" type="number" min="1" max="10000"
+            <input id="avm-capacity" type="number" min="1" max="250"
               value={capacity}
               onChange={e => setCapacity(e.target.value)} />
             {!capacityValid && capacity !== '' && (
               <div className="sm-group-badge" style={{ color: 'var(--red-500, #dc2626)' }}>
-                Capacity must be an integer between 1 and 10000.
+                Capacity must be an integer between 1 and 250.
               </div>
             )}
           </div>
-
-          <div className="sm-info-box">
-            Use the same building / room numbers shown on the
-            <strong> KFUPM Registrar </strong> course-offerings page so
-            cross-referencing remains unambiguous.
-          </div>
+          {/* NEW-FU-226 (Phase 97): the "Use the same building / room numbers as
+              the KFUPM Registrar" note was removed — redundant with the format
+              hint at the top of the form ("format: XX-YYY, XX-YYY-Z, or XX-YYYY"). */}
 
           {error && <div className="sm-error">{error}</div>}
 

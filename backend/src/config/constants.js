@@ -15,14 +15,41 @@ const LEVEL_NAMES = Object.fromEntries(
 
 // ── Course categories ─────────────────────────────────────────────────────────
 const COURSE_CATEGORY = {
-  UG: 'UG',   // Undergraduate – allowed 07:00–17:00
-  GR: 'GR',   // Graduate      – allowed 17:00–22:00
+  UG: 'UG',   // Undergraduate – allowed 07:00–17:10
+  GR: 'GR',   // Graduate      – allowed 17:20–22:00
 };
 
 // ── Time allocation windows (minutes from midnight) ──────────────────────────
+// NEW-FU-495 (Phase 120): authoritative teaching windows.
+//   Undergraduate : 07:00 – 17:10   (latest end 17:10)
+//   Graduate      : 17:20 – 22:00   (earliest start 17:20)
+// There is an intentional 10-minute gap (17:10 → 17:20) between the UG day and
+// the GR evening — DO NOT collapse it. Capstone courses are venue-exempt but
+// NOT time-exempt: every capstone is an Undergraduate Senior course, so it is
+// bound to the UG window (07:00–17:10) via R-06 (see R06Rule — no capstone
+// early-return anymore). External courses have no section row → fully exempt.
 const TIME_WINDOWS = {
-  UG: { start:  7 * 60, end: 17 * 60 },  // 07:00 – 17:00
-  GR: { start: 17 * 60, end: 22 * 60 },  // 17:00 – 22:00
+  UG: { start:  7 * 60,      end: 17 * 60 + 10 },  // 07:00 – 17:10
+  GR: { start: 17 * 60 + 20, end: 22 * 60 },       // 17:20 – 22:00
+};
+
+// NEW-FU-497 (Phase 121): per-course R-06 time-window exemption.
+// SWE 412 (Software Engineering Project II) legitimately meets in the evening
+// (registrar: Tue 17:20–20:00) — it's the one capstone the registrar schedules
+// outside the UG day. Per the registrar-faithfulness audit, SWE 412 ONLY is
+// exempt from the R-06 teaching-window check (it still needs a venue and shows
+// on the grid). All other capstones (SWE 413/414) stay bound to 07:00–17:10.
+const R06_TIME_EXEMPT_COURSES = new Set(['SWE 412']);
+
+// ── Office-hours allowed window ──────────────────────────────────────────────
+// NEW-FU-466 (Phase 112): office hours may ONLY be held 08:00–16:00 (8 AM–4 PM).
+// Enforced at EVERY input (Add-Instructor panel, Edit-Office-Hours modal, Import)
+// AND at the API (addOfficeHour / updateOfficeHour) so an out-of-window block can
+// never be saved. This is the root-cause fix for the R-04 storm: a wide early
+// block (e.g. 04:00) used to overlap an instructor's whole morning of sections.
+const OFFICE_HOURS_WINDOW = {
+  startStr: '08:00', endStr: '16:00',
+  start: 8 * 60, end: 16 * 60,
 };
 
 // ── Conflict severity ─────────────────────────────────────────────────────────
@@ -89,9 +116,13 @@ const VENUE_TYPE = {
 // has_lab gates whether Lab is a legal choice for a given course's sections.
 // Lab-only courses are NOT allowed by the spec — a course is either
 // lecture-only or has-both-lecture-and-lab.
+// NEW-FU-498 (Phase 122): Prj (Project) and Ths (Thesis) join Lec/Lab —
+// the registrar's PRJ/THS activities (capstone projects, thesis courses).
 const SECTION_TYPE = {
   LEC: 'Lec',
   LAB: 'Lab',
+  PRJ: 'Prj',
+  THS: 'Ths',
 };
 
 // ── Section-number ranges (NEW-FU-106) ────────────────────────────────────────
@@ -102,6 +133,10 @@ const SECTION_TYPE = {
 const SECTION_NUMBER_RANGE = {
   Lec: { min: 1,  max: 49, regex: /^(0[1-9]|[1-4][0-9])$/ },
   Lab: { min: 50, max: 99, regex: /^[5-9][0-9]$/ },
+  // NEW-FU-498 (Phase 122): Prj/Ths share the Lec 01–49 range (matches the
+  // registrar, e.g. SWE 412-01, SWE 413-01/02, SWE 494-01).
+  Prj: { min: 1,  max: 49, regex: /^(0[1-9]|[1-4][0-9])$/ },
+  Ths: { min: 1,  max: 49, regex: /^(0[1-9]|[1-4][0-9])$/ },
 };
 
 // ── Section duration limits (NEW-FU-106) ──────────────────────────────────────
@@ -114,6 +149,12 @@ const SECTION_NUMBER_RANGE = {
 const SECTION_DURATION = {
   Lec: { min: 50, max: 75,  defaults: [50, 75] },
   Lab: { min: 50, max: 165, defaults: [50, 75, 165] },
+  // NEW-FU-498 (Phase 122): Project/Thesis meet in long single blocks (or, for
+  // thesis, often no fixed meeting at all — the duration check is skipped when
+  // no time is set). 50–180 covers the registrar's PRJ spread (75-min SWE 413,
+  // 100-min SWE 414, 160-min SWE 412).
+  Prj: { min: 50, max: 180, defaults: [75, 100, 160] },
+  Ths: { min: 50, max: 180, defaults: [75, 100, 160] },
 };
 
 // ── Days of week (as stored in DB) ───────────────────────────────────────────
@@ -124,6 +165,8 @@ module.exports = {
   LEVEL_NAMES,
   COURSE_CATEGORY,
   TIME_WINDOWS,
+  R06_TIME_EXEMPT_COURSES, // NEW-FU-497 (Phase 121)
+  OFFICE_HOURS_WINDOW,    // NEW-FU-466 (Phase 112)
   SEVERITY,
   RULE_IDS,
   SCHEDULE_STATUS,

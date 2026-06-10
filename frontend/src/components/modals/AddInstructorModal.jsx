@@ -22,6 +22,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../../context/AppContext.jsx';
+import { getSuggestedOfficeHour } from '../../api/index.js';
 import './SectionModal.css';
 
 // Derive a kfupm.edu.sa email from a free-form full name.
@@ -77,6 +78,17 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
   const [busy, setBusy]   = useState(false);
   const [error, setError] = useState('');
 
+  // NEW-FU-461 (Phase 109): capture office hours up front (pre-filled with a sensible
+  // default) so the new instructor is never flagged for having none. Days Sun–Thu;
+  // the real office-hours window is roughly 08:00–14:00.
+  const OH_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
+  const [oh, setOh] = useState({ day: 'Sunday', startTime: '10:00', endTime: '11:00' });
+  useEffect(() => {
+    getSuggestedOfficeHour()
+      .then(d => setOh({ day: d.day, startTime: (d.startTime || '10:00').slice(0, 5), endTime: (d.endTime || '11:00').slice(0, 5) }))
+      .catch(() => {});
+  }, []);
+
   const derivedEmail = useMemo(() => deriveEmail(name), [name]);
   const displayedEmail = emailTouched ? email : derivedEmail;
 
@@ -98,7 +110,18 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
   const trimmedName  = name.trim();
   const trimmedEmail = (emailTouched ? email : derivedEmail).trim();
   const emailLooksValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail);
-  const canSubmit = trimmedName.length > 0 && emailLooksValid && !busy;
+  // NEW-FU-466 (Phase 112): office hours may only be 08:00–16:00 (8 AM–4 PM) —
+  // the same window the editor and backend enforce. Out-of-window blocks Add.
+  // NEW-FU-496 (Phase 120): check BOTH endpoints against BOTH edges (so a start
+  // AFTER 16:00 is caught, not just start<08:00 / end>16:00), and clamp the time
+  // inputs so an out-of-window value can't be entered at all (runtime prevention).
+  const OH_MIN = '08:00', OH_MAX = '16:00';
+  const clampOH = v => !v ? v : (v < OH_MIN ? OH_MIN : v > OH_MAX ? OH_MAX : v);
+  const ohWindowOk = oh.startTime >= OH_MIN && oh.startTime <= OH_MAX &&
+                     oh.endTime   >= OH_MIN && oh.endTime   <= OH_MAX;
+  const ohOrderOk  = oh.startTime < oh.endTime;
+  const ohValid = !!oh.day && !!oh.startTime && !!oh.endTime && ohWindowOk && ohOrderOk;
+  const canSubmit = trimmedName.length > 0 && emailLooksValid && ohValid && !busy;
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -108,8 +131,14 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
       const instructor = await addInstructor({
         name:  trimmedName,
         email: trimmedEmail,
+        officeHours: { day: oh.day, startTime: oh.startTime, endTime: oh.endTime },
       });
-      showToast(`✓ Instructor ${instructor.name} added.`, 'success');
+      // NEW-FU-434 (Phase 106 item 6): note when this real instructor auto-replaced a placeholder.
+      showToast(
+        instructor.replacedDummy
+          ? `✓ ${instructor.name} added — replaced placeholder ${instructor.replacedDummy.name}.`
+          : `✓ Instructor ${instructor.name} added.`,
+        'success');
       if (onCreated) onCreated(instructor);
       onClose();
     } catch (err) {
@@ -150,6 +179,30 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
                 Will save as <strong>{derivedEmail}</strong>
               </div>
             )}
+          </div>
+
+          {/* NEW-FU-461 (Phase 109): office hours — pre-filled + required, so a new
+              instructor never shows a "no office hours" flag once assigned to a course. */}
+          <div className="sm-field">
+            <label>Office hours <span className="sm-optional">&nbsp;when students can drop by</span></label>
+            <div className="sm-row">
+              <select value={oh.day} onChange={e => setOh(o => ({ ...o, day: e.target.value }))} aria-label="Office hours day">
+                {OH_DAYS.map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <input type="time" min={OH_MIN} max={OH_MAX} value={oh.startTime}
+                onChange={e => setOh(o => ({ ...o, startTime: clampOH(e.target.value) }))} aria-label="Office hours start time" />
+              <input type="time" min={OH_MIN} max={OH_MAX} value={oh.endTime}
+                onChange={e => setOh(o => ({ ...o, endTime: clampOH(e.target.value) }))} aria-label="Office hours end time" />
+            </div>
+            {/* NEW-FU-496 (Phase 120): the window message takes priority and is
+                always named — an ordering-only error still tells the user the
+                acceptable 8:00 AM–4:00 PM window, so they're never left guessing. */}
+            {!ohValid
+              ? <p className="sm-inline-error" role="alert"><span>{
+                  (!oh.day || !oh.startTime || !oh.endTime) ? 'Pick a day, a start time and an end time.'
+                  : !ohWindowOk ? 'Office hours can only be between 8:00 AM and 4:00 PM.'
+                  : 'Start time must be before the end time (office hours are 8:00 AM–4:00 PM).'}</span></p>
+              : <p className="sm-hint">Pre-filled from the usual pattern — adjust if you like (8:00 AM–4:00 PM). You can add more later.</p>}
           </div>
 
           {error && <div className="sm-error">{error}</div>}

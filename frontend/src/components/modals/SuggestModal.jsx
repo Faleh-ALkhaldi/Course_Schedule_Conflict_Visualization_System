@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp, LEVEL_COLORS } from '../../context/AppContext.jsx';
-import { suggestRecommend } from '../../api/index.js';
+import { suggestRecommend, getCourses } from '../../api/index.js';
 import './SectionModal.css';
 import './SuggestModal.css';
 
@@ -70,7 +70,17 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
 
-  const { courses } = useApp();
+  // NEW-FU-374 (Phase 98 item 4): the Suggest panel must offer the FULL program
+  // catalog — including the GRADUATE tier (e.g. SWE 503 / 587) — not only the
+  // courses that already have sections in the current term. useApp().courses is
+  // term-scoped (a course surfaces only if it already has a section this term),
+  // which is exactly why a sparse term like 271 showed no Graduate tier at all.
+  // Seed the working list with the term-scoped courses (so the modal paints
+  // instantly) and replace it with the un-scoped catalog once it loads (effect
+  // below). The backend already schedules GR courses in their own 17:00–22:00
+  // evening window, so once they're offered here the rest works end-to-end.
+  const { courses: termCourses } = useApp();
+  const [courses, setCourses] = useState(termCourses);
 
   // NEW-FU-264 / FU-266: smart auto-suggester state.
   //   • loading           — pre-flight call to /suggest-recommend is in
@@ -96,15 +106,36 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   const [loading,         setLoading]         = useState(true);
   const [recommendError,  setRecommendError]  = useState(null);
   const [capacityWarnings, setCapacityWarnings] = useState([]); // [{ courseId, courseCode, message }]
-  const [applyToCourseIds, setApplyToCourseIds] = useState(() => new Set(courses.map(c => c.id)));
-  // NEW-FU-317 (Phase 29): tunable conflict tolerance dropdown in
-  // Advanced. Default 'any' (legacy behavior). When the user picks 0/1/2,
-  // the backend will SKIP placements that would create more conflicts
-  // than the tolerance allows, returning them in placementSkipped[].
-  // Sensible default for inexperienced users = 'any' (don't introduce
-  // surprise refusals); strict modes are opt-in.
-  const [maxConflictsPerSection, setMaxConflictsPerSection] = useState('any');
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  // NEW-FU-231 (Phase 97): "auto-choose" toggle (items 7/8). When ON (default),
+  // changing a course's section count makes Suggest automatically re-pick the
+  // best duration / day-pattern for the affected courses to avoid conflicts.
+  // That live adjustment is helpful but was invisible — users were confused
+  // when their picks "changed by themselves". The toggle (with a tooltip) makes
+  // it explicit and lets a user turn it OFF to keep every manual choice fixed.
+  const [autoChoose, setAutoChoose] = useState(true);
+  // NEW-FU-374 (Phase 98 item 4): default the apply-set to the courses ALREADY in
+  // this term (termCourses), NOT the whole catalog. Catalog-only courses (grad /
+  // not-yet-scheduled) appear in the panel but start UNCHECKED, so a default
+  // "Run Suggest" regenerates exactly the term's existing courses — unchanged
+  // behaviour for populated terms (251/262). The user opts a grad course in by
+  // ticking it; the run then places it in the GR evening window.
+  const [applyToCourseIds, setApplyToCourseIds] = useState(() => new Set(termCourses.map(c => c.id)));
+  // NEW-FU-381 (Phase 99 items 2/3): user-intent tracking for the live solver.
+  //   • userEditedRef           — courseIds the user manually changed (sections /
+  //                               duration / day-pattern). The live auto-choose
+  //                               LOCKS these (honours the user's pick) and only
+  //                               re-solves the OTHER selected courses around them.
+  //   • userTouchedSelectionRef — flips true once the user toggles any apply
+  //                               checkbox, so the catalog load (which defaults
+  //                               EVERY course on, item 3) doesn't re-check rows
+  //                               the user just started unchecking.
+  const userEditedRef = useRef(new Set());
+  const userTouchedSelectionRef = useRef(false);
+  // NEW-FU-223 (Phase 96): the upfront "conflict tolerance per section" knob
+  // (and its Advanced disclosure) were removed. Asking the user how many
+  // conflicts to tolerate is backwards — nobody wants conflicts. Suggest now
+  // runs CLEAN-FIRST and, only if the user's exact picks can't fit, explains
+  // the clashes and asks how to proceed (see SchedulerPage.runSuggest).
 
   // NEW-FU-312 (Phase 28): build-mismatch state. The frontend was built
   // with a specific git sha (injected via Vite's `define` — see
@@ -189,6 +220,71 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
     return init;
   });
 
+  // NEW-FU-374 (Phase 98 item 4): load the full program catalog (un-scoped) so
+  // every academic tier — including GRADUATE — is offered, regardless of what the
+  // current term already contains. Falls back silently to the term-scoped list on
+  // failure (the modal stays fully usable). Also seeds config defaults for every
+  // newly-revealed course (the term-scoped init above only covered courses that
+  // already exist in this term; grad / other catalog courses need defaults too,
+  // with the same GR 75-min bias the term init applies).
+  useEffect(() => {
+    let cancelled = false;
+    // NEW-FU-381 (Phase 99 item 6): load the full catalog ROBUSTLY. Under heavy
+    // Suggest load the shared DB pool could briefly saturate and this fetch
+    // would fail, silently dropping the Graduate tier (the term-scoped fallback
+    // has no grad courses in a sparse term). Retry a few times with backoff so a
+    // transient spike can't make the Graduate tier vanish. (The backend pool +
+    // fast-recommend fixes remove most of the pressure; this is the belt.)
+    async function loadCatalog() {
+      let lastErr;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          // NEW-FU-415 (Phase 103 item 1): full program catalog MINUS courses
+          // not offered in the active term (SWE 412 after 252, SWE 399 outside
+          // Summer). scope=catalog keeps Graduate/not-yet-added courses visible.
+          const all = await getCourses(undefined, { scope: 'catalog' });
+          if (Array.isArray(all) && all.length > 0) return all;
+          lastErr = new Error('empty catalog');
+        } catch (err) { lastErr = err; }
+        if (cancelled) return null;
+        await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+      }
+      throw lastErr ?? new Error('catalog load failed');
+    }
+    (async () => {
+      try {
+        const all = await loadCatalog();
+        if (cancelled || !all) return;
+        setCourses(all);
+        setConfig(prev => {
+          const next = { ...prev };
+          for (const c of all) {
+            if (next[c.id]) continue; // keep any value the term init / recommend set
+            let duration = defaultDurationFor(c);
+            if (c.category === 'GR' && legalDurationsForCourse(c).includes(75)) duration = 75;
+            next[c.id] = {
+              sections:    1,
+              duration,
+              dayPattern:  defaultDayTemplateFor(c, duration),
+              day:         'Sunday',
+              labDuration: c.has_lab ? 50 : null,
+              labDay:      c.has_lab ? 'Sunday' : null,
+            };
+          }
+          return next;
+        });
+        // NEW-FU-381 (Phase 99 item 3): default EVERY course ON — including the
+        // Graduate tier — so a default Run includes them. Skip only if the user
+        // has already started toggling the selection (they can't while loading,
+        // but this guards the race).
+        if (!userTouchedSelectionRef.current) {
+          setApplyToCourseIds(new Set(all.map(c => c.id)));
+        }
+      } catch { /* all retries failed — keep the term-scoped list; modal still works */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // NEW-FU-264: pre-flight to /suggest-recommend on mount. The backend runs
   // the greedy in dry-run mode (no DB writes) and returns:
   //   • recommendations[] — per-course {sections, duration, dayPattern, day,
@@ -270,6 +366,10 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   }, [scheduleId]);
 
   function setField(courseId, field, value) {
+    // NEW-FU-381 (Phase 99 item 2): the user just made an explicit choice for
+    // this course — LOCK it so the live auto-choose honours it and re-solves the
+    // OTHER courses around it (rather than overwriting the value they just set).
+    userEditedRef.current.add(courseId);
     setConfig(prev => {
       const next = { ...prev, [courseId]: { ...prev[courseId], [field]: value } };
       // NEW-FU-249: when duration changes, the dayPattern may become
@@ -297,37 +397,69 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   // changed course in isolation. We only update fields the recommend
   // response returned and ONLY for the changed course (we don't want
   // to clobber the user's manual edits to OTHER courses).
-  const sectionsKey = React.useMemo(
-    () => Object.entries(config).map(([id, c]) => `${id}:${c.sections}`).sort().join('|'),
-    [config],
-  );
-  const isFirstRecommendRef = React.useRef(true);
+  // NEW-FU-381 (Phase 99 item 2): LIVE auto-choose cross-optimizer.
+  // The trigger key changes when the user edits ANY course — sections, duration
+  // OR day-pattern — not just the section count (the old behaviour). To avoid a
+  // feedback loop, the key includes the full pattern ONLY for LOCKED (user-
+  // edited) courses; the section count is included for every course. The solver
+  // only rewrites UNLOCKED courses, whose pattern is NOT in the key, so its own
+  // writes never re-trigger it.
+  const configKey = React.useMemo(() => {
+    const locked = userEditedRef.current;
+    return Object.entries(config).map(([id, c]) => {
+      const base = `${id}:n${c.sections}`;
+      return locked.has(id)
+        ? `${base}:d${c.duration}:p${c.dayPattern}:${c.day ?? ''}:l${c.labDuration ?? ''}:${c.labDay ?? ''}`
+        : base;
+    }).sort().join('|');
+  }, [config]);
   React.useEffect(() => {
     if (!scheduleId) return;
-    if (isFirstRecommendRef.current) {
-      // Skip the initial mount; the original useEffect at line ~206
-      // handles the first /suggest-recommend call.
-      isFirstRecommendRef.current = false;
-      return;
-    }
+    // OFF → keep every value exactly as the user set it (no live adjustment).
+    if (!autoChoose) return;
+    // Only run AFTER the user has actually edited something — the mount
+    // recommend + catalog load also setConfig, and we must not "auto-adjust"
+    // those initial values out from under the user.
+    if (userEditedRef.current.size === 0) return;
+
+    // Snapshot the current panel state to send to the fast (greedy-skipping)
+    // recommend: the LOCKED courses are honoured; the others are re-picked to
+    // spread around them.
+    const lockedCourseIds = [...userEditedRef.current].filter(id => config[id]);
+    const configs = Object.entries(config).map(([courseId, c]) => ({
+      courseId,
+      sections:    Number(c.sections) || 1,
+      duration:    c.duration,
+      dayPattern:  c.dayPattern,
+      day:         c.day,
+      labDuration: c.labDuration,
+      labDay:      c.labDay,
+    }));
     const sectionsHint = {};
     for (const [id, cfg] of Object.entries(config)) {
       const n = Number(cfg.sections);
       if (Number.isFinite(n) && n >= 1) sectionsHint[id] = n;
     }
+
+    const controller = new AbortController();
     let cancelled = false;
+    // Debounced 300ms; the AbortController cancels any superseded in-flight
+    // call so rapid edits don't pile up heavy requests (item 5).
     const t = setTimeout(async () => {
       try {
-        const result = await suggestRecommend(scheduleId, { sectionsHint });
+        const result = await suggestRecommend(scheduleId, {
+          sectionsHint, configs, lockedCourseIds, fast: true, signal: controller.signal,
+        });
         if (cancelled) return;
+        const lockedSet = userEditedRef.current;
         setConfig(prev => {
           const next = { ...prev };
           for (const r of result.recommendations ?? []) {
             const cur = prev[r.courseId];
             if (!cur) continue;
-            // Only update duration / dayPattern / day / labDuration /
-            // labDay — preserve the user's `sections` choice (that's
-            // what triggered this re-recommend).
+            // Respect the user's explicit picks: only the courses they have NOT
+            // locked get auto-adjusted toward a conflict-free spread.
+            if (lockedSet.has(r.courseId)) continue;
             next[r.courseId] = {
               ...cur,
               duration:    r.duration    ?? cur.duration,
@@ -340,18 +472,19 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
           return next;
         });
       } catch {
-        // Silent failure — keep the user's current config and let them
-        // proceed. The main recommend already handles loud failures.
+        // Aborted (superseded) or failed — keep the current config; the user
+        // can still Run. The mount recommend handles loud failures.
       }
-    }, 200);
-    return () => { cancelled = true; clearTimeout(t); };
+    }, 300);
+    return () => { cancelled = true; controller.abort(); clearTimeout(t); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sectionsKey]);
+  }, [configKey, autoChoose]);
 
   // NEW-FU-265: per-course apply checkbox. The Set wrapper makes
   // toggle/has/size cheap and avoids the "filtered list" rebuild on
   // every keystroke. Default: all courses checked (legacy behavior).
   function toggleApply(courseId) {
+    userTouchedSelectionRef.current = true; // (Phase 99 item 3) stop the catalog default-on from clobbering
     setApplyToCourseIds(prev => {
       const next = new Set(prev);
       if (next.has(courseId)) next.delete(courseId);
@@ -401,10 +534,9 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
           } : {}),
         };
       });
-    // NEW-FU-317: pass maxConflictsPerSection through. 'any' = legacy
-    // "force everything"; 0/1/2 = strict — sections that would
-    // exceed the tolerance get skipped + reported in placementSkipped.
-    onConfirm(payload, targetIds, maxConflictsPerSection);
+    // NEW-FU-223 (Phase 96): no tolerance argument — runSuggest is clean-first
+    // and negotiates conflicts after the dry-run, not via an upfront knob.
+    onConfirm(payload, targetIds);
   }
 
   // NEW-FU-266: courseId → warning message lookup. We build it once
@@ -438,6 +570,31 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
             <span className="suggest-recommend-badge">✦ Recommendations pre-filled</span>
           )}
         </p>
+
+        {/* NEW-FU-231 (Phase 97): the auto-choose toggle + tooltip (items 7/8).
+            Makes the previously-invisible "auto-adjust my other picks" behaviour
+            explicit and controllable, so a user is never surprised by their
+            options changing on their own. */}
+        <div className="suggest-autochoose">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoChoose}
+            className={`suggest-autochoose-toggle ${autoChoose ? 'on' : 'off'}`}
+            onClick={() => setAutoChoose(v => !v)}
+            title="When ON, Suggest automatically re-picks the best duration and day pattern for a course whenever you change its number of sections, keeping your choices as conflict-free as possible. Turn OFF to keep every value exactly as you set it."
+          >
+            <span className="suggest-autochoose-track"><span className="suggest-autochoose-knob" /></span>
+            <span className="suggest-autochoose-label">
+              Auto-choose best options · <strong>{autoChoose ? 'On' : 'Off'}</strong>
+            </span>
+          </button>
+          <span
+            className="suggest-autochoose-help"
+            tabIndex={0}
+            title="Auto-choose keeps the rest of each course's settings optimal as you edit. When ON, changing a course's section count auto-adjusts its duration / day-pattern to avoid clashes. When OFF, nothing changes unless you change it."
+          >ⓘ</span>
+        </div>
 
         {/* NEW-FU-264: pre-flight banners. Loading is brief (one DB
             query + a greedy pass over ~30 courses), so we show a thin
@@ -554,71 +711,44 @@ cd backend && npm run dev`}
         )}
 
         <div className="suggest-table-wrap">
-          <table className="suggest-table">
-            <thead>
-              <tr>
-                {/* NEW-FU-265: apply checkbox column. Header has the
-                    "all-or-none" toggle so a user wanting to run on
-                    just 1-2 courses can flip everything off first
-                    then pick.
-                    NEW-FU-286 (Phase 24): the unlabeled checkbox in the
-                    header was undiscoverable — users only realized it
-                    toggled all rows by clicking it. Now wrapped in a
-                    <label> with visible "Apply all" text, plus the
-                    indeterminate state for partial selections (handled
-                    via a ref + useEffect below since React doesn't
-                    accept `indeterminate` as a JSX prop directly). */}
-                {/* NEW-FU-297 (Phase 26): single-line label + dynamic
-                    "Select all" / "Deselect all" text. The 92px width
-                    was making the label wrap to two lines ("APPLY /
-                    ALL") — bumped to 110px so the longer
-                    "Deselect all" text also fits on one line. The
-                    label SWAPS based on selection: "Select all" when
-                    nothing/partial is checked (the action that would
-                    apply), "Deselect all" when everything is checked. */}
-                <th style={{textAlign:'center', width: 110, whiteSpace: 'nowrap'}} colSpan={1}>
-                  <label className="suggest-apply-all-label" title="Toggle all courses on / off">
-                    <input
-                      ref={applyAllCheckboxRef}
-                      type="checkbox"
-                      checked={applyToCourseIds.size === courses.length && courses.length > 0}
-                      onChange={() => {
-                        if (applyToCourseIds.size === courses.length) {
-                          setApplyToCourseIds(new Set());
-                        } else {
-                          setApplyToCourseIds(new Set(courses.map(c => c.id)));
-                        }
-                      }}
-                    />
-                    <span>
-                      {applyToCourseIds.size === courses.length && courses.length > 0
-                        ? 'Deselect all'
-                        : 'Select all'}
-                    </span>
-                  </label>
-                </th>
-                <th>Course</th>
-                <th>Level</th>
-                <th style={{textAlign:'center'}}># Sections</th>
-                <th>Schedule pattern</th>
-              </tr>
-            </thead>
-            <tbody>
+          {/* NEW-FU-224 (Phase 96): a sticky "select all" bar replaces the old
+              table header, and the single-column table becomes a balanced
+              multi-COLUMN card list (CSS columns) so a full course list fits
+              without vertical scrolling. The per-column headers (Course / Level
+              / # Sections / Schedule pattern) are dropped — each course card is
+              self-labelling. */}
+          <div className="suggest-apply-bar">
+            <label className="suggest-apply-all-label" title="Toggle all courses on / off">
+              <input
+                ref={applyAllCheckboxRef}
+                type="checkbox"
+                checked={applyToCourseIds.size === courses.length && courses.length > 0}
+                onChange={() => {
+                  userTouchedSelectionRef.current = true; // (Phase 99 item 3)
+                  if (applyToCourseIds.size === courses.length) {
+                    setApplyToCourseIds(new Set());
+                  } else {
+                    setApplyToCourseIds(new Set(courses.map(c => c.id)));
+                  }
+                }}
+              />
+              <span>
+                {applyToCourseIds.size === courses.length && courses.length > 0
+                  ? 'Deselect all'
+                  : 'Select all'}
+              </span>
+            </label>
+          </div>
+
+          <div className="suggest-list">
               {grouped.map(({ level, courses: cs }) => (
                 <React.Fragment key={level}>
-                  <tr className="suggest-level-row">
-                    {/* NEW-FU-265: colSpan bumped 4→5 to account for the
-                        new apply-checkbox column. */}
-                    <td colSpan={5} style={{
-                      background: LEVEL_COLORS[level]?.bg,
-                      color: LEVEL_COLORS[level]?.border,
-                      fontWeight: 700, fontSize: '.72rem',
-                      textTransform: 'uppercase', letterSpacing: '.06em',
-                      padding: '4px 12px',
-                    }}>
-                      {level}
-                    </td>
-                  </tr>
+                  <div className="suggest-level-row" style={{
+                    background: LEVEL_COLORS[level]?.bg,
+                    color: LEVEL_COLORS[level]?.border,
+                  }}>
+                    {level}
+                  </div>
                   {cs.map(course => {
                     const cfg = config[course.id] ?? {
                       sections: 1,
@@ -644,69 +774,59 @@ cd backend && npm run dev`}
                     const isApplied = applyToCourseIds.has(course.id);
                     const warning   = warningsByCourseId.get(course.id);
                     return (
-                      <tr key={course.id} className={`suggest-course-row ${isApplied ? '' : 'suggest-course-row-skipped'}`}
-                          style={{
-                            // NEW-FU-258: pass the level color through
-                            // as a CSS custom property. Border-collapse
-                            // separate mode (FU-258) doesn't render
-                            // <tr> borders, so the first <td> reads
-                            // --row-accent from this var and renders
-                            // the 3px left stripe itself.
-                            '--row-accent': LEVEL_COLORS[level]?.border ?? '#cbd5e1',
-                          }}>
-                        {/* NEW-FU-265: apply checkbox. Disabled while
-                            the recommend call is in flight so the user
-                            can't unintentionally untick what's still
-                            being computed. */}
-                        <td style={{textAlign:'center'}}>
+                      <div key={course.id}
+                        className={`suggest-course-card ${isApplied ? '' : 'suggest-course-row-skipped'}`}
+                        style={{ '--row-accent': LEVEL_COLORS[level]?.border ?? '#cbd5e1' }}>
+                        <div className="suggest-card-head">
+                          {/* NEW-FU-265: apply checkbox — disabled while the
+                              recommend dry-run is in flight. */}
                           <input
+                            className="suggest-apply-cb"
                             type="checkbox"
                             checked={isApplied}
                             onChange={() => toggleApply(course.id)}
                             disabled={loading}
                             title={isApplied ? 'Will be regenerated' : 'Skipped — existing sections preserved'}
                           />
-                        </td>
-                        <td>
-                          <span className="suggest-code">{course.course_code}</span>
-                          <span className="suggest-name">{course.name}</span>
-                          <span className="suggest-credits">
-                            {course.credits} cr{course.has_lab ? ' · lab' : ''}
+                          <span className="suggest-card-title">
+                            <span className="suggest-code">{course.course_code}</span>
+                            <span className="suggest-name">{course.name}</span>
+                            <span className="suggest-credits">
+                              {course.credits} cr{course.has_lab ? ' · lab' : ''}
+                            </span>
                           </span>
-                          {/* NEW-FU-266: per-course capacity warning,
-                              inline under the course name so the cause
-                              is obvious. The text comes verbatim from
-                              the recommend pass — backend already
-                              formats it ("No conflict-free slot
-                              found…"). */}
-                          {warning && (
-                            <div className="suggest-capacity-warning" title="From dry-run greedy pass">
-                              ⚠ {warning.message}
-                            </div>
-                          )}
-                        </td>
-                        <td>
                           <span className="suggest-cat"
                             style={{color: LEVEL_COLORS[level]?.border}}>
                             {course.category}
                           </span>
-                        </td>
-                        <td style={{textAlign:'center'}}>
-                          <input
-                            type="number" min="1" max="10"
-                            value={cfg.sections}
-                            onChange={e => setField(course.id, 'sections', e.target.value)}
-                            className="suggest-num-input"
-                          />
-                        </td>
-                        <td>
-                          {/* NEW-FU-255: when the course has a lab,
-                              wrap the lecture inputs in a labeled
-                              section block so the two parts (lecture
-                              vs lab) read as parallel sub-sections.
-                              For courses WITHOUT a lab the heading
-                              is suppressed — adding it for every row
-                              would just be visual noise. */}
+                          <label className="suggest-sections-field" title="Parallel sections to generate">
+                            <span className="suggest-sections-label"># Sec</span>
+                            {/* NEW-FU-484 (Phase 118): clamp to [1,10] on every change so
+                                the spinner can never reach 0 or a negative value. The
+                                `min` attribute only blocks the up/down arrows in some
+                                browsers — direct typing still allows out-of-range values,
+                                so we enforce the floor in onChange. */}
+                            <input
+                              type="number" min="1" max="10"
+                              value={cfg.sections}
+                              onChange={e => {
+                                const raw = parseInt(e.target.value, 10);
+                                const clamped = Number.isFinite(raw) ? Math.max(1, Math.min(10, raw)) : 1;
+                                setField(course.id, 'sections', clamped);
+                              }}
+                              className="suggest-num-input"
+                            />
+                          </label>
+                        </div>
+                        {/* NEW-FU-266: per-course capacity warning from the
+                            recommend dry-run — text comes verbatim from the
+                            backend ("No conflict-free slot found…"). */}
+                        {warning && (
+                          <div className="suggest-capacity-warning" title="From dry-run greedy pass">
+                            ⚠ {warning.message}
+                          </div>
+                        )}
+                        <div className="suggest-card-body">
                           <div className="suggest-section-block suggest-lec-block">
                             {course.has_lab && (
                               <div className="suggest-section-heading suggest-lec-heading">
@@ -819,64 +939,23 @@ cd backend && npm run dev`}
                               </div>
                             </div>
                           )}
-                        </td>
-                      </tr>
+                        </div>{/* close .suggest-card-body */}
+                      </div>
                     );
                   })}
                 </React.Fragment>
               ))}
-            </tbody>
-          </table>
+          </div>{/* close .suggest-list */}
         </div>
 
-        {/* NEW-FU-317 (Phase 29): Advanced disclosure with the
-            conflict-tolerance knob. Collapsed by default so it doesn't
-            clutter the modal for the 95% of users who want default
-            behavior. Power users with saturated schedules can dial in
-            "skip placements that would create conflicts" mode to avoid
-            silently shipping a schedule with R-02/R-04/R-05 warnings. */}
-        <div style={{padding:'0 24px 8px', fontSize: '.78rem'}}>
-          <button
-            type="button"
-            onClick={() => setShowAdvanced(s => !s)}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--slate-500)',
-              cursor: 'pointer',
-              padding: 0,
-              fontSize: '.78rem',
-              fontWeight: 600,
-              letterSpacing: '.02em',
-            }}
-            title="Advanced controls for power users"
-          >
-            {showAdvanced ? '▾ Advanced' : '▸ Advanced'}
-          </button>
-          {showAdvanced && (
-            <div style={{marginTop: 8, padding: '8px 12px', background: 'var(--slate-50)', border: '1px solid var(--slate-200)', borderRadius: 6}}>
-              <label style={{display: 'flex', alignItems: 'center', gap: 8}}>
-                <span style={{minWidth: 180, color: 'var(--slate-700)'}}>Conflict tolerance per section:</span>
-                <select
-                  value={maxConflictsPerSection}
-                  onChange={(e) => setMaxConflictsPerSection(
-                    e.target.value === 'any' ? 'any' : parseInt(e.target.value, 10)
-                  )}
-                  style={{padding: '4px 8px', borderRadius: 4, border: '1px solid var(--slate-300)'}}
-                >
-                  <option value="any">Any (force-place everything, legacy)</option>
-                  <option value="0">0 — skip any section that would create a conflict</option>
-                  <option value="1">1 — allow up to 1 soft conflict per section</option>
-                  <option value="2">2 — allow up to 2 soft conflicts per section</option>
-                </select>
-              </label>
-              <div style={{marginTop: 6, color: 'var(--slate-500)', fontSize: '.72rem'}}>
-                Strict modes (0/1/2) skip sections that the greedy can't fit cleanly. Skipped
-                sections appear in a follow-up toast naming the course + reason.
-              </div>
-            </div>
-          )}
-        </div>
+        {/* NEW-FU-223 (Phase 96): the "Advanced → conflict tolerance" knob was
+            removed. Asking the user to pre-pick how many conflicts to allow is
+            backwards. A one-line note now sets the expectation; the real
+            decision happens after the run, only if needed (see runSuggest). */}
+        <p className="suggest-foot-note">
+          Suggest aims for a <strong>conflict-free</strong> schedule. If your choices
+          can’t all fit, it’ll show you what clashes and offer to adjust them for you.
+        </p>
 
         <div className="sm-actions" style={{padding:'0 24px 20px'}}>
           <button className="sm-btn-cancel" onClick={onClose}>Cancel</button>

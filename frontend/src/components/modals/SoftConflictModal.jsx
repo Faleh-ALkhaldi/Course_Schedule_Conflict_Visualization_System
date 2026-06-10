@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { ruleToPlain } from '../../utils/conflictText.js';
 import './SoftConflictModal.css';
 
 export default function SoftConflictModal({ conflicts, onConfirm, onCancel }) {
@@ -27,11 +28,14 @@ export default function SoftConflictModal({ conflicts, onConfirm, onCancel }) {
           The following soft conflicts were detected. You may save anyway or go back to resolve them:
         </p>
 
+        {/* NEW-FU-223 (Phase 96): drop the raw "R-05" rule-code badge — it's
+            developer jargon to a scheduler. The human-readable description is
+            kept; if a conflict ever lacks one, fall back to a plain sentence
+            mapped from its rule code (never the bare code). */}
         <ul className="modal-conflict-list">
           {conflicts.map((c, i) => (
             <li key={i} className="modal-conflict-item">
-              <span className="modal-rule">{c.ruleId}</span>
-              <span className="modal-desc">{c.description}</span>
+              <span className="modal-desc">{c.description || ruleToPlain(c.ruleId)}</span>
             </li>
           ))}
         </ul>
