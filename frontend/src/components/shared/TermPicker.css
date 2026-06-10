@@ -117,7 +117,7 @@
   z-index: 200;
   width: 460px;
   max-height: 480px;
-  background: #ffffff;
+  background: var(--bg-surface);
   border: 1px solid #cbd5e1;
   border-radius: 10px;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.18);
@@ -131,7 +131,7 @@
   justify-content: space-between;
   padding: 10px 14px;
   border-bottom: 1px solid #e2e8f0;
-  background: #f8fafc;
+  background: var(--slate-50);
 }
 .tp-popover-title {
   font-size: 13px;
@@ -151,7 +151,7 @@
   position: relative;
   padding: 8px 12px 6px;
   border-bottom: 1px solid #e2e8f0;
-  background: #ffffff;
+  background: var(--bg-surface);
 }
 .tp-filter-input {
   width: 100%;
@@ -180,7 +180,7 @@
   font-size: 10px;
   font-weight: 700;
   color: #64748b;
-  background: #f1f5f9;
+  background: var(--slate-100);
   padding: 1px 6px;
   border-radius: 9px;
   pointer-events: none;
@@ -228,7 +228,7 @@
   border-left: 3px solid transparent;
 }
 .tp-row:hover, .tp-row:focus-visible {
-  background: #f1f5f9;
+  background: var(--slate-100);
   outline: none;
 }
 /* NEW-FU-463 (Phase 110): make the SELECTED term unmistakable — a stronger teal
@@ -276,7 +276,7 @@
   font-weight: 700;
   letter-spacing: 0.02em;
   padding: 2px 7px;
-  background: #f1f5f9;
+  background: var(--slate-100);
   border: 1px solid #cbd5e1;
   border-radius: 5px;
   color: #475569;
@@ -415,7 +415,7 @@
   color: #b91c1c;
 }
 .tp-row-lock:hover {
-  background: #f1f5f9;
+  background: var(--slate-100);
   border-color: #475569;
   color: #0f172a;
 }
@@ -433,7 +433,7 @@
 .tp-popover-foot {
   border-top: 1px solid #e2e8f0;
   padding: 8px 12px;
-  background: #f8fafc;
+  background: var(--slate-50);
   /* NEW-FU-194: lay out [+ Add new term] | [Show archived] side-by-side */
   display: flex;
   gap: 8px;
@@ -452,7 +452,7 @@
   transition: background 0.1s, border-color 0.1s;
 }
 .tp-add-btn:hover {
-  background: #f1f5f9;
+  background: var(--slate-100);
   border-color: #0d9488;
   color: #0d9488;
 }
@@ -474,7 +474,7 @@
 .tp-archive-toggle:hover {
   border-color: #94a3b8;
   color: #0f172a;
-  background: #f1f5f9;
+  background: var(--slate-100);
 }
 .tp-archive-toggle.on {
   background: #475569;
@@ -492,12 +492,12 @@
    target the unarchive button without struggle. */
 .tp-row.archived {
   opacity: 0.62;
-  background: #f8fafc;
+  background: var(--slate-50);
 }
 .tp-row.archived .tp-row-label { font-style: italic; }
 .tp-row.archived:hover {
   opacity: 1.0;
-  background: #f1f5f9;
+  background: var(--slate-100);
 }
 
 /* Archived status pill — matches the muted, warehouse-y palette. */
@@ -510,7 +510,7 @@
    defined alongside lock/rename/delete above. Only the per-button
    hover colors live here. */
 .tp-row-archive:hover {
-  background: #f1f5f9;
+  background: var(--slate-100);
   border-color: #475569;
   color: #0f172a;
 }
@@ -545,7 +545,7 @@
   from { opacity: 0; } to { opacity: 1; }
 }
 .tp-modal {
-  background: #ffffff;
+  background: var(--bg-surface);
   border-radius: 12px;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.3);
   padding: 24px;
@@ -570,7 +570,7 @@
   color: #334155;
 }
 .tp-modal-body code {
-  background: #f1f5f9;
+  background: var(--slate-100);
   padding: 1px 6px;
   border-radius: 4px;
   font-family: var(--font-mono, ui-monospace, Menlo);
@@ -678,7 +678,7 @@
   color: #334155;
   border-color: #cbd5e1;
 }
-.tp-btn-secondary:hover:not(:disabled) { background: #f1f5f9; }
+.tp-btn-secondary:hover:not(:disabled) { background: var(--slate-100); }
 .tp-btn-danger {
   background: #dc2626;
   color: white;

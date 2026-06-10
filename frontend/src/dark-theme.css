@@ -1,0 +1,37 @@
+/* ── Dark-theme overrides ─────────────────────────────────────────────────────
+   Scoped [data-theme="dark"] rules for surfaces/tints that use literal light hex
+   (status colors + a few custom greys) which the token remap in index.css can't
+   reach. Light mode is untouched — these rules only apply under data-theme="dark".
+   Each status surface keeps its hue at a dark-appropriate tint with light text. */
+
+/* Sidebar custom greys */
+[data-theme="dark"] .sp-root { background: var(--bg-surface); border-right-color: var(--border-subtle); }
+[data-theme="dark"] .sp-section { border-bottom-color: var(--border-subtle); }
+[data-theme="dark"] .sp-form { background: var(--bg-elevated); border-color: var(--border-subtle); }
+[data-theme="dark"] .sp-section-item:hover { background: var(--bg-elevated); }
+
+/* Empty "no conflicts" state — green */
+[data-theme="dark"] .sp-no-conflict { background: #0e2a1d; border-color: #1f5135; }
+[data-theme="dark"] .sp-no-conflict-title { color: #6ee7b7; }
+[data-theme="dark"] .sp-no-conflict-sub { color: #8fb8a4; }
+
+/* Finalized / archived banner — amber */
+[data-theme="dark"] .scheduler-archived-banner { background: #2a2410; border-color: #5a4a1e; color: #fcd34d; }
+[data-theme="dark"] .scheduler-archived-msg strong { color: #fde68a; }
+
+/* Sidebar placeholder advisory — amber */
+[data-theme="dark"] .sp-avatar-dummy { background: #b45309; color: #fde68a; }
+[data-theme="dark"] .sp-badge { background: var(--bg-elevated); border-color: var(--border-subtle); }
+
+/* Toasts */
+[data-theme="dark"] .toast-success { background: #0e2a1d; color: #6ee7b7; border-color: #1f5135; }
+[data-theme="dark"] .toast-info    { background: #16243d; color: #93c5fd; border-color: #2a3f63; }
+[data-theme="dark"] .toast-warn    { background: #2a2410; color: #fcd34d; border-color: #5a4a1e; }
+
+/* Modal status surfaces (SectionModal / Suggest / Decision) */
+[data-theme="dark"] .sm-info-warn { background: #2a2410; border-color: #5a4a1e; color: #fcd34d; }
+[data-theme="dark"] .sm-info-ok   { background: #0e2a1d; border-color: #1f5135; color: #6ee7b7; }
+[data-theme="dark"] .sm-sev-hard  { background: #3a1a1a; color: #fca5a5; }
+[data-theme="dark"] .sm-sev-soft  { background: #2a2410; color: #fcd34d; }
+[data-theme="dark"] .sm-badge-error { background: #3a1a1a; color: #fca5a5; }
+[data-theme="dark"] .suggest-course-card:hover { background: var(--bg-elevated); }

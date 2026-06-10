@@ -6,6 +6,7 @@ import App from './App.jsx';
 // (which used to leave the user with a blank white page).
 import ErrorBoundary from './components/ErrorBoundary.jsx';
 import { ThemeProvider } from './context/ThemeContext.jsx';
+import './dark-theme.css';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(

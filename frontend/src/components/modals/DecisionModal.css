@@ -62,7 +62,7 @@
 
 /* danger = the user is choosing to keep a plan that WILL have conflicts. */
 .decision-btn.danger {
-  background: #fff;
+  background: var(--bg-surface);
   color: #b91c1c;
   border-color: #fca5a5;
 }

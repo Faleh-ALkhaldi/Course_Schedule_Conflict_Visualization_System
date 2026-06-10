@@ -175,7 +175,7 @@
   flex:1; padding:6px; border-radius:6px; font-size:.78rem; cursor:pointer;
   border:1px solid var(--slate-200); background:var(--white); color:var(--slate-600);
 }
-.sp-submit { background:var(--navy-800) !important; color:var(--white) !important; border-color:var(--navy-800) !important; font-weight:500; }
+.sp-submit { background:var(--navy-800) !important; color:#fff !important; border-color:var(--navy-800) !important; font-weight:500; }
 .sp-submit:hover:not(:disabled) { background:var(--navy-700) !important; }
 .sp-submit:disabled { opacity:.5; cursor:not-allowed; }
 

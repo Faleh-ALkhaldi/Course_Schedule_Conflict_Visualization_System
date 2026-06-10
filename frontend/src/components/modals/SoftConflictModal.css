@@ -111,7 +111,7 @@
 
 .modal-btn.confirm {
   background: var(--amber-500);
-  color: var(--white);
+  color: #fff;
   border-color: var(--amber-500);
 }
 .modal-btn.confirm:hover { background: #b45309; }

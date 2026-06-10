@@ -127,7 +127,7 @@
   margin-left: 8px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #f1f5f9;
+  background: var(--slate-100);
   color: #64748b;
   font-size: 10px;
   font-weight: 600;
@@ -247,7 +247,7 @@
   border-bottom: none;
 }
 .suggest-course-row > td {
-  background: #ffffff;
+  background: var(--bg-surface);
   border-top:    1px solid #cbd5e1;
   border-bottom: 1px solid #cbd5e1;
   /* Default vertical padding stays at FU-255's 14px so cards have
@@ -271,7 +271,7 @@
   border-bottom-right-radius: 8px;
 }
 .suggest-course-row:hover > td {
-  background: #f8fafc;
+  background: var(--slate-50);
 }
 
 /* Inline-set border-left from JSX wins over the default via
@@ -510,7 +510,7 @@
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--bg-surface);
   transition: transform .15s;
   box-shadow: 0 1px 2px rgba(0,0,0,.2);
 }
@@ -530,10 +530,10 @@
    element (inactive buttons, borders, axis labels) so the eye lands on the
    course code + the one ACTIVE choice per row. Height-neutral (no scroll). */
 .suggest-course-card { border-color: #e6eaf0; }
-.suggest-course-card:hover { background: #f8fafc; }
+.suggest-course-card:hover { background: var(--slate-50); }
 .suggest-pattern-btn {
   border-color: #e6eaf0;
-  background: #fff;
+  background: var(--bg-surface);
   color: var(--slate-500, #64748b);
 }
 .suggest-pattern-btn.active {
@@ -605,7 +605,7 @@
   display: block;
   width: 100%;
   box-sizing: border-box;
-  background: #fff;
+  background: var(--bg-surface);
   border: 1px solid #cbd5e1;
   border-left: 3px solid var(--row-accent, #cbd5e1);
   border-radius: 8px;
@@ -613,7 +613,7 @@
   margin: 0;
   transition: background .1s;
 }
-.suggest-course-card:hover { background: #f8fafc; }
+.suggest-course-card:hover { background: var(--slate-50); }
 /* unchecked (skipped) cards recede but stay legible. */
 .suggest-course-card.suggest-course-row-skipped { opacity: .55; }
 

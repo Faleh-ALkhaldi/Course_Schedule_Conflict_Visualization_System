@@ -113,7 +113,7 @@
 }
 .sm-btn-cancel:hover { background: var(--slate-200); }
 .sm-btn-save {
-  background: var(--navy-800); color: var(--white);
+  background: var(--navy-800); color: #fff;
 }
 .sm-btn-save:hover:not(:disabled) { background: var(--navy-700); }
 .sm-btn-save:disabled { opacity: .5; cursor: not-allowed; }

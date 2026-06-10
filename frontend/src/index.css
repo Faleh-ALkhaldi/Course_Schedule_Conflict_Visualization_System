@@ -81,6 +81,15 @@
   --fg:            var(--text-primary);
   --fg-dim:        var(--text-secondary);
   --fg-muted:      var(--text-muted);
+
+  /* Academic-level card colors (consumed by LEVEL_COLORS in AppContext). Light
+     values match the originals; the dark block defines distinct dark variants. */
+  --lvl-fr-bg:#daeef3; --lvl-fr-bd:#1f6b7a; --lvl-fr-tx:#0d3d46;
+  --lvl-so-bg:#e2efda; --lvl-so-bd:#2d6a2e; --lvl-so-tx:#1a3d1b;
+  --lvl-ju-bg:#fff2cc; --lvl-ju-bd:#b8860b; --lvl-ju-tx:#4f3700;
+  --lvl-se-bg:#e8e0f5; --lvl-se-bd:#6b3fa0; --lvl-se-tx:#3b1f5e;
+  --lvl-gr-bg:#EADDC1; --lvl-gr-bd:#6B3FA0; --lvl-gr-tx:#3d0f21;
+  --conflict-soft-bg:#fffacd; --conflict-hard-bg:#ffd5d5;
 }
 
 /* ── Dark theme ──────────────────────────────────────────────────────────────
@@ -88,18 +97,62 @@
    (prefers-color-scheme). Only the theme-aware tokens flip here. */
 [data-theme="dark"] {
   color-scheme: dark;
-  --bg-app:        #0b1220;
-  --bg-surface:    #131c2e;
-  --bg-elevated:   #1b2942;
+
+  /* Neutral ramp remapped to a distinct dark palette. Surfaces using --white /
+     --slate-* flip automatically; the few white-as-TEXT usages are pinned to
+     literal #fff so they stay light on colored / navy chrome. */
+  --white:     #141d30;
+  --slate-50:  #0e1626;
+  --slate-100: #0a111e;
+  --slate-200: #1b2640;
+  --slate-300: #2b3a57;
+  --slate-400: #6f7e99;
+  --slate-500: #95a3bb;
+  --slate-600: #bccada;
+
+  /* Navy chrome deepened so the top bar / day-header band read as dark surfaces. */
+  --navy-900: #05090f;
+  --navy-800: #0f1a2e;
+  --navy-700: #17243c;
+  --navy-600: #1f2e4a;
+  --navy-500: #2a3c5e;
+
+  /* Text */
+  --text-primary:   #e9eef6;
+  --text-secondary: #bccada;
+  --text-muted:     #95a3bb;
+
+  /* Accent — indigo in dark (distinct from light's teal); remapping the teal
+     ramp migrates every existing accent usage at once. */
+  --teal-500: #6366f1;
+  --teal-400: #818cf8;
+  --teal-300: #a5b4fc;
+
+  /* Soft conflict tints tuned for dark. */
+  --soft-yellow: #3b3414;
+  --soft-red:    #3c1d22;
+
+  /* Semantic (Phase 0). */
+  --bg-app:        #0a111e;
+  --bg-surface:    #141d30;
+  --bg-elevated:   #1c2942;
   --border-subtle: #233248;
   --border-strong: #324056;
-  --fg:            #e8edf5;
-  --fg-dim:        #aeb9cc;
-  --fg-muted:      #8a99b2;
+  --fg:            #e9eef6;
+  --fg-dim:        #bccada;
+  --fg-muted:      #95a3bb;
   --accent:        #818cf8;
   --accent-hover:  #a5b4fc;
   --accent-soft:   #1e2747;
-  --accent-contrast: #0b1220;
+  --accent-contrast: #0a111e;
+
+  /* Academic-level card colors — deep, distinct dark tints with light text. */
+  --lvl-fr-bg:#0e2a33; --lvl-fr-bd:#3a8fa3; --lvl-fr-tx:#a9e6f2;
+  --lvl-so-bg:#13301a; --lvl-so-bd:#4e9e50; --lvl-so-tx:#b6e8b8;
+  --lvl-ju-bg:#33280a; --lvl-ju-bd:#d4a017; --lvl-ju-tx:#f5d98a;
+  --lvl-se-bg:#241a3a; --lvl-se-bd:#9a6fd0; --lvl-se-tx:#d9c7f5;
+  --lvl-gr-bg:#2e2416; --lvl-gr-bd:#b08a55; --lvl-gr-tx:#ead8b8;
+  --conflict-soft-bg:#33280a; --conflict-hard-bg:#3a1a1a;
 }
 
 /* ── Reset ───────────────────────────────────────────────────────────────────── */

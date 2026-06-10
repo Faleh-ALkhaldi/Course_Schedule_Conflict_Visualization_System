@@ -88,18 +88,18 @@ export function sectionLabel(section, { withSection = true } = {}) {
   return gender === 'F' ? `${prefix}F-${num}` : `${prefix}${num}`;
 }
 
+// Level colors are now CSS variables (defined in index.css :root + the dark block)
+// so cards flip with the theme. Light values are unchanged from before; the
+// FU-156 Junior-contrast tuning now lives on --lvl-ju-* in index.css.
 export const LEVEL_COLORS = {
-  Freshman:  { bg:'#daeef3', border:'#1f6b7a', text:'#0d3d46' },
-  Sophomore: { bg:'#e2efda', border:'#2d6a2e', text:'#1a3d1b' },
-  // NEW-FU-156: darkened Junior text #6b4e00 → #4f3700. Old value was
-  // 5.79:1 on Hard-conflict pink — barely clears the new ≥5.5 bar. New
-  // value: 10.02:1 on its own amber bg, 8.37:1 on Hard conflict (AAA).
-  Junior:    { bg:'#fff2cc', border:'#b8860b', text:'#4f3700' },
-  Senior:    { bg:'#e8e0f5', border:'#6b3fa0', text:'#3b1f5e' },
-  Graduate:  { bg:'#EADDC1', border:'#6B3FA0', text:'#3d0f21' },
+  Freshman:  { bg:'var(--lvl-fr-bg)', border:'var(--lvl-fr-bd)', text:'var(--lvl-fr-tx)' },
+  Sophomore: { bg:'var(--lvl-so-bg)', border:'var(--lvl-so-bd)', text:'var(--lvl-so-tx)' },
+  Junior:    { bg:'var(--lvl-ju-bg)', border:'var(--lvl-ju-bd)', text:'var(--lvl-ju-tx)' },
+  Senior:    { bg:'var(--lvl-se-bg)', border:'var(--lvl-se-bd)', text:'var(--lvl-se-tx)' },
+  Graduate:  { bg:'var(--lvl-gr-bg)', border:'var(--lvl-gr-bd)', text:'var(--lvl-gr-tx)' },
 };
-export const SOFT_CONFLICT_BG = '#fffacd';
-export const HARD_CONFLICT_BG = '#ffd5d5';
+export const SOFT_CONFLICT_BG = 'var(--conflict-soft-bg)';
+export const HARD_CONFLICT_BG = 'var(--conflict-hard-bg)';
 export const PX_PER_MIN = 2.2;
 
 const initialState = {
