@@ -5,12 +5,15 @@ import App from './App.jsx';
 // shows a recovery surface instead of unmounting the whole React tree
 // (which used to leave the user with a blank white page).
 import ErrorBoundary from './components/ErrorBoundary.jsx';
+import { ThemeProvider } from './context/ThemeContext.jsx';
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      <ThemeProvider>
+        <App />
+      </ThemeProvider>
     </ErrorBoundary>
   </React.StrictMode>
 );

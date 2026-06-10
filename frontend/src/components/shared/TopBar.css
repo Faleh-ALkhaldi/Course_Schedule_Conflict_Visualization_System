@@ -199,3 +199,24 @@
   .topbar > * { flex-shrink: 0; }
   .topbar-views { flex: 0 0 auto; justify-content: flex-start; }
 }
+
+/* Theme toggle (Phase 0 dark-mode upgrade) — icon button in the top-bar actions. */
+.topbar-theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 8px;
+  color: var(--slate-300);
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.topbar-theme-toggle:hover {
+  background: rgba(255,255,255,.08);
+  color: var(--white);
+  border-color: rgba(255,255,255,.28);
+}
+.topbar-theme-toggle .ui-ico { width: 17px; height: 17px; }

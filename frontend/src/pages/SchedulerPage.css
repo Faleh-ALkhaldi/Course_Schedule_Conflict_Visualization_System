@@ -163,3 +163,21 @@
   .scheduler-body { flex-direction: column; height: auto; overflow: visible; }
   .scheduler-main { overflow: visible; }
 }
+
+/* ── Dark theme — app shell (Phase 0 foundation) ─────────────────────────────
+   The frame goes dark; the chrome (TopBar/Sidebar), grid, and modals get their
+   full dark treatment in later phases. Each surface is themed together with its
+   text so nothing ends up low-contrast. The new indigo --accent is used here;
+   the rest of the app migrates teal -> --accent in its phase. */
+[data-theme="dark"] .scheduler-main { background: var(--bg-app); }
+[data-theme="dark"] .view-label {
+  background: var(--bg-surface);
+  color: var(--fg);
+  border-bottom-color: var(--border-subtle);
+}
+[data-theme="dark"] .view-hint { color: var(--fg-dim); }
+[data-theme="dark"] .sg-view-toggle { background: var(--bg-elevated); border-color: var(--border-strong); }
+[data-theme="dark"] .sg-vt-btn { color: var(--fg-dim); }
+[data-theme="dark"] .sg-vt-btn:hover { color: var(--fg); }
+[data-theme="dark"] .sg-vt-btn.active { background: var(--accent); color: var(--accent-contrast); }
+[data-theme="dark"] .sg-vt-btn + .sg-vt-btn { border-left-color: var(--border-strong); }

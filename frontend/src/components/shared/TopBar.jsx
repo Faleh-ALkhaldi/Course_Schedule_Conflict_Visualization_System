@@ -3,6 +3,7 @@ import { useApp, VIEWS } from '../../context/AppContext.jsx';
 import { TermPicker } from './TermPicker.jsx';
 // NEW-FU-503 (Phase 123): shared SVG icons replace the mixed emoji glyphs.
 import Ico from './Icons.jsx';
+import ThemeToggle from './ThemeToggle.jsx';
 import './TopBar.css';
 
 // NEW-FU-165: legacy semester → term-code display map. Kept for the
@@ -130,6 +131,7 @@ export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitch
           <Ico name="upload" /><span>Import</span></button>
         <button className="topbar-btn export" onClick={onExport}
           disabled={!schedule}><Ico name="download" /><span>Export</span></button>
+        <ThemeToggle />
         <div className="topbar-user">
           <span className="topbar-username">{user?.username}</span>
           {/* NEW-FU-476 (Phase 114): confirm before logging out (onLogout asks via the

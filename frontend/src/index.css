@@ -62,6 +62,44 @@
   --day-col-w:  140px;
   --row-h:      52px;
   --header-row-h: 38px;
+
+  /* Accent — indigo (new primary interactive accent, dark-mode upgrade). */
+  --accent:          #4f46e5;
+  --accent-hover:    #4338ca;
+  --accent-soft:     #eef2ff;
+  --accent-contrast: #ffffff;
+
+  /* Theme-aware semantic tokens. In light they alias the current palette, so
+     light mode is visually unchanged. The [data-theme="dark"] block overrides
+     them; components adopt the --bg and --fg tokens per phase so each surface and its text
+     flip together (never light text on an unthemed light surface). */
+  --bg-app:        var(--slate-100);
+  --bg-surface:    var(--white);
+  --bg-elevated:   var(--white);
+  --border-subtle: var(--slate-200);
+  --border-strong: var(--slate-300);
+  --fg:            var(--text-primary);
+  --fg-dim:        var(--text-secondary);
+  --fg-muted:      var(--text-muted);
+}
+
+/* ── Dark theme ──────────────────────────────────────────────────────────────
+   Set by ThemeContext on <html data-theme="dark">; default follows the OS
+   (prefers-color-scheme). Only the theme-aware tokens flip here. */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-app:        #0b1220;
+  --bg-surface:    #131c2e;
+  --bg-elevated:   #1b2942;
+  --border-subtle: #233248;
+  --border-strong: #324056;
+  --fg:            #e8edf5;
+  --fg-dim:        #aeb9cc;
+  --fg-muted:      #8a99b2;
+  --accent:        #818cf8;
+  --accent-hover:  #a5b4fc;
+  --accent-soft:   #1e2747;
+  --accent-contrast: #0b1220;
 }
 
 /* ── Reset ───────────────────────────────────────────────────────────────────── */
@@ -71,7 +109,7 @@ body {
   font-family: var(--font-body);
   font-size: 0.95rem;            /* ~14.25px default body text */
   line-height: 1.45;
-  background: var(--slate-100);
+  background: var(--bg-app);
   color: var(--text-primary);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
@@ -83,6 +121,9 @@ body {
 ::-webkit-scrollbar-track { background: var(--slate-100); }
 ::-webkit-scrollbar-thumb { background: var(--slate-300); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--slate-400); }
+[data-theme="dark"] ::-webkit-scrollbar-track { background: var(--bg-app); }
+[data-theme="dark"] ::-webkit-scrollbar-thumb { background: var(--border-strong); }
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: var(--slate-500); }
 
 /* ── Utility ─────────────────────────────────────────────────────────────────── */
 .mono { font-family: var(--font-mono); }
