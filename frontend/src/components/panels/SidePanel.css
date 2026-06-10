@@ -613,6 +613,16 @@
 .sp-dummy-advisory-text strong { display: block; color: #92400e; margin-bottom: 2px; }
 .sp-dummy-advisory-text span { color: #92400e; opacity: 0.85; }
 
+/* Hover micro-interactions — smooth feedback + a subtle slide on interactive
+   sidebar rows so the panel feels responsive. Hover-only, so no layout churn;
+   the global prefers-reduced-motion guard neutralises the transition. */
+.sp-section-item, .sp-course-item, .sp-course-card {
+  transition: background .14s ease, transform .14s ease, box-shadow .14s ease;
+}
+.sp-section-item.clickable:hover, .sp-course-item:hover {
+  transform: translateX(2px);
+}
+
 /* Responsive: on phones the sidebar stacks above the grid (see SchedulerPage.css);
    give it full width and cap its height so the grid stays reachable below it. */
 @media (max-width: 768px) {
