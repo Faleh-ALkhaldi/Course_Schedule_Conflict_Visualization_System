@@ -293,7 +293,7 @@ async function testTermPickerOpens(ctx) {
 // unarchives via the row button and confirms it's back in the default view.
 // Cleanup is in a finally so a half-failed run doesn't leave orphans.
 async function testTermArchiveFlow(ctx) {
-  const SMOKE_CODE = '271'; // Fall 2027 — distinct from Bug #6's read-only flow
+  const SMOKE_CODE = '991'; // reserved test-only code — must NEVER collide with a real working term (271 was a real term; the old value silently deleted it)
   const adminToken = (await api('POST', '/auth/login', null, ADMIN)).token;
 
   // Pre-clean: if a prior crashed run left this code around, hard-delete it.
