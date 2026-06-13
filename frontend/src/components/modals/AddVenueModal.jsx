@@ -161,7 +161,8 @@ export function venueConflictError(newName, existingVenues) {
 // SidePanel doesn't pass it — the new entry just appears in the
 // sidebar list via the ADD_VENUE reducer action.
 export default function AddVenueModal({ onClose, showToast, onCreated }) {
-  const { addVenue, venues } = useApp();
+  const { addVenue, venues, schedule } = useApp();
+  const termCode = schedule?.semester ?? null;
 
   useEffect(() => {
     function onKeyDown(e) { if (e.key === 'Escape') onClose(); }
@@ -169,19 +170,20 @@ export default function AddVenueModal({ onClose, showToast, onCreated }) {
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
 
-  // NEW-FU-483 (Phase 117): fetch ALL venues (no term filter) once on mount so the
-  // duplicate check below can see venues that have zero section references in the
-  // current term. The context `venues` list only contains venues that are actively
-  // used (VenueRepository.findAll(termCode) JOINs sections), so unreferenced venues
-  // like 01-002 are invisible to it — but they must still block conflicting adds.
-  // We fall back to the context list if the fetch fails (backend is always the
-  // authoritative guard anyway, so a stale client-side check is just UX polish).
+  // NEW-FU-525 (Batch 8 Issue 2): fetch THIS TERM's venues for the duplicate check —
+  // term-scoped, NOT the global list. The old FU-483 code fetched api.getVenues()
+  // with no term filter, so a room registered in ANOTHER term (e.g. 01-0001 owned by
+  // a different semester) wrongly blocked adding it to a blank term — the reported
+  // cross-term "phantom" leak. findAll(termCode) now includes term-OWNED venues even
+  // when they have zero section references (owner_semester, Batch 3), so the term
+  // list already sees unreferenced-but-owned rooms; we no longer need (or want) the
+  // global list. Each term is independent: two terms may both have a 01-0001.
   const [allVenues, setAllVenues] = useState([]);
   useEffect(() => {
-    api.getVenues()                          // no term → all non-dummy venues
+    api.getVenues(termCode)                  // term-scoped → only this term's venues
       .then(data => setAllVenues(Array.isArray(data) ? data : []))
-      .catch(() => setAllVenues([]));        // silently fall back to context list
-  }, []);                                    // run once on modal open
+      .catch(() => setAllVenues([]));        // fall back to context list (also term-scoped)
+  }, [termCode]);                            // refetch if the active term changes
 
   const [building, setBuilding] = useState('');
   const [room,     setRoom]     = useState('');

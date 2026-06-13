@@ -82,7 +82,13 @@ export function isLabelSlot(slot) {
 // repository layer normalized things, and some legacy paths still
 // pass raw rows through.
 export function sectionLabel(section, { withSection = true } = {}) {
-  const num    = (section?.sectionNumber ?? section?.section_number ?? '').toString();
+  const raw    = (section?.sectionNumber ?? section?.section_number ?? '').toString();
+  // NEW-FU-526 (Batch 8 Issue 1): section numbers are a two-digit format — always
+  // DISPLAY them zero-padded (1 → 01, 3 → 03), even in the live modal preview where
+  // the user has typed a single digit before save. Pad only pure-digit values so the
+  // "__" placeholder and any non-numeric label pass through untouched. Stored values
+  // are already padded, so this is a no-op for them.
+  const num    = /^\d+$/.test(raw) ? raw.padStart(2, '0') : raw;
   const gender = section?.gender ?? 'M';
   const prefix = withSection ? '§' : '';
   return gender === 'F' ? `${prefix}F-${num}` : `${prefix}${num}`;
@@ -239,6 +245,21 @@ export function AppProvider({ children }) {
   const loadView = useCallback(async (scheduleId, view, filterId) => {
     const mySeq = ++loadViewSeq.current;
     dispatch({ type:'SET_LOADING', value:true });
+    // NEW-FU-527 (Batch 8 Issue 4): Venue/Instructor view needs a selected resource.
+    // Without one (booting into a persisted Venue View, or before a venue is picked)
+    // the sections fetch would 400 with a raw internal "venueId is required for
+    // view=venue" message that leaked to the user as an error toast. Show the empty
+    // "select a venue/instructor" state instead — but still refresh the conflicts
+    // panel (it needs no resource id), so the sidebar stays accurate.
+    if ((view === VIEWS.VENUE || view === VIEWS.TEACHER) && !filterId) {
+      dispatch({ type:'SET_VIEW_DATA', sections: [], officeHours: [] });
+      try {
+        const c = await api.getConflicts(scheduleId);
+        if (mySeq === loadViewSeq.current) dispatch({ type:'SET_CONFLICTS', conflicts: c.conflicts ?? [] });
+      } catch { /* conflicts are advisory here — ignore a transient failure */ }
+      if (mySeq === loadViewSeq.current) dispatch({ type:'SET_LOADING', value:false });
+      return;
+    }
     // NEW-FU-71: Promise.allSettled instead of Promise.all so a transient
     // failure of one half (e.g., /conflicts returns 5xx during a brief DB
     // hiccup) doesn't discard the other half's successful response. Same
