@@ -162,6 +162,14 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   // buildMismatch=true to show the EADDRINUSE-aware banner with the
   // exact kill-and-restart command.
   useEffect(() => {
+    // NEW-FU-524 (Batch 7 Issue 3): suppress this SHA-mismatch banner in DEV.
+    // Both VITE_GIT_SHA (baked at vite start) and the backend gitSha (read at
+    // backend start) freeze at process startup, so ANY commit makes them drift and
+    // the banner false-positives — even though nodemon keeps the routes current.
+    // The banner exists for the stale-process EADDRINUSE footgun, which the
+    // self-cleaning `npm run dev` (frees the port before starting) now prevents.
+    // In a production build the SHA mismatch is a real bad-deploy signal → keep it.
+    if (import.meta.env.DEV) return;
     const frontendSha = import.meta.env.VITE_GIT_SHA;
     if (!frontendSha || frontendSha === 'unknown') return; // can't compare
     let cancelled = false;
