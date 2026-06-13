@@ -8,8 +8,8 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
-    "dev:fresh": "lsof -ti:${PORT:-4000} | xargs -r kill -9 ; npm run dev",
+    "dev": "lsof -ti:${PORT:-4000} | xargs kill -9 2>/dev/null ; nodemon src/index.js",
+    "dev:fresh": "npm run dev",
     "test": "NODE_ENV=test jest --runInBand --forceExit",
     "test:unit": "SKIP_TEST_DB=1 jest tests/unit --runInBand --forceExit",
     "test:int": "NODE_ENV=test jest tests/integration --runInBand --forceExit",

@@ -963,6 +963,11 @@ export default function SchedulerPage() {
         if (!((view === VIEWS.TEACHER || view === VIEWS.VENUE) && !filterId)) {
           await loadView(schedule.id, view, filterId);
         }
+        // NEW-FU-522 (Batch 7 Issue 2): Suggest may MINT placeholder (dummy)
+        // instructors/venues. Refresh the reference lists so those dummies enter
+        // `instructors`/`venues` — otherwise dummyInstrCount/dummyVenueCount stay 0
+        // and the "X instructors / Y venues needed to go live" banner never shows.
+        await loadReference(schedule.semester);
         return r;
       });
       const hard   = (result.conflicts??[]).filter(c=>c.severity==='Hard').length;
@@ -1255,7 +1260,13 @@ export default function SchedulerPage() {
           scheduleId={schedule.id}
           showToast={showToast}
           onClose={() => setShowQuickFix(false)}
-          onApplied={() => loadView(schedule.id, view, filterId)}
+          onApplied={async () => {
+            await loadView(schedule.id, view, filterId);
+            // NEW-FU-522 (Batch 7 Issue 2): Quick Fix add-dummy ops mint placeholder
+            // instructors/venues — refresh the reference lists so the "needed to go
+            // live" banner reflects them (parity with the Suggest apply path).
+            await loadReference(schedule.semester);
+          }}
         />
       )}
 

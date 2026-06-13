@@ -146,3 +146,25 @@
 [data-theme="dark"] .modal-title,
 [data-theme="dark"] .modal-question,
 [data-theme="dark"] .sp-course-code { color: var(--fg); }
+
+/* NEW-FU-523 (Batch 7 Issue 4): dark-mode readability of PRIMARY ACTION buttons.
+   .sm-btn-save (the section-modal Save AND the "Run Suggest" button), .sp-submit
+   (sidebar add-section), and .login-btn all fill with var(--navy-800), which in
+   dark mode is #0f1a2e — DARKER than the surface they sit on (#1c2942 modal /
+   #141d30 panel). The button vanished into its background (the reported low-
+   contrast "Run Suggest"). Give them the app's indigo accent fill with readable
+   contrast text — clearly noticeable, not glaring, consistent with the palette.
+   Disabled state keeps its .5 opacity so "can't act yet" still reads as muted. */
+[data-theme="dark"] .sm-btn-save,
+[data-theme="dark"] .sp-submit,
+[data-theme="dark"] .login-btn {
+  background: var(--accent) !important;
+  color: var(--accent-contrast) !important;
+  border-color: var(--accent) !important;
+}
+[data-theme="dark"] .sm-btn-save:hover:not(:disabled),
+[data-theme="dark"] .sp-submit:hover:not(:disabled),
+[data-theme="dark"] .login-btn:hover:not(:disabled) {
+  background: var(--accent-hover) !important;
+  border-color: var(--accent-hover) !important;
+}

@@ -697,6 +697,13 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     return findings;
   }, [mode, form, sections, venues, courseIsExternal, courseIsCapstone, existing]);
 
+  // NEW-FU-521 (Batch 7 Issue 1): a HARD conflict in the live preview must BLOCK
+  // Save — the modal used to only warn ("Submitting would create 2 conflicts")
+  // while leaving Save enabled, so the user could commit a hard clash. Now Save is
+  // disabled until the form is conflict-free (the busy pickers guide them to free
+  // options). Soft findings (R-11/R-12 type hints) are advisory and do NOT block.
+  const hasHardConflict = (conflictPreview || []).some(f => f.severity === 'Hard');
+
   // NEW-FU-277 (Phase 53 #3): partition instructors into "prior" (taught
   // the selected course in any prior term) and "other" so the dropdown
   // surfaces the most-likely candidates first. Without a selected course,
@@ -1216,8 +1223,8 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>
               {/* External courses (SWE 399) need no section row — submit just closes. */}
               <button type="submit" className="sm-btn-save"
-                disabled={busy || scheduleLocked || courseMissing || sectionNumberMissing || !!sectionNumError || !!durationError || !!timeError || instructorMissing || venueMissing || venueTypeMismatch}
-                title={scheduleLocked ? lockedMsg : courseMissing ? 'Choose a course first' : sectionNumberMissing ? 'Enter a section number first' : durationError || timeError || (instructorMissing ? 'Choose an instructor first' : venueMissing ? 'Choose a venue first' : venueTypeMismatch ? 'Pick a venue that matches the section type first' : sectionNumError ? 'Fix the section number first' : undefined)}>
+                disabled={busy || scheduleLocked || courseMissing || sectionNumberMissing || !!sectionNumError || !!durationError || !!timeError || instructorMissing || venueMissing || venueTypeMismatch || hasHardConflict}
+                title={scheduleLocked ? lockedMsg : courseMissing ? 'Choose a course first' : sectionNumberMissing ? 'Enter a section number first' : durationError || timeError || (instructorMissing ? 'Choose an instructor first' : venueMissing ? 'Choose a venue first' : venueTypeMismatch ? 'Pick a venue that matches the section type first' : sectionNumError ? 'Fix the section number first' : hasHardConflict ? 'Resolve the conflict first — pick a free instructor/venue or a different time' : undefined)}>
                 {busy ? 'Saving…' : mode==='add'
                   ? (courseIsExternal ? 'OK, course noted' : 'Add section')
                   : 'Save'}
@@ -1303,8 +1310,8 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               {/* NEW-FU-493 (Phase 119 item 3): add sectionNumberMissing so clearing
                   the section number in edit mode also disables Save (parity with add). */}
               <button type="submit" className="sm-btn-save"
-                disabled={busy || scheduleLocked || sectionNumberMissing || !!timeError || !!durationError}
-                title={scheduleLocked ? lockedMsg : sectionNumberMissing ? 'Enter a section number first' : timeError || durationError || undefined}>
+                disabled={busy || scheduleLocked || sectionNumberMissing || !!timeError || !!durationError || hasHardConflict}
+                title={scheduleLocked ? lockedMsg : sectionNumberMissing ? 'Enter a section number first' : timeError || durationError || (hasHardConflict ? 'Resolve the conflict first — move to a free time, instructor or venue' : undefined)}>
                 {busy ? 'Saving…' : 'Save'}
               </button>
             </div>
