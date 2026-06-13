@@ -6,6 +6,9 @@ import * as api from '../../api/index.js';
 // stays in flow — the new entity is auto-selected on close.
 import AddInstructorModal from './AddInstructorModal.jsx';
 import AddVenueModal      from './AddVenueModal.jsx';
+// NEW-FU-510 (Batch 1): shared section-number normalize + range validation,
+// so a single-digit "2" is accepted and treated as "02" everywhere.
+import { padSectionNumber, isValidSectionNumber } from '../../utils/sectionNumber.js';
 import './SectionModal.css';
 
 // NEW-FU-277 (Phase 53 #1): full day-template table mirroring
@@ -201,12 +204,15 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     const num  = String(form.sectionNumber ?? '').trim();
     const type = form.sectionType === 'Lab' ? 'Lab' : 'Lecture';
     if (!num) return null; // emptiness is handled by the "required" submit guard
-    const ok = (form.sectionType === 'Lab' ? /^[5-9][0-9]$/ : /^(0[1-9]|[1-4][0-9])$/).test(num);
-    if (ok) return null;
-    const pfx = form.gender === 'F' ? 'F-' : '';
-    const lo  = form.sectionType === 'Lab' ? '50' : '01';
-    const hi  = form.sectionType === 'Lab' ? '99' : '49';
-    return `${type} sections use ${pfx}${lo}–${pfx}${hi} (two digits). “${pfx}${num}” is out of range — use a ${pfx}${lo}–${pfx}${hi} number.`;
+    // NEW-FU-510 (Batch 1): normalize a single digit ("2" → "02") before the
+    // range check, so 1–9 is accepted; the shared util keeps this in lockstep
+    // with the submit guard and the backend.
+    if (isValidSectionNumber(num, form.sectionType)) return null;
+    const pfx  = form.gender === 'F' ? 'F-' : '';
+    const lo   = form.sectionType === 'Lab' ? '50' : '01';
+    const hi   = form.sectionType === 'Lab' ? '99' : '49';
+    const shown = padSectionNumber(num);
+    return `${type} sections use ${pfx}${lo}–${pfx}${hi}. “${pfx}${shown}” is out of range — use a ${pfx}${lo}–${pfx}${hi} number.`;
   })();
   // NEW-FU-401 (Phase 101): in-app delete confirmation replaces the jarring
   // native window.confirm() — a styled confirm step inside the same modal
@@ -345,8 +351,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     // client-side (the backend also rejects, but a clear inline message beats a
     // round-trip "constraint violation"). External courses have no section row.
     if (!(mode === 'add' && courseIsExternal)) {
-      const range = form.sectionType === 'Lab' ? /^[5-9][0-9]$/ : /^(0[1-9]|[1-4][0-9])$/;
-      if (form.sectionNumber && !range.test(form.sectionNumber)) {
+      // NEW-FU-510 (Batch 1): a single digit ("2") normalizes to "02" and is
+      // accepted; only a genuinely out-of-range value is rejected here.
+      if (form.sectionNumber && !isValidSectionNumber(form.sectionNumber, form.sectionType)) {
         const lo = form.sectionType === 'Lab' ? '50' : '01';
         const hi = form.sectionType === 'Lab' ? '99' : '49';
         const pfx = form.gender === 'F' ? 'F-' : '';
@@ -382,7 +389,10 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
           courseId:      form.courseId,
           instructorId:  form.instructorId  || undefined,
           venueId:       form.venueId       || undefined,
-          sectionNumber: form.sectionNumber,
+          // NEW-FU-510 (Batch 1): submit the canonical two-digit value ("2" → "02")
+          // so the stored value — and the UNIQUE (schedule, course, number, day)
+          // duplicate check — operate on the padded form.
+          sectionNumber: padSectionNumber(form.sectionNumber),
           // NEW-FU-104: forward sectionType. Backend validates that 'Lab'
           // is only legal on a course with has_lab=true.
           sectionType:   form.sectionType,
@@ -402,7 +412,8 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
           infoOnly:      true,
           instructorId:  form.instructorId  || null,
           venueId:       form.venueId       || null,
-          sectionNumber: form.sectionNumber,
+          // NEW-FU-510 (Batch 1): canonical two-digit value on edit too.
+          sectionNumber: padSectionNumber(form.sectionNumber),
           // NEW-FU-104: forward sectionType on edit too (propagates to all
           // sibling rows via the service's updateSectionInfo path).
           sectionType:   form.sectionType,

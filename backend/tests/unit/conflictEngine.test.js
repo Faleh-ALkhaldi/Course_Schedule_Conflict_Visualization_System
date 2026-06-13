@@ -461,13 +461,21 @@ describe('R10 — One Venue Per Section (NEW-FU-91)', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Section-number format helper (NEW-FU-95)
+// Section-number format helper (NEW-FU-95 / NEW-FU-510)
 // The DB CHECK + controller regex agree on '01'..'99' (two-digit, zero-padded).
-// We exercise the regex directly here so it's locked in.
+// NEW-FU-510 (Batch 1): a bare single digit ("2") is now ACCEPTED — the
+// controller normalizes it to its padded form ("02") before validating and
+// storing. We mirror padSectionNumber() here (same logic as
+// backend/src/controllers/index.js + frontend/src/utils/sectionNumber.js) and
+// exercise the normalize-then-validate path so the new behavior is locked in.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('Section number format (NEW-FU-95)', () => {
+describe('Section number format (NEW-FU-95 / NEW-FU-510)', () => {
   const SECTION_NUM_RE = /^(0[1-9]|[1-9][0-9])$/;
+  // Mirror of padSectionNumber: a single 0–9 digit is zero-padded; anything
+  // else is returned trimmed and unchanged.
+  const pad = s => { const t = String(s ?? '').trim(); return /^[0-9]$/.test(t) ? t.padStart(2,'0') : t; };
+  const accepts = s => SECTION_NUM_RE.test(pad(s));
   test('TC-30: "01" through "09" are valid', () => {
     for (const n of ['01','02','03','04','05','06','07','08','09']) {
       expect(SECTION_NUM_RE.test(n)).toBe(true);
@@ -481,14 +489,24 @@ describe('Section number format (NEW-FU-95)', () => {
   test('TC-31: "00" is invalid (no zero section)', () => {
     expect(SECTION_NUM_RE.test('00')).toBe(false);
   });
-  test('TC-31b: single-digit and triple-digit are invalid', () => {
-    expect(SECTION_NUM_RE.test('1')).toBe(false);
-    expect(SECTION_NUM_RE.test('100')).toBe(false);
+  test('TC-31b: single digits 1–9 are accepted (normalized to "01"–"09")', () => {
+    for (const n of ['1','2','3','4','5','6','7','8','9']) {
+      expect(pad(n)).toBe('0' + n);
+      expect(accepts(n)).toBe(true);
+    }
+  });
+  test('TC-31b2: "0" normalizes to "00" and is still rejected; triple-digit invalid', () => {
+    expect(pad('0')).toBe('00');
+    expect(accepts('0')).toBe(false);
+    expect(accepts('100')).toBe(false);
   });
   test('TC-31c: letters/symbols are invalid', () => {
-    expect(SECTION_NUM_RE.test('A')).toBe(false);
-    expect(SECTION_NUM_RE.test('1A')).toBe(false);
-    expect(SECTION_NUM_RE.test('01a')).toBe(false);
+    expect(accepts('A')).toBe(false);
+    expect(accepts('1A')).toBe(false);
+    expect(accepts('01a')).toBe(false);
+    // A leading/trailing space around a two-digit value is trimmed then valid…
+    expect(accepts(' 01')).toBe(true);
+    // …but the raw regex (no normalization) still rejects the spaced form.
     expect(SECTION_NUM_RE.test(' 01')).toBe(false);
   });
 });
