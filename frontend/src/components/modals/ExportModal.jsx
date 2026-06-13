@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 // NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
 import Ico from '../shared/Icons.jsx';
 import { useApp } from '../../context/AppContext.jsx';
@@ -61,6 +61,50 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
 
   // The current format's metadata — used for the button label and the toast.
   const fmtMeta = EXPORT_FORMATS.find(f => f.id === format) ?? EXPORT_FORMATS[0];
+
+  // NEW: empty-schedule guard. A visual-grid export of an instructor or venue
+  // that has NO section in the current schedule produces a blank grid — and
+  // (now that the resource lists are owned per term, not derived from sections)
+  // the picker can legitimately list instructors/venues with zero classes. We
+  // fetch the whole schedule's sections ONCE (the unfiltered course view returns
+  // every section with its instructorId/venueId) and flag the entries that have
+  // no class, so they can be marked "· no classes" and disabled in the picker.
+  //
+  // `null` means "not loaded yet / fetch failed" — in that state we disable
+  // nothing, so a transient backend hiccup can never block a legitimate export.
+  const [scheduleSections, setScheduleSections] = useState(null);
+  useEffect(() => {
+    if (!schedule?.id) return;
+    let cancelled = false;
+    api.getSections(schedule.id, 'course')
+      .then(data => { if (!cancelled) setScheduleSections(data?.sections ?? data ?? []); })
+      .catch(() => { if (!cancelled) setScheduleSections(null); });
+    return () => { cancelled = true; };
+  }, [schedule?.id]);
+
+  const sectionsLoaded   = scheduleSections !== null;
+  const usedInstructorIds = useMemo(
+    () => new Set((scheduleSections ?? []).map(s => s.instructorId).filter(Boolean)),
+    [scheduleSections]
+  );
+  const usedVenueIds = useMemo(
+    () => new Set((scheduleSections ?? []).map(s => s.venueId).filter(Boolean)),
+    [scheduleSections]
+  );
+  // Helpers: an entry "has classes" if we haven't loaded sections yet (don't
+  // over-disable) OR it appears on at least one section.
+  const instructorHasClasses = (id) => !sectionsLoaded || usedInstructorIds.has(id);
+  const venueHasClasses       = (id) => !sectionsLoaded || usedVenueIds.has(id);
+
+  // If the pre-selected instructor/venue (carried in from the active view's
+  // filterId) turns out to have no classes once sections load, clear it so the
+  // disabled option can't sit selected and arm an empty-grid download.
+  useEffect(() => {
+    if (sectionsLoaded && instrId && !usedInstructorIds.has(instrId)) setInstrId('');
+  }, [sectionsLoaded, instrId, usedInstructorIds]);
+  useEffect(() => {
+    if (sectionsLoaded && venueId && !usedVenueIds.has(venueId)) setVenueId('');
+  }, [sectionsLoaded, venueId, usedVenueIds]);
 
   function handleExport() {
     const view  = choice === 'teacher' ? 'teacher' : choice === 'venue' ? 'venue' : 'full';
@@ -185,9 +229,14 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                         }}
                       >
                         <option value="">Select an instructor…</option>
-                        {instructors.map(i =>
-                          <option key={i.id} value={i.id}>{i.name}</option>
-                        )}
+                        {instructors.map(i => {
+                          const hasClasses = instructorHasClasses(i.id);
+                          return (
+                            <option key={i.id} value={i.id} disabled={!hasClasses}>
+                              {i.name}{hasClasses ? '' : ' · no classes'}
+                            </option>
+                          );
+                        })}
                       </select>
                       {!instrId && (
                         <div style={{
@@ -225,9 +274,14 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                         }}
                       >
                         <option value="">Select a venue…</option>
-                        {venues.map(v =>
-                          <option key={v.id} value={v.id}>{v.name} ({v.type})</option>
-                        )}
+                        {venues.map(v => {
+                          const hasClasses = venueHasClasses(v.id);
+                          return (
+                            <option key={v.id} value={v.id} disabled={!hasClasses}>
+                              {v.name} ({v.type}){hasClasses ? '' : ' · no classes'}
+                            </option>
+                          );
+                        })}
                       </select>
                       {!venueId && (
                         <div style={{
