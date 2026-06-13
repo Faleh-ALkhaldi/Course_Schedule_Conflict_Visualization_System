@@ -3,6 +3,16 @@ import { DAYS, useApp } from '../../context/AppContext.jsx';
 import * as api from '../../api/index.js';
 import './SectionModal.css'; // reuse same modal styles
 
+// NEW-FU-511 (Batch 2): add one hour to an "HH:MM" time, clamped to 16:00 (the
+// office-hours upper edge). Used to auto-move the end time when the user sets a
+// start at/after the current end, so an office-hours block stays a valid +1h span.
+const OH_MAX_MIN = 16 * 60; // 16:00
+function plusOneHourClamped(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  const total = Math.min(h * 60 + m + 60, OH_MAX_MIN);
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 export default function OfficeHourModal({ officeHour, instructorId, onClose, onSaved, showToast }) {
   // NEW-FU-206: when active term is archived, the modal still opens (so the
   // admin can SEE the OH) but every form input and the Save / Delete buttons
@@ -109,7 +119,17 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
               <label>Start time</label>
               <input type="time" min={OH_MIN} max={OH_MAX} value={form.startTime}
                 disabled={isArchived}
-                onChange={e => setForm(f => ({...f, startTime: clampOH(e.target.value)}))} required />
+                onChange={e => {
+                  // NEW-FU-511 (Batch 2): auto-move the end to start+1h (capped at
+                  // 16:00) when the new start lands at/after the current end, so
+                  // the block stays valid instead of flagging an ordering error.
+                  const start = clampOH(e.target.value);
+                  setForm(f => ({
+                    ...f,
+                    startTime: start,
+                    endTime: f.endTime && start >= f.endTime ? plusOneHourClamped(start) : f.endTime,
+                  }));
+                }} required />
             </div>
             <div className="sm-field">
               <label>End time</label>

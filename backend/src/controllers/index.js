@@ -827,6 +827,16 @@ const createInstructor = ah(async (req, res) => {
   // NEW-FU-46: enforce DB VARCHAR limits before pg sees the value.
   if (!isBoundedString(name,  120)) return badLength(res, 'name',  120);
   if (!isBoundedString(email, 120)) return badLength(res, 'email', 120);
+  // NEW-FU-510 (Batch 2): instructor names accept only English letters plus
+  // space, HYPHEN and APOSTROPHE — the seed already has "HASAN AL-KAF" and
+  // "AL-KHALDI", so a letters-only rule would reject legitimate names. This is
+  // the server-side backstop for the live front-end charset filter.
+  // EXEMPT the solver's placeholder names ("NEW INSTRUCTOR 1") — they carry a
+  // digit and are minted programmatically, never typed by a user, so a
+  // letters-only check must not break dummy creation.
+  const isDummyInstrName = /^NEW INSTRUCTOR \d+$/i.test(String(name).trim());
+  if (!isDummyInstrName && !/^[A-Za-z\s'-]+$/.test(String(name).trim()))
+    return badRequest(res, 'name may contain only letters, spaces, hyphens and apostrophes.');
   // NEW-FU-59: trim leading/trailing whitespace so " Dr. Hassan " and
   // "Dr. Hassan" don't end up as two distinct DB rows under the UNIQUE
   // constraint they nominally share.

@@ -54,6 +54,29 @@ function deriveEmail(fullName) {
   return `${cleaned.join('.')}@kfupm.edu.sa`;
 }
 
+// NEW-FU-510 (Batch 2): the full-name field accepts only English letters plus
+// space, HYPHEN and APOSTROPHE — the seed already has "HASAN AL-KAF" and
+// "AL-KHALDI", so a letters-only filter would corrupt those. Digits and other
+// punctuation (the "3738 @#$" case) are stripped at the source. We also
+// upper-case live to match the stored convention (the backend's
+// normalizeInstructorName upper-cases server-side; this keeps the input and the
+// saved value identical so there's no surprise jump on save).
+const NAME_DISALLOWED = /[^A-Za-z\s'-]/g;
+const NAME_ALLOWED_RE = /^[A-Za-z\s'-]+$/;
+function sanitizeName(raw) {
+  return raw.replace(NAME_DISALLOWED, '').toUpperCase();
+}
+
+// NEW-FU-511 (Batch 2): add one hour to an "HH:MM" time, clamped to 16:00 — the
+// office-hours upper edge. Used to auto-move the end time when the user sets a
+// start at/after the current end (office hours are a +1h block).
+const OH_MAX_MIN = 16 * 60; // 16:00
+function plusOneHourClamped(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  const total = Math.min(h * 60 + m + 60, OH_MAX_MIN);
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 // `onCreated` (optional): if provided, the new instructor object is
 // passed to it after a successful POST. Used by SectionModal's "+ New"
 // shortcut so the form can auto-select the freshly-created instructor.
@@ -93,15 +116,31 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
   const displayedEmail = emailTouched ? email : derivedEmail;
 
   function handleNameChange(e) {
-    setName(e.target.value);
+    // NEW-FU-510 (Batch 2): sanitize (letters/space/hyphen/apostrophe only) and
+    // upper-case at the source, so disallowed characters never appear in the
+    // field and the displayed value matches what the backend will store.
+    const clean = sanitizeName(e.target.value);
+    setName(clean);
     // When the user hasn't touched email, keep our derived value in
     // state so the submit handler sees the right value if they hit
-    // Enter without ever focusing the email field.
-    if (!emailTouched) setEmail(deriveEmail(e.target.value));
+    // Enter without ever focusing the email field. deriveEmail lowercases
+    // internally, so feeding it the ALL-CAPS name still yields a lowercase email.
+    if (!emailTouched) setEmail(deriveEmail(clean));
   }
   function handleEmailChange(e) {
     setEmailTouched(true);
     setEmail(e.target.value);
+  }
+  // NEW-FU-511 (Batch 2): when the start time moves to at/after the end time,
+  // auto-move the end to start+1h (capped at 16:00) so the block stays valid
+  // instead of bouncing the user with an ordering error. Office hours = +1h.
+  function handleOhStartChange(e) {
+    const start = clampOH(e.target.value);
+    setOh(o => ({
+      ...o,
+      startTime: start,
+      endTime: start >= o.endTime ? plusOneHourClamped(start) : o.endTime,
+    }));
   }
 
   // Light client-side validation. The backend re-validates both fields
@@ -121,7 +160,11 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
                      oh.endTime   >= OH_MIN && oh.endTime   <= OH_MAX;
   const ohOrderOk  = oh.startTime < oh.endTime;
   const ohValid = !!oh.day && !!oh.startTime && !!oh.endTime && ohWindowOk && ohOrderOk;
-  const canSubmit = trimmedName.length > 0 && emailLooksValid && ohValid && !busy;
+  // NEW-FU-510 (Batch 2): belt-and-suspenders charset gate. handleNameChange
+  // already strips disallowed characters at the source, but this also blocks Save
+  // if anything slips through (e.g. a value set programmatically).
+  const nameCharsetOk = trimmedName.length === 0 || NAME_ALLOWED_RE.test(trimmedName);
+  const canSubmit = trimmedName.length > 0 && nameCharsetOk && emailLooksValid && ohValid && !busy;
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -190,7 +233,7 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
                 {OH_DAYS.map(d => <option key={d} value={d}>{d}</option>)}
               </select>
               <input type="time" min={OH_MIN} max={OH_MAX} value={oh.startTime}
-                onChange={e => setOh(o => ({ ...o, startTime: clampOH(e.target.value) }))} aria-label="Office hours start time" />
+                onChange={handleOhStartChange} aria-label="Office hours start time" />
               <input type="time" min={OH_MIN} max={OH_MAX} value={oh.endTime}
                 onChange={e => setOh(o => ({ ...o, endTime: clampOH(e.target.value) }))} aria-label="Office hours end time" />
             </div>
