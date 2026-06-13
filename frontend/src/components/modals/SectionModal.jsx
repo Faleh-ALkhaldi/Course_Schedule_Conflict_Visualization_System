@@ -373,6 +373,12 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     // Save button is already disabled, this also blocks a bypassed submit).
     if (instructorMissing) { setError('Choose an instructor before adding this section.'); return; }
     if (venueMissing)      { setError('Choose a venue before adding this section.'); return; }
+    // NEW-FU-510 (Batch 1): UI-level venue-type gate (defense in depth — the
+    // Save button is already disabled while mismatched). Applies to add + edit-info.
+    if (venueTypeMismatch) {
+      setError(`A ${form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} section needs a ${form.sectionType === 'Lab' ? 'Laboratory' : 'Lecture Hall'} (or Multipurpose) venue.`);
+      return;
+    }
     setBusy(true); setError('');
     try {
       if (mode === 'add') {
@@ -509,6 +515,20 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // stay exempt. These gate Save + show an inline flag until both are chosen.
   const instructorMissing = !courseIsExternal && !form.instructorId;
   const venueMissing      = !courseIsExternal && !courseIsCapstone && !form.venueId;
+  // NEW-FU-510 (Batch 1): venue-TYPE gate. A Lecture belongs in a LectureHall
+  // (or the wildcard Multipurpose); a Lab in a Laboratory (or Multipurpose).
+  // This is a UI-level gate only — it does NOT change the backend R-11/R-12
+  // severity. `allowedVenueTypes` also drives the dropdown filter below; the
+  // currently-selected venue is always kept selectable there so an existing
+  // mismatched assignment can still be seen and corrected.
+  const allowedVenueTypes = form.sectionType === 'Lab'
+    ? ['Laboratory', 'Multipurpose']
+    : ['LectureHall', 'Multipurpose'];
+  const selectedVenue = venues.find(v => v.id === form.venueId);
+  const venueTypeMismatch = !!(
+    selectedVenue && !courseIsCapstone && !courseIsExternal &&
+    !allowedVenueTypes.includes(selectedVenue.type)
+  );
   // NEW-FU-481 (Phase 116): a section needs a COURSE and a SECTION NUMBER too — gate Save
   // on all four (course, section number, instructor, venue) so it can't be saved half-filled.
   // NEW-FU-493 (Phase 119 item 3): section-number check extended to edit mode as well.
@@ -1036,10 +1056,18 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   </button>
                 </label>
                 {/* NEW-FU-277 (Phase 53 #3): grouped by type; busy venues flagged. */}
-                <select id="sm-venue" value={form.venueId} onChange={e=>setForm(f=>({...f,venueId:e.target.value}))}>
+                <select id="sm-venue" value={form.venueId} onChange={e=>setForm(f=>({...f,venueId:e.target.value}))}
+                  aria-invalid={venueTypeMismatch}>
                   <option value="">— No venue —</option>
+                  {/* NEW-FU-510 (Batch 1): show only venue types valid for the
+                      section type (Lec → LectureHall/Multipurpose; Lab →
+                      Laboratory/Multipurpose). The currently-selected venue is
+                      always kept visible — even if mismatched — so an existing
+                      bad assignment can be seen and switched away from. */}
                   {['LectureHall', 'Multipurpose', 'Laboratory'].map(typeGroup => {
-                    const vs = venues.filter(v => v.type === typeGroup);
+                    const vs = venues.filter(v =>
+                      v.type === typeGroup &&
+                      (allowedVenueTypes.includes(typeGroup) || v.id === form.venueId));
                     if (!vs.length) return null;
                     return (
                       <optgroup key={typeGroup} label={typeGroup}>
@@ -1056,6 +1084,12 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   })}
                 </select>
                 {venueMissing && <p className="sm-inline-error" role="alert"><span>A venue is required for every section.</span></p>}
+                {/* NEW-FU-510 (Batch 1): block-and-explain a venue-type mismatch. */}
+                {venueTypeMismatch && (
+                  <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>
+                    {form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} sections need a {form.sectionType === 'Lab' ? 'Laboratory' : 'Lecture Hall'} (or Multipurpose) venue — “{selectedVenue?.name}” is a {selectedVenue?.type}. Pick a valid venue to save.
+                  </span></p>
+                )}
               </div>
             )}
 
@@ -1152,8 +1186,8 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>
               {/* External courses (SWE 399) need no section row — submit just closes. */}
               <button type="submit" className="sm-btn-save"
-                disabled={busy || scheduleLocked || courseMissing || sectionNumberMissing || !!sectionNumError || !!durationError || !!timeError || instructorMissing || venueMissing}
-                title={scheduleLocked ? lockedMsg : courseMissing ? 'Choose a course first' : sectionNumberMissing ? 'Enter a section number first' : durationError || timeError || (instructorMissing ? 'Choose an instructor first' : venueMissing ? 'Choose a venue first' : sectionNumError ? 'Fix the section number first' : undefined)}>
+                disabled={busy || scheduleLocked || courseMissing || sectionNumberMissing || !!sectionNumError || !!durationError || !!timeError || instructorMissing || venueMissing || venueTypeMismatch}
+                title={scheduleLocked ? lockedMsg : courseMissing ? 'Choose a course first' : sectionNumberMissing ? 'Enter a section number first' : durationError || timeError || (instructorMissing ? 'Choose an instructor first' : venueMissing ? 'Choose a venue first' : venueTypeMismatch ? 'Pick a venue that matches the section type first' : sectionNumError ? 'Fix the section number first' : undefined)}>
                 {busy ? 'Saving…' : mode==='add'
                   ? (courseIsExternal ? 'OK, course noted' : 'Add section')
                   : 'Save'}
