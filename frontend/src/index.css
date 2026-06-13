@@ -92,7 +92,12 @@
   --lvl-so-bg:#dcefc4; --lvl-so-bd:#4f8f1f; --lvl-so-tx:#2c4d12;  /* lime green */
   --lvl-ju-bg:#fbe7b6; --lvl-ju-bd:#9a6a08; --lvl-ju-tx:#523600;  /* orange */
   --lvl-se-bg:#e7ddf6; --lvl-se-bd:#7a4fc0; --lvl-se-tx:#36215e;  /* purple */
-  --lvl-gr-bg:#d3e4f3; --lvl-gr-bd:#2e6e9e; --lvl-gr-tx:#0e324f;  /* steel blue — distinct from teal Freshman; NOT red, so it can't be mistaken for a conflict/error card */
+  /* NEW-FU-529 (Batch 9 Issue 2): Graduate was a MUTED steel-blue (#2e6e9e) that
+     read too close to the teal Freshman tier. Move it to a VIVID, saturated cobalt
+     blue — clearly "blue", not "teal" (hue ~225° vs Freshman ~175°), and far from
+     lime/orange/purple. Blue is CVD-invariant (stable under every dichromacy), so it
+     can't collide under colour-blindness; still NOT red, so never a conflict card. */
+  --lvl-gr-bg:#cdddfb; --lvl-gr-bd:#1f53d6; --lvl-gr-tx:#142c79;  /* cobalt blue — distinctive Graduate tier */
   --conflict-soft-bg:#fffacd; --conflict-hard-bg:#ffd5d5;
 
   /* Semantic status chip tokens — used by inline-styled badges that can't reach
@@ -170,7 +175,8 @@
   --lvl-so-bg:#1a2a0c; --lvl-so-bd:#6bbf3a; --lvl-so-tx:#c3e89a;  /* lime green */
   --lvl-ju-bg:#2e2408; --lvl-ju-bd:#e69f00; --lvl-ju-tx:#f3c969;  /* orange */
   --lvl-se-bg:#1f1733; --lvl-se-bd:#9b6fd6; --lvl-se-tx:#d3c2f0;  /* purple */
-  --lvl-gr-bg:#0e2236; --lvl-gr-bd:#3f8fc4; --lvl-gr-tx:#a9d4ef;  /* steel blue — distinct from teal Freshman; NOT red, so it can't be mistaken for a hard-conflict card */
+  /* NEW-FU-529 (Batch 9 Issue 2): vivid cobalt blue (dark-mode tint) — see light mode. */
+  --lvl-gr-bg:#0e1d4d; --lvl-gr-bd:#5b86f2; --lvl-gr-tx:#bccdfb;  /* cobalt blue — distinctive Graduate tier */
   --conflict-soft-bg:#33280a; --conflict-hard-bg:#3a1a1a;
   --warn-bg:#2a2410; --warn-fg:#fcd34d;
   --danger-bg:#3a1a1a; --danger-fg:#fca5a5;

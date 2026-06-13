@@ -460,6 +460,39 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     if (hasSiblingOnTarget) {
       effectiveDay = origDay;
     }
+    // NEW-FU-528 (Batch 9 Issue 1): if the duration change forced a different day
+    // pattern (e.g. 3-credit 50min Sun/Tue/Thu → 75min Mon/Wed), RESTRUCTURE the
+    // group instead of a time-only move: create the new pattern's day rows first
+    // (createSection validates the credits×duration×days rule), THEN delete the old
+    // group — so a failed create leaves the original group intact (mirrors
+    // confirmGroupChange's safe ordering). A same-pattern edit takes the move path.
+    const targetGroup = form.dayMode;
+    const patternChanged = targetGroup && targetGroup !== existingGroup
+      && !(targetGroup === 'single' && existingGroup === 'single');
+    if (patternChanged) {
+      const targetDays = (targetGroup !== 'single') ? DAY_TEMPLATES[targetGroup].days : [form.day];
+      try {
+        const { createSection, deleteSection } = await import('../../api/index.js');
+        await createSection(schedule.id, {
+          courseId:      existingCourseId,
+          instructorId:  form.instructorId || existing.instructorId || existing.instructor_id || null,
+          venueId:       form.venueId      || existing.venueId      || existing.venue_id      || null,
+          sectionNumber: existingSecNum,
+          sectionType:   existing.sectionType ?? existing.section_type,
+          days:          targetDays,
+          day:           targetDays[0],
+          startTime:     form.startTime,
+          endTime:       computeEnd(),
+        });
+        await deleteSection(existing.id);   // removes the whole old group
+        showToast('✓ Meeting pattern updated.', 'success');
+        loadView(schedule.id, view, filterId);
+        onClose();
+      } catch(err) {
+        setError(err.response?.data?.error || 'Failed to update the meeting pattern.');
+      } finally { setBusy(false); }
+      return;
+    }
     try {
       await moveSection(existing.id, {
         instructorId: form.instructorId || null,
@@ -703,6 +736,39 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // disabled until the form is conflict-free (the busy pickers guide them to free
   // options). Soft findings (R-11/R-12 type hints) are advisory and do NOT block.
   const hasHardConflict = (conflictPreview || []).some(f => f.severity === 'Hard');
+
+  // NEW-FU-528 (Batch 9 Issue 1): the day pattern (and meetings-per-week) is a
+  // function of the course's CREDITS and the meeting DURATION. A 3-credit Lec is
+  // 50 min × 3 days (Sun/Tue/Thu) OR 75 min × 2 days (Mon/Wed, Sun/Tue, Tue/Thu);
+  // a 2-credit Lec is 50 min × 2 days OR 75 min × 1 day; 1-credit is 50 min × 1 day.
+  // These are the LEGAL patterns for the current course + duration — the Time tab
+  // offers them as pills, and the effect below keeps the chosen pattern legal when
+  // the duration changes. Lec only (Lab/Prj/Ths keep their single-meeting rule).
+  const legalPatternsNow = React.useMemo(() => {
+    if (!selectedCourse || form.sectionType !== 'Lec') return [];
+    return legalDayTemplatesForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab, duration: form.duration });
+  }, [selectedCourse, courseHasLab, form.duration, form.sectionType]);
+
+  // EDIT mode: when the user changes the duration so the current pattern is no longer
+  // legal (e.g. 50→75 leaves a 3-day Sun/Tue/Thu group that must become 2-day),
+  // auto-switch to the first legal pattern and move the anchor day onto it. Skips the
+  // initial mount (reacts only to a real duration change). The add-mode pattern
+  // effects above are gated to add mode, so this never double-fires.
+  const durAutoRef = React.useRef(null);
+  useEffect(() => {
+    if (mode !== 'edit' || form.sectionType !== 'Lec') { durAutoRef.current = form.duration; return; }
+    const firstRun = durAutoRef.current === null;
+    if (!firstRun && durAutoRef.current === form.duration) return;
+    durAutoRef.current = form.duration;
+    // Fires on a real duration change AND on first open — so a pre-existing illegal
+    // section (e.g. Sun/Tue/Thu at 75 min) opens already snapped to a legal pattern,
+    // ready to Save the fix. A legal pattern stays untouched (it's in legalPatternsNow).
+    if (legalPatternsNow.length && !legalPatternsNow.includes(form.dayMode)) {
+      const next = legalPatternsNow[0];
+      setForm(f => ({ ...f, dayMode: next, day: DAY_TEMPLATES[next]?.days?.[0] ?? f.day }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.duration]);
 
   // NEW-FU-277 (Phase 53 #3): partition instructors into "prior" (taught
   // the selected course in any prior term) and "other" so the dropdown
@@ -1243,9 +1309,12 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
             <div className="sm-row">
               <div className="sm-field">
                 <label htmlFor="sm-day">Day</label>
+                {/* NEW-FU-528 (Batch 9 Issue 1): list the SELECTED pattern's days (form.dayMode),
+                    not the original group's — so after the pattern auto-/manually changes the
+                    anchor-day options stay consistent. */}
                 <select id="sm-day" value={form.day} onChange={e=>setForm(f=>({...f,day:e.target.value}))}>
-                  {existingGroup && existingGroup!=='single'
-                    ? GROUP_DAYS[existingGroup].map(d=><option key={d} value={d}>{d}</option>)
+                  {form.dayMode && form.dayMode!=='single' && DAY_TEMPLATES[form.dayMode]
+                    ? DAY_TEMPLATES[form.dayMode].days.map(d=><option key={d} value={d}>{d}</option>)
                     : DAYS.map(d=><option key={d} value={d}>{d}</option>)
                   }
                 </select>
@@ -1276,6 +1345,25 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   onChange={e=>setForm(f=>({...f,duration:e.target.value}))} required aria-label="Duration in minutes" />
               </div>
             </div>
+            {/* NEW-FU-528 (Batch 9 Issue 1): days-per-week / pattern selector, restricted to
+                the legal patterns for this course's credits + the chosen duration. Changing the
+                duration above auto-switches to a legal pattern; picking a pill here restructures
+                the group on Save. Hidden for single-meeting-only courses (1-credit / Prj / Ths). */}
+            {legalPatternsNow.filter(p => p !== 'single').length > 0 && (
+              <div className="sm-field">
+                <label>Meeting days <span className="sm-optional">(set by credits &amp; duration)</span></label>
+                <div className="sm-pill-group sm-pill-group-sm">
+                  {legalPatternsNow.map(p => (
+                    <button key={p} type="button"
+                      className={`sm-pill sm-pill-sm ${form.dayMode===p?'active':''}`}
+                      aria-pressed={form.dayMode===p}
+                      onClick={()=>setForm(f=>({...f, dayMode: p, day: DAY_TEMPLATES[p]?.days?.[0] ?? f.day }))}>
+                      {DAY_TEMPLATES[p]?.label ?? p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="sm-field sm-end-preview">
               End time: <strong>{fmtTimeForDisplay(computeEnd())}</strong>
             </div>

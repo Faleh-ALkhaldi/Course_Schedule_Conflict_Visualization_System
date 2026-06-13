@@ -511,6 +511,37 @@ const updateSection = ah(async (req, res) => {
         }
       }
     }
+    // NEW-FU-528 (Batch 9 Issue 1): re-validate the (credits × day-pattern × duration)
+    // rule on a TIME edit. assignSection moves every linked day to the same start/end,
+    // so a duration change here can break the pattern — a 3-credit Sun/Tue/Thu group is
+    // legal at 50 min but ILLEGAL at 75 min (which must be 2 days). createSection
+    // validated this; the time-edit path did NOT, which is exactly how a 75-min
+    // Sun/Tue/Thu group got persisted. Validate the group's full day-set against the new
+    // duration and reject an illegal combo (Lec only; the modal auto-converts the
+    // pattern so a legitimate UI edit never trips this — it's the root-cause backstop).
+    {
+      const grpRow = await query(
+        `SELECT c.credits, c.has_lab, s.section_type,
+                (SELECT array_agg(DISTINCT s2.day)
+                   FROM sections s2
+                  WHERE s2.schedule_id = s.schedule_id
+                    AND s2.course_id = s.course_id
+                    AND s2.section_number = s.section_number) AS group_days
+           FROM sections s JOIN courses c ON c.id = s.course_id WHERE s.id = $1`,
+        [sectionId]
+      );
+      const g = grpRow.rows[0];
+      if (g && g.section_type === 'Lec') {
+        const check = sectionPattern.validateSectionPattern({
+          credits:     Number(g.credits),
+          hasLab:      Boolean(g.has_lab),
+          sectionType: g.section_type,
+          days:        (g.group_days && g.group_days.length) ? g.group_days : [day],
+          startTime,   endTime,
+        });
+        if (!check.ok) return badRequest(res, check.error);
+      }
+    }
     const result = await schedSvc.assignSection(sectionId, { instructorId, venueId, day, startTime, endTime });
     res.json({ section: null, conflicts: result });
   } catch(err) {
