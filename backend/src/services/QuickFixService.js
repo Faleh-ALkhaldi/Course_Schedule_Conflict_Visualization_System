@@ -1750,16 +1750,28 @@ class QuickFixService {
       const cands = candidateOps(c, sections, instructors, venues, ohMap);
       let dropOp = cands.find(op => op.lastResort === true);
       if (!dropOp) {
-        // NEW-FU-444 (Phase 107 L2): only SYNTHESIZE a generic last-resort drop for
-        // HARD conflicts. A soft conflict (R-13/R-15/soft R-02) with no candidateOps
-        // drop keeps its advisory reason text — claiming "no non-destructive fix" and
-        // offering to delete a whole course over a soft preference is disproportionate.
-        if (c.severity !== 'Hard') continue;
+        // NEW-FU-512 (Batch 5 Issue 2): synthesize a last-resort drop for EVERY
+        // residual conflict — HARD *and* SOFT. The owner directive is explicit:
+        // Quick Fix "must always drive the schedule to 0 hard + 0 soft conflicts …
+        // only as a last resort, drop/delete — until no conflicts remain. It must
+        // never finish while conflicts still exist." This overrides FU-444's
+        // Phase-107 hard-only stance (which left a saturated soft conflict — one
+        // the greedy can't move/reassign away — with no path to zero at all).
+        //
+        // The drop stays opt-in: lastResort:true, default-unchecked in the UI, and
+        // appended AFTER summary.remaining* is computed (so summary still reflects
+        // the no-drop world). Non-destructive ops are always tried first by the
+        // greedy above; this only fires when nothing else can clear the conflict.
+        // The label flags soft drops so the user knows it's optional over a
+        // scheduling *preference*, not a hard requirement.
+        const overPref = c.severity !== 'Hard'
+          ? ' — optional: clears a soft scheduling preference'
+          : ' — nothing else could fix this automatically';
         dropOp = {
           type:       'drop',
           sectionId:  sec.id,
           priority:   SCORE.OP_DROP,
-          label:      `Remove ${sec.courseCode} §${sec.sectionNumber} (last resort — nothing else could fix this automatically)`,
+          label:      `Remove ${sec.courseCode} §${sec.sectionNumber} (last resort${overPref})`,
           lastResort: true,
         };
       }
