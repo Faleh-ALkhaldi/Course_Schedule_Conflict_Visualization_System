@@ -252,6 +252,30 @@ const getSections = ah(async (req, res) => {
   res.json({ sections, officeHours: [] });
 });
 
+// NEW-FU-520 (Batch 6): cross-term resource guard. A section in term T may only
+// reference resources that are GLOBAL/shared (owner_semester IS NULL) or OWNED by
+// T. A resource OWNED BY ANOTHER TERM must never be assigned into T — that is the
+// `01-0001` (owned by 271) → assigned-in-261 contamination this batch fixes. The
+// candidate pools (Quick Fix / Suggest / inline fixes) are already term-scoped;
+// this is the write-layer backstop for manual / API writes. Returns a 409-ready
+// message when a supplied instructor/venue is owned by a different term, else null.
+// `table` is a hardcoded literal here (never user input) — no injection surface.
+async function crossTermResourceError(termSemester, { instructorId, venueId }) {
+  if (!termSemester) return null;
+  const targets = [];
+  if (instructorId) targets.push(['Instructor', 'instructors', instructorId]);
+  if (venueId)      targets.push(['Venue',      'venues',      venueId]);
+  for (const [label, table, id] of targets) {
+    const r = await query(`SELECT owner_semester, name FROM ${table} WHERE id = $1`, [id]);
+    const row = r.rows[0];
+    if (!row) continue; // missing row → FK / 404 handled elsewhere
+    if (row.owner_semester && row.owner_semester !== termSemester) {
+      return `${label} "${row.name}" belongs to term ${row.owner_semester} and cannot be used in term ${termSemester}. Add it to this term first (or copy the term).`;
+    }
+  }
+  return null;
+}
+
 const createSection = ah(async (req, res) => {
   const { scheduleId } = req.params;
   const { courseId, instructorId, venueId, sectionNumber, sectionType, day, days, startTime, endTime,
@@ -317,6 +341,9 @@ const createSection = ah(async (req, res) => {
   if (!isCourseAllowedInTerm(courseRow.course_code, createTermSemester)) {
     return res.status(409).json({ error: disallowReason(courseRow.course_code, createTermSemester) });
   }
+  // NEW-FU-520 (Batch 6): refuse to assign a resource owned by another term.
+  const createXtErr = await crossTermResourceError(createTermSemester, { instructorId, venueId });
+  if (createXtErr) return res.status(409).json({ error: createXtErr });
   if (effectiveSectionType === 'Lab' && !courseRow.has_lab) {
     return res.status(409).json({
       error: `Course ${courseRow.course_code} is not configured for lab sections. Enable "has lab" on the course first.`,
@@ -429,6 +456,18 @@ const updateSection = ah(async (req, res) => {
       return badRequest(res, `${typeForDuration} section duration must be ${durLimits.min}–${durLimits.max} minutes (got ${dur}).`);
   }
   try {
+    // NEW-FU-520 (Batch 6): cross-term resource guard for BOTH update paths.
+    // Resolve this section's owning term once, then refuse any reassignment to an
+    // instructor/venue owned by a different term (covers infoOnly reassigns and
+    // the drag-move/time-edit assignSection path below).
+    if (instructorId || venueId) {
+      const tRow = await query(
+        `SELECT sc.semester FROM sections s JOIN schedules sc ON sc.id = s.schedule_id WHERE s.id = $1`,
+        [sectionId]
+      );
+      const updateXtErr = await crossTermResourceError(tRow.rows[0]?.semester ?? null, { instructorId, venueId });
+      if (updateXtErr) return res.status(409).json({ error: updateXtErr });
+    }
     if (infoOnly) {
       // NEW-FU-59: trim sectionNumber on update too.
       // NEW-FU-96: forward sectionType.

@@ -178,6 +178,27 @@ class VenueRepository {
     return res.rows;
   }
 
+  /**
+   * NEW-FU-520 (Batch 6): the ASSIGNABLE venue pool for a term — see
+   * InstructorRepository.findAssignable for the full rationale. A venue is
+   * assignable to a section in `termCode` iff it is GLOBAL/legacy shared infra
+   * (owner_semester IS NULL) OR OWNED by this term. Never another term's private
+   * venue — which is exactly how `01-0001` (owned by 271) leaked into 261.
+   */
+  async findAssignable(termCode = null) {
+    if (!termCode) return this.findAll();
+    const res = await query(
+      `SELECT id, name, type, capacity, is_dummy, created_at
+       FROM venues
+       WHERE is_dummy = false
+         AND (owner_semester IS NULL OR owner_semester = $1)
+       ORDER BY (SUBSTRING(name FROM '^[0-9]+'))::int NULLS LAST,
+                (SUBSTRING(name FROM '^[0-9]+-([0-9]+)'))::int NULLS LAST, name`,
+      [termCode]
+    );
+    return res.rows;
+  }
+
   async findById(id) {
     const res = await query(
       `SELECT id, name, type, capacity FROM venues WHERE id = $1`, [id]

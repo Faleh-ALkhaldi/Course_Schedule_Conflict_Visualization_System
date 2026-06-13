@@ -32,6 +32,29 @@ class InstructorRepository {
     return res.rows;
   }
 
+  /**
+   * NEW-FU-520 (Batch 6): the ASSIGNABLE pool for a term — what an auto-resolver
+   * (Quick Fix / Suggest / inline R-04 fixes) is allowed to assign to a section
+   * in `termCode`. A resource is assignable iff it is GLOBAL/legacy shared infra
+   * (owner_semester IS NULL) OR OWNED by this term. A resource owned by ANOTHER
+   * term is excluded — assigning it would be cross-term contamination (the
+   * reported `01-0001` bug). Differs from findAll(termCode): the pool INCLUDES
+   * shared global resources (so tools stay functional) but never another term's
+   * private rows. With no termCode it degrades to the global non-dummy list.
+   */
+  async findAssignable(termCode = null) {
+    if (!termCode) return this.findAll();
+    const res = await query(
+      `SELECT id, name, email, is_dummy, created_at, updated_at
+       FROM instructors
+       WHERE is_dummy = false
+         AND (owner_semester IS NULL OR owner_semester = $1)
+       ORDER BY name`,
+      [termCode]
+    );
+    return res.rows;
+  }
+
   async findById(id) {
     const res = await query(
       `SELECT id, name, email, created_at, updated_at FROM instructors WHERE id = $1`,

@@ -1604,8 +1604,16 @@ class QuickFixService {
       venueType:      row.venue_type,
     }));
 
-    const instructors = await instrRepo.findAll();
-    const venues      = await venueRepo.findAll();
+    // NEW-FU-520 (Batch 6): TERM-SCOPE the candidate pool. Sourcing fixes from
+    // the GLOBAL resource list let Quick Fix assign a venue/instructor owned by a
+    // DIFFERENT term into this one (the reported `01-0001` contamination: a 271
+    // venue assigned to 261 sections). findAll(termCode) returns only resources
+    // owned by this term or already assigned in it, so a fix can never reach
+    // across terms. Falls back to global only when the schedule has no term code.
+    const termRes  = await query('SELECT semester FROM schedules WHERE id = $1', [scheduleId]);
+    const termCode = termRes.rows[0]?.semester ?? null;
+    const instructors = await instrRepo.findAssignable(termCode);
+    const venues      = await venueRepo.findAssignable(termCode);
     // NEW-FU-348 (Phase 33): seed the venue cache so applyOpInMemory
     // can update venueType in addition to venueId during simulated
     // reassigns. Without this, the simulator under-reports R-11/R-12

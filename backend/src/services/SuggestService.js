@@ -901,8 +901,12 @@ class SuggestService {
     // writes, so it can safely operate on any schedule state. This is what
     // lets the SuggestModal open + show a recommendation for an archived
     // term without erroring.
-    const stat = await query(`SELECT status, archived_at FROM schedules WHERE id = $1`, [scheduleId]);
+    const stat = await query(`SELECT status, archived_at, semester FROM schedules WHERE id = $1`, [scheduleId]);
     if (stat.rowCount === 0) throw new Error(`Schedule ${scheduleId} not found.`);
+    // NEW-FU-520 (Batch 6): the owning term — used to TERM-SCOPE the instructor
+    // and venue pools below so Suggest never assigns another term's private
+    // resource (the `01-0001` cross-term contamination class).
+    const termCode = stat.rows[0]?.semester ?? null;
     if (!options.dryRun) {
       if (stat.rows[0].archived_at !== null) {
         const err = new Error('Schedule is archived and cannot be regenerated. Unarchive its term first.');
@@ -957,7 +961,9 @@ class SuggestService {
     }
 
     // ── Step 2: load instructors and office hours ───────────────────────
-    const instructors = await instrRepo.findAll();
+    // NEW-FU-520 (Batch 6): term-scoped pool (shared global + this term's own,
+    // never another term's private instructor).
+    const instructors = await instrRepo.findAssignable(termCode);
     const instrIds    = instructors.map(i => i.id);
     const ohMap       = await instrRepo.getOfficeHoursMap(instrIds);
 
@@ -996,9 +1002,18 @@ class SuggestService {
     // partition by venue type loosely (LectureHall preferred for UG/GR; Lab
     // is left to manual assignment since the suggester has no category info
     // about which courses need lab time).
-    const venueRows = await query(
-      `SELECT id, name, type, capacity FROM venues ORDER BY type, name`
-    );
+    // NEW-FU-520 (Batch 6): TERM-SCOPE the venue pool — global/shared rooms
+    // (owner_semester IS NULL) plus this term's own, but NEVER a venue owned by
+    // another term (that is exactly how `01-0001` from 271 ended up assigned in
+    // 261). The owner filter also transparently excludes other terms' dummies.
+    const venueRows = termCode
+      ? await query(
+          `SELECT id, name, type, capacity FROM venues
+           WHERE (owner_semester IS NULL OR owner_semester = $1)
+           ORDER BY type, name`,
+          [termCode]
+        )
+      : await query(`SELECT id, name, type, capacity FROM venues ORDER BY type, name`);
     const venues = venueRows.rows;
 
     // NEW-FU-296 (Phase 26): when applyToCourseIds is set, the wipe

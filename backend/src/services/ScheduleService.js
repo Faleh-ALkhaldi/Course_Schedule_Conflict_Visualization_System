@@ -687,9 +687,15 @@ class ScheduleService {
     const r04Conflicts = result.conflicts.filter(c => c.ruleId === 'R-04' && c.sectionBId);
     const r05Conflicts = result.conflicts.filter(c => c.ruleId === 'R-05' && c.sectionBId);
     if (r04Conflicts.length > 0 || r05Conflicts.length > 0) {
+      // NEW-FU-520 (Batch 6): TERM-SCOPE the inline R-04/R-05 fix candidates so a
+      // "+ Reassign to X" suggestion can never offer a resource owned by another
+      // term (same contamination class fixed in QuickFixService). findAll(termCode)
+      // → only this term's resources (owned-here or already-assigned-here).
+      const semRow   = await db.query('SELECT semester FROM schedules WHERE id = $1', [scheduleId]);
+      const termCode = semRow.rows[0]?.semester ?? null;
       const [allInstructors, allVenues] = await Promise.all([
-        instrRepo.findAll(),
-        venueRepo.findAll(),
+        instrRepo.findAssignable(termCode),
+        venueRepo.findAssignable(termCode),
       ]);
 
       // Build a quick "is instructor busy at this (day, time)?" lookup.

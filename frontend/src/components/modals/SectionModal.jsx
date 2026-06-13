@@ -714,27 +714,39 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     };
   }, [form.courseId, sections, instructors]);
 
-  // NEW-FU-277 (Phase 53 #3): venue free/busy annotation. For the form's
-  // current (day, time), compute which venues are busy in the current
-  // term's sections. Rendered as a "(busy)" suffix on the option label.
-  const venueBusyIds = React.useMemo(() => {
-    if (mode !== 'add' || !form.startTime || !form.duration) return new Set();
+  // NEW-FU-520 (Batch 6 Issue 3): busy-resource detection for the pickers — in
+  // BOTH add and edit mode (was add-only). A resource (instructor OR venue) is
+  // "busy" when another section IN THIS TERM overlaps the form's day(s)/time.
+  // Busy options are DISABLED in the dropdowns below (visible + flagged, but not
+  // selectable) so no edit can ever CREATE a conflict. The section being edited
+  // is excluded from its own busy set so it never blocks itself.
+  const busyResources = React.useMemo(() => {
+    const empty = { instructors: new Set(), venues: new Set() };
+    if (!form.startTime || !form.duration) return empty;
     const days = (() => {
       const tmpl = DAY_TEMPLATES[form.dayMode];
       if (tmpl?.days) return tmpl.days;
-      return [form.day];
+      return form.day ? [form.day] : [];
     })();
+    if (!days.length) return empty;
     const startMin = toMinutes(form.startTime);
     const endMin   = startMin + parseInt(form.duration || 0, 10);
-    const busy = new Set();
+    // Exclude the edited section's OWN logical group (same course + section number)
+    // so its existing meetings don't count as a self-conflict.
+    const selfCourse = existing?.courseId ?? existing?.course_id ?? null;
+    const selfNum    = existing?.sectionNumber ?? existing?.section_number ?? null;
+    const instructors = new Set(), venues = new Set();
     for (const s of sections) {
-      if (!s.venueId || !days.includes(s.day)) continue;
+      if (mode === 'edit' && selfCourse != null &&
+          s.courseId === selfCourse && s.sectionNumber === selfNum) continue;
+      if (!days.includes(s.day)) continue;
       if (toMinutes(s.startTime) < endMin && startMin < toMinutes(s.endTime)) {
-        busy.add(s.venueId);
+        if (s.instructorId) instructors.add(s.instructorId);
+        if (s.venueId)      venues.add(s.venueId);
       }
     }
-    return busy;
-  }, [mode, form, sections]);
+    return { instructors, venues };
+  }, [mode, form, sections, existing]);
 
   // NEW-FU-280/281 (Phase 56): replaced the two window.prompt-based
   // quick-creators with launchers for AddInstructorModal / AddVenueModal.
@@ -1032,17 +1044,31 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               {/* NEW-FU-277 (Phase 53 #3): prior (taught this course) first, then other. */}
               <select id="sm-instr" value={form.instructorId} onChange={e=>setForm(f=>({...f,instructorId:e.target.value}))}>
                 <option value="">— No instructor —</option>
+                {/* NEW-FU-520 (Batch 6 Issue 3): disable instructors busy at this
+                    slot (kept visible + flagged) so an edit can't create a clash.
+                    The currently-selected instructor stays selectable so an
+                    existing assignment is always shown and can be switched away. */}
                 {groupedInstructors.prior.length > 0 && (
                   <optgroup label="Taught this course before">
-                    {groupedInstructors.prior.map(i =>
-                      <option key={i.id} value={i.id}>{i.name}</option>
-                    )}
+                    {groupedInstructors.prior.map(i => {
+                      const isBusy = busyResources.instructors.has(i.id) && i.id !== form.instructorId;
+                      return (
+                        <option key={i.id} value={i.id} disabled={isBusy}>
+                          {i.name}{isBusy ? '  · busy at this slot' : ''}
+                        </option>
+                      );
+                    })}
                   </optgroup>
                 )}
                 <optgroup label={groupedInstructors.prior.length ? 'All other faculty' : 'All faculty'}>
-                  {groupedInstructors.other.map(i =>
-                    <option key={i.id} value={i.id}>{i.name}</option>
-                  )}
+                  {groupedInstructors.other.map(i => {
+                    const isBusy = busyResources.instructors.has(i.id) && i.id !== form.instructorId;
+                    return (
+                      <option key={i.id} value={i.id} disabled={isBusy}>
+                        {i.name}{isBusy ? '  · busy at this slot' : ''}
+                      </option>
+                    );
+                  })}
                 </optgroup>
               </select>
               {instructorMissing && <p className="sm-inline-error" role="alert"><span>An instructor is required for every section.</span></p>}
@@ -1074,9 +1100,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     return (
                       <optgroup key={typeGroup} label={typeGroup}>
                         {vs.map(v => {
-                          const isBusy = venueBusyIds.has(v.id);
+                          // NEW-FU-520 (Batch 6 Issue 3): disable busy venues (kept
+                          // visible + flagged); the selected venue stays selectable.
+                          const isBusy = busyResources.venues.has(v.id) && v.id !== form.venueId;
                           return (
-                            <option key={v.id} value={v.id}>
+                            <option key={v.id} value={v.id} disabled={isBusy}>
                               {v.name}{isBusy ? '  · busy at this slot' : ''}
                             </option>
                           );
