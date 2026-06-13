@@ -1239,14 +1239,16 @@
    once). Applies to the code (identity row); secondary rows stay as-is. The
    transform-fit re-measures, so the wider tracking can't clip — it just lets the
    scale settle at a wider, clearer code. */
-.sblock.sb-red   .sblock-fit .sblock-code,
-.sblock.sb-green .sblock-fit .sblock-code,
-.sblock.sb-blue  .sblock-fit .sblock-code {
-  /* NEUTRAL tracking (0), not the tier-tiny −0.05em squeeze. 0 (not a positive
-     value) is deliberate: positive tracking widens natW, which on a WIDTH-bound
-     card lowers the fit scale → smaller px, fighting the size grow. 0 recovers the
-     readability of un-squeezing without spending horizontal headroom. The JetBrains
-     Mono swap already adds genuine width + weight presence. */
+/* NEW-FU-520 (Phase 124): un-squeeze the course code on EVERY Overview card
+   (was keyed on the now-removed per-course .sb-red/.sb-green/.sb-blue classes;
+   size decides typography, so the un-squeeze must be size-agnostic). The board
+   is globally tier-tiny, whose code rule SQUEEZES the mono (letter-spacing
+   −0.05em + font-stretch condensed) — counterproductive on a roomy fit card.
+   Target any non-uniform (Overview), non-tiny fit card. NEUTRAL tracking (0,
+   not positive: positive tracking widens natW → lowers the fit scale → smaller
+   px). Readable/Instructor/Venue (data-uniform-type="1") and genuine tiny cards
+   keep their own treatment. */
+.sblock:not([data-uniform-type="1"]):not(.sb-tiny) .sblock-fit .sblock-code {
   letter-spacing: 0 !important;
   font-stretch: normal !important;     /* undo the condensed squeeze */
 }
