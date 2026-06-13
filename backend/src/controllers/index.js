@@ -52,6 +52,18 @@ const VALID_VENUE_TYPES = new Set(['LectureHall','Laboratory','Multipurpose']);
 // NEW-FU-95: section_number must be exactly '01'..'99' (two-digit, zero-
 // padded, no '00'). Matches the DB CHECK constraint added in migration 009.
 const SECTION_NUM_RE = /^(0[1-9]|[1-9][0-9])$/;
+// NEW-FU-510 (Batch 1): canonicalize a user-supplied section number BEFORE
+// validation/storage, so a bare single digit ("2") is accepted and treated as
+// "02" — including on a direct API POST. Mirrors padSectionNumber() in
+// frontend/src/utils/sectionNumber.js (kept inline here per the hot-path /
+// no-module-crossing convention used for the regexes below). A single 0–9
+// digit is zero-padded ("2" → "02", "0" → "00", which the range regex then
+// rejects); anything else (already two digits, "100", letters, empty) is
+// returned trimmed and unchanged so the range regex can reject it precisely.
+function padSectionNumber(s) {
+  const t = String(s ?? '').trim();
+  return /^[0-9]$/.test(t) ? t.padStart(2, '0') : t;
+}
 // NEW-FU-96: section_type values mirror SECTION_TYPE in constants.js.
 // NEW-FU-498 (Phase 122): + Prj (Project) and Ths (Thesis).
 const VALID_SECTION_TYPES = new Set(['Lec','Lab','Prj','Ths']);
@@ -90,7 +102,9 @@ function isUuid(s)  { return typeof s === 'string' && UUID_RE.test(s); }
 function isTime(s)  { return typeof s === 'string' && HHMM_RE.test(s); }
 function isDay(s)   { return typeof s === 'string' && VALID_DAYS.has(s); }
 // NEW-FU-95: matches the DB-level CHECK in migration 009.
-function isSectionNumber(s) { return typeof s === 'string' && SECTION_NUM_RE.test(s); }
+// NEW-FU-510 (Batch 1): normalize first so a single digit ("2") is accepted
+// and validated as its padded form ("02"); "0"/"00" still fail.
+function isSectionNumber(s) { return typeof s === 'string' && SECTION_NUM_RE.test(padSectionNumber(s)); }
 // NEW-FU-466 (Phase 112): office hours may only be 08:00–16:00 (8 AM–4 PM).
 // Mirrors OFFICE_HOURS_WINDOW in constants.js (kept inline — same hot-path
 // reasoning as SECTION_NUM_RE_BY_TYPE). Returns a plain-language message when
@@ -267,8 +281,11 @@ const createSection = ah(async (req, res) => {
   // the Lec range → false "sectionNumber for Lec sections must be in 01–49"
   // (and, had it passed, ScheduleService would have silently stored it as a
   // Lec). Deriving from the number makes the omitted-type path correct.
+  // NEW-FU-510 (Batch 1): canonical two-digit form drives type derivation,
+  // the range check, and storage below — so a posted "2" becomes "02".
+  const normSectionNumber = padSectionNumber(sectionNumber);
   const effectiveSectionType = sectionType
-    ?? (SECTION_NUM_RE_BY_TYPE.Lab.test(String(sectionNumber).trim()) ? 'Lab' : 'Lec');
+    ?? (SECTION_NUM_RE_BY_TYPE.Lab.test(normSectionNumber) ? 'Lab' : 'Lec');
   if (!VALID_SECTION_TYPES.has(effectiveSectionType))
     return badRequest(res, `sectionType must be "Lec", "Lab", "Prj", or "Ths" (got "${sectionType}").`);
   // NEW-FU-95 + NEW-FU-108: section number must be in the type-scoped range
@@ -279,8 +296,8 @@ const createSection = ah(async (req, res) => {
   // up front is the point of this validator.
   // NEW-FU-498 (Phase 122): Lab → 50–99; Lec/Prj/Ths → 01–49.
   const expectedRange = effectiveSectionType === 'Lab' ? '50–99' : '01–49';
-  if (!SECTION_NUM_RE_BY_TYPE[effectiveSectionType].test(sectionNumber))
-    return badRequest(res, `sectionNumber for ${effectiveSectionType} sections must be in ${expectedRange} (two-digit, zero-padded).`);
+  if (!SECTION_NUM_RE_BY_TYPE[effectiveSectionType].test(normSectionNumber))
+    return badRequest(res, `sectionNumber for ${effectiveSectionType} sections must be in ${expectedRange} (01–99, single digits accepted and zero-padded).`);
   // NEW-FU-109: duration validation by type. Lec: 50..75; Lab: 50..165.
   const dur = durationMinutes(startTime, endTime);
   const durLimits = SECTION_DURATION_BY_TYPE[effectiveSectionType];
@@ -353,7 +370,9 @@ const createSection = ah(async (req, res) => {
   // NEW-FU-96: forward effectiveSectionType to the service.
   const { section, conflictResult } = await schedSvc.createSection(scheduleId, {
     courseId, instructorId, venueId,
-    sectionNumber: normalizeName(sectionNumber),
+    // NEW-FU-510 (Batch 1): store the canonical two-digit value so the UNIQUE
+    // (schedule, course, section_number, day) duplicate check sees "02", not "2".
+    sectionNumber: normSectionNumber,
     sectionType: effectiveSectionType,
     day: day ?? dayList[0],
     days: dayList,
@@ -382,11 +401,14 @@ const updateSection = ah(async (req, res) => {
   // the (type, number) pair. If sectionNumber is provided without type,
   // we can't authoritatively validate — defer to the DB CHECK constraint.
   if (sectionNumber != null) {
+    // NEW-FU-510 (Batch 1): normalize so a single digit ("2") is accepted and
+    // validated/stored as its padded form ("02"); isSectionNumber normalizes too.
+    const normSectionNumber = padSectionNumber(sectionNumber);
     if (!isSectionNumber(sectionNumber))
-      return badRequest(res, 'sectionNumber must be "01"–"99" (two-digit, zero-padded).');
+      return badRequest(res, 'sectionNumber must be "01"–"99" (single digits accepted and zero-padded).');
     if (sectionType != null) {
       const expectedRange = sectionType === 'Lab' ? '50–99' : '01–49'; // NEW-FU-498: Lec/Prj/Ths → 01–49
-      if (!SECTION_NUM_RE_BY_TYPE[sectionType].test(sectionNumber))
+      if (!SECTION_NUM_RE_BY_TYPE[sectionType].test(normSectionNumber))
         return badRequest(res, `sectionNumber for ${sectionType} sections must be in ${expectedRange}.`);
     }
   }
@@ -412,7 +434,8 @@ const updateSection = ah(async (req, res) => {
       // NEW-FU-96: forward sectionType.
       const result = await schedSvc.updateSectionInfo(sectionId, {
         instructorId, venueId,
-        sectionNumber: sectionNumber != null ? normalizeName(sectionNumber) : undefined,
+        // NEW-FU-510 (Batch 1): store the canonical two-digit value ("2" → "02").
+        sectionNumber: sectionNumber != null ? padSectionNumber(sectionNumber) : undefined,
         sectionType,
       });
       return res.json({ section: null, conflicts: result });
