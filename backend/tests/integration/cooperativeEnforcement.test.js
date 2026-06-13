@@ -168,7 +168,9 @@ describe('FU-213: Cooperative active-term enforcement', () => {
       createdCourses.push(existingCourseId);
 
       const iR = await auth(request(app).post('/api/v1/instructors')).send({
-        name: next('Iseed'), email: `${next('eseed')}@test.local`,
+        // NEW-FU-510 (Batch 2): instructor names are letters/space/hyphen/apostrophe
+        // only — the unique token lives in the email (which allows digits), not the name.
+        name: 'Iseed Cooperative', email: `${next('eseed')}@test.local`,
       });
       expect(iR.status).toBe(201);
       existingInstructorId = iR.body.id;
