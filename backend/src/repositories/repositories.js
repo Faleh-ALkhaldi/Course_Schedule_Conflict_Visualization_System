@@ -151,9 +151,15 @@ class VenueRepository {
                 (SUBSTRING(v.name FROM '^[0-9]+'))::int          AS sort_bldg,
                 (SUBSTRING(v.name FROM '^[0-9]+-([0-9]+)'))::int AS sort_room
          FROM venues v
-         JOIN sections s   ON s.venue_id   = v.id
-         JOIN schedules sc ON sc.id        = s.schedule_id
-         WHERE sc.semester = $1
+         -- Term-scoped: venues ASSIGNED to a section in this term, OR OWNED by
+         -- this term (owner_semester) even if not yet assigned — so a just-created
+         -- venue stays visible in its term before any section references it.
+         WHERE v.id IN (
+                 SELECT s.venue_id FROM sections s
+                 JOIN schedules sc ON sc.id = s.schedule_id
+                 WHERE sc.semester = $1
+               )
+            OR v.owner_semester = $1
          -- NEW-FU-462 (Phase 110): order by building number then room number,
          -- NUMERICALLY (so "7-220" sorts before "22-119", rooms ascend within a
          -- building). SELECT DISTINCT requires the sort keys in the SELECT list, so
@@ -179,10 +185,11 @@ class VenueRepository {
     return res.rows[0] ?? null;
   }
 
-  async create({ name, type, capacity }) {
+  async create({ name, type, capacity, ownerSemester = null }) {
+    // ownerSemester stamps the row as owned by the creating term (see findAll).
     const res = await query(
-      `INSERT INTO venues (name, type, capacity) VALUES ($1,$2,$3) RETURNING id`,
-      [name, type, parseInt(capacity, 10) /* NEW-L2 */]
+      `INSERT INTO venues (name, type, capacity, owner_semester) VALUES ($1,$2,$3,$4) RETURNING id`,
+      [name, type, parseInt(capacity, 10) /* NEW-L2 */, ownerSemester]
     );
     return this.findById(res.rows[0].id);
   }

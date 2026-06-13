@@ -9,12 +9,18 @@ class InstructorRepository {
    */
   async findAll(termCode = null) {
     if (termCode) {
+      // Term-scoped: instructors ASSIGNED to a section in this term, OR OWNED by
+      // this term (owner_semester) even if not yet assigned — so a just-created
+      // instructor stays visible in its term before any section references it.
       const res = await query(
         `SELECT DISTINCT i.id, i.name, i.email, i.is_dummy, i.created_at, i.updated_at
          FROM instructors i
-         JOIN sections s   ON s.instructor_id = i.id
-         JOIN schedules sc ON sc.id = s.schedule_id
-         WHERE sc.semester = $1
+         WHERE i.id IN (
+                 SELECT s.instructor_id FROM sections s
+                 JOIN schedules sc ON sc.id = s.schedule_id
+                 WHERE sc.semester = $1
+               )
+            OR i.owner_semester = $1
          ORDER BY i.name`,
         [termCode]
       );
@@ -65,10 +71,12 @@ class InstructorRepository {
     return map;
   }
 
-  async create({ name, email }) {
+  async create({ name, email, ownerSemester = null }) {
+    // ownerSemester stamps the row as owned by the creating term, so it stays
+    // visible in that term's list even before a section references it.
     const res = await query(
-      `INSERT INTO instructors (name, email) VALUES ($1,$2) RETURNING id`,
-      [name, email]
+      `INSERT INTO instructors (name, email, owner_semester) VALUES ($1,$2,$3) RETURNING id`,
+      [name, email, ownerSemester]
     );
     return this.findById(res.rows[0].id);
   }

@@ -840,7 +840,18 @@ const createInstructor = ah(async (req, res) => {
   // NEW-FU-59: trim leading/trailing whitespace so " Dr. Hassan " and
   // "Dr. Hassan" don't end up as two distinct DB rows under the UNIQUE
   // constraint they nominally share.
-  const instructor = await instrRepo.create({ name: normalizeInstructorName(name), email: normalizeName(email) });
+  const cleanEmail = normalizeName(email);
+  // Batch 3 (safe subset): stamp the creating term and scope the duplicate
+  // check to that term's effective set (rows OWNED by it or legacy/global rows),
+  // so the same email may exist in a different term but never twice in one.
+  const ownerSemester = (req.activeTerm && req.activeTerm.code) || req.body.ownerSemester || null;
+  const dupInTerm = await query(
+    `SELECT 1 FROM instructors WHERE email = $1 AND (owner_semester = $2 OR owner_semester IS NULL) LIMIT 1`,
+    [cleanEmail, ownerSemester]
+  );
+  if (dupInTerm.rows.length)
+    return res.status(409).json({ error: 'An instructor with this email already exists in this term.' });
+  const instructor = await instrRepo.create({ name: normalizeInstructorName(name), email: cleanEmail, ownerSemester });
   // NEW-FU-461 (Phase 109): capture office hours up front so a new instructor never
   // trips the "no office hours" flag. Use what the Add-Instructor panel sends, or a
   // sensible default — even an API-created instructor gets office hours.
@@ -1106,10 +1117,22 @@ const createVenue = ah(async (req, res) => {
   // NEW-FU-483 (Phase 117): whole-room/sub-room exclusivity check backstops the modal's
   // client-side gate. Handles format variants (01-002 ≡ 01-0002), whole-room blocking,
   // and sub-room coexistence rules. Returns a plain-English message when blocked.
-  const existingVenues = await query('SELECT name FROM venues');
+  // Batch 3 (safe subset): scope the whole-room/sub-room duplicate check to the
+  // CURRENT term's effective set — venues OWNED by this term, legacy/global
+  // venues (owner_semester IS NULL), or venues assigned to a section in it — so
+  // the same room name may be added in a different term but not twice in one.
+  const ownerSemester = (req.activeTerm && req.activeTerm.code) || req.body.ownerSemester || null;
+  const existingVenues = await query(
+    `SELECT name FROM venues
+      WHERE owner_semester = $1
+         OR owner_semester IS NULL
+         OR id IN (SELECT s.venue_id FROM sections s
+                   JOIN schedules sc ON sc.id = s.schedule_id WHERE sc.semester = $1)`,
+    [ownerSemester]
+  );
   const conflictMsg = venueConflictError(cleanName, existingVenues.rows.map(v => v.name));
   if (conflictMsg) return res.status(409).json({ error: conflictMsg });
-  const venue = await venueRepo.create({ name: cleanName, type, capacity });
+  const venue = await venueRepo.create({ name: cleanName, type, capacity, ownerSemester });
   // NEW-FU-434 (Phase 106 item 6): auto-replace a placeholder venue of the SAME type.
   const replacedDummy = await replaceOldestDummyVenue(req.body.ownerSemester, venue.id, type);
   res.status(201).json({ ...venue, replacedDummy });
