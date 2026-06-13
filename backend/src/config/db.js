@@ -43,7 +43,13 @@ function resolveSslConfig() {
 const pool = new Pool({
   host,
   port:     parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME     || 'scheduler_db',
+  // TEST ISOLATION: under NODE_ENV=test the app connects to a DEDICATED test DB
+  // (DB_NAME_TEST, default "<DB_NAME>_test"), never the dev database. The
+  // integration suite create/deletes terms; running it against the dev DB is what
+  // destroyed real terms (see jest globalSetup + the smoke-test 271 incident).
+  database: process.env.NODE_ENV === 'test'
+    ? (process.env.DB_NAME_TEST || `${process.env.DB_NAME || 'scheduler_db'}_test`)
+    : (process.env.DB_NAME || 'scheduler_db'),
   user:     process.env.DB_USER     || 'scheduler_user',
   password: process.env.DB_PASSWORD || '',
   ssl:      resolveSslConfig(),

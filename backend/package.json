@@ -10,9 +10,9 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "dev:fresh": "lsof -ti:${PORT:-4000} | xargs -r kill -9 ; npm run dev",
-    "test": "jest --runInBand --forceExit",
-    "test:unit": "jest tests/unit --runInBand --forceExit",
-    "test:int": "jest tests/integration --runInBand --forceExit",
+    "test": "NODE_ENV=test jest --runInBand --forceExit",
+    "test:unit": "SKIP_TEST_DB=1 jest tests/unit --runInBand --forceExit",
+    "test:int": "NODE_ENV=test jest tests/integration --runInBand --forceExit",
     "migrate": "node src/db/migrate.js",
     "migrate:rollback": "node src/db/migrate.js rollback",
     "seed": "node src/db/seed.js"
@@ -40,6 +40,7 @@
   },
   "jest": {
     "testEnvironment": "node",
+    "globalSetup": "<rootDir>/tests/globalSetup.js",
     "testMatch": [
       "**/tests/**/*.test.js"
     ]
