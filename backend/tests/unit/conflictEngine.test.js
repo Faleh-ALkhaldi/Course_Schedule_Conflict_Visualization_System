@@ -227,6 +227,60 @@ describe('R02Rule', () => {
     const b = sec({ courseId:'c2', academicLevel:'Senior',   sectionNumber:'01', numSections:1, category:'UG', startTime:'17:00', endTime:'17:50' });
     expect(R02Rule.evaluate(a, [b]).filter(c => c.severity === SEVERITY.SOFT)).toHaveLength(1);
   });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Batch 5 Issue 1 — NO false positive: R-02 must NOT fire when the two
+  // courses meet at genuinely non-overlapping times. The reported symptom was
+  // "a conflict shows even though the classes are not at the same time." These
+  // lock the overlap gate (R02Rule.logicalOverlaps) against regression — every
+  // case below has a real time/day separation and MUST yield zero R-02.
+  // ───────────────────────────────────────────────────────────────────────
+  describe('Batch 5 Issue 1 — no false-positive overlaps', () => {
+    test('same-level, different time slots (no overlap) → no R-02', () => {
+      const a = sec({ courseId:'c1', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Sunday', startTime:'08:00', endTime:'08:50' });
+      const b = sec({ courseId:'c2', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Sunday', startTime:'10:00', endTime:'10:50' });
+      expect(R02Rule.evaluate(a, [b]).filter(c => c.ruleId === 'R-02')).toHaveLength(0);
+    });
+
+    test('same-level, back-to-back (A ends exactly when B starts) → no R-02', () => {
+      const a = sec({ courseId:'c1', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Sunday', startTime:'09:00', endTime:'10:00' });
+      const b = sec({ courseId:'c2', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Sunday', startTime:'10:00', endTime:'10:50' });
+      expect(R02Rule.evaluate(a, [b]).filter(c => c.ruleId === 'R-02')).toHaveLength(0);
+    });
+
+    test('adjacent-level, different days, same clock time → no R-02', () => {
+      const a = sec({ courseId:'c1', academicLevel:'Junior',    sectionNumber:'01', numSections:1, day:'Monday',  startTime:'12:00', endTime:'12:50' });
+      const b = sec({ courseId:'c2', academicLevel:'Sophomore', sectionNumber:'01', numSections:1, day:'Tuesday', startTime:'12:00', endTime:'12:50' });
+      expect(R02Rule.evaluate(a, [b]).filter(c => c.ruleId === 'R-02')).toHaveLength(0);
+    });
+
+    test('multi-day logical section: fires ONLY on the overlapping day, not the free one', () => {
+      // A is one logical section meeting Sun 08:00 AND Tue 08:00. B (same level)
+      // meets only Tue 08:00. They overlap on Tue → exactly ONE R-02. The Sunday
+      // meeting (where B has nothing) must not manufacture a second/phantom hit.
+      const aSun = sec({ courseId:'c1', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Sunday',  startTime:'08:00', endTime:'08:50' });
+      const aTue = sec({ courseId:'c1', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Tuesday', startTime:'08:00', endTime:'08:50' });
+      const bTue = sec({ courseId:'c2', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Tuesday', startTime:'08:00', endTime:'08:50' });
+      const cs = R02Rule.evaluate(aSun, [aTue, bTue]).filter(c => c.ruleId === 'R-02');
+      expect(cs).toHaveLength(1);
+      expect(cs[0].severity).toBe(SEVERITY.HARD); // single section each, no escape
+    });
+
+    test('multi-day logical section with NO shared day → no R-02', () => {
+      // A meets Sun+Tue; B meets Mon+Wed. No common day at all → no overlap.
+      const aSun = sec({ courseId:'c1', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Sunday',    startTime:'08:00', endTime:'08:50' });
+      const aTue = sec({ courseId:'c1', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Tuesday',   startTime:'08:00', endTime:'08:50' });
+      const bMon = sec({ courseId:'c2', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Monday',    startTime:'08:00', endTime:'08:50' });
+      const bWed = sec({ courseId:'c2', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Wednesday', startTime:'08:00', endTime:'08:50' });
+      expect(R02Rule.evaluate(aSun, [aTue, bMon, bWed]).filter(c => c.ruleId === 'R-02')).toHaveLength(0);
+    });
+
+    test('malformed time on one side cannot fabricate an overlap (FU-468)', () => {
+      const a = sec({ courseId:'c1', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Sunday', startTime:'09:00', endTime:'09:50' });
+      const b = sec({ courseId:'c2', academicLevel:'Senior', sectionNumber:'01', numSections:1, day:'Sunday', startTime:'',      endTime:''      });
+      expect(R02Rule.evaluate(a, [b]).filter(c => c.ruleId === 'R-02')).toHaveLength(0);
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
