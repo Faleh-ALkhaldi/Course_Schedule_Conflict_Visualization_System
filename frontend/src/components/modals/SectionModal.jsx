@@ -142,7 +142,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // already dispatch ADD_INSTRUCTOR / ADD_VENUE on their own. The old
   // path required a manual SET_REFERENCE dispatch because it bypassed
   // context and used api.* directly.
-  const { courses, instructors, venues, schedule, sections, conflicts,
+  // NEW-FU-510 (Batch 1): `conflicts` (backend snapshot) is no longer read here —
+  // the edit banner is now driven by the live, form-derived `conflictPreview`.
+  const { courses, instructors, venues, schedule, sections,
           addSection, moveSection, removeSection, loadView, view, filterId,
         } = useApp();
 
@@ -622,9 +624,26 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   //   • R-11/R-12 — section type vs venue type mismatch
   // Soft-vs-hard mirrors the backend severity table.
   const conflictPreview = React.useMemo(() => {
-    if (mode !== 'add') return null;
+    // NEW-FU-510 (Batch 1): the live preview now runs in EDIT mode too, not just
+    // add. It recomputes from the CURRENT form on every change so the in-modal
+    // banner reflects what the user is editing — replacing the stale, post-save
+    // backend snapshot the edit banner used to show.
     if (!form.courseId) return null;
     if (courseIsExternal) return null;
+    // NEW-FU-510 (Batch 1): in edit mode, exclude THIS section's own group
+    // (every day-row sharing the section's course + number) so it never reports
+    // a conflict against itself. Add mode has no own group → checks all sections.
+    let pool = sections;
+    if (mode === 'edit' && existing) {
+      const cid = existing.courseId ?? existing.course_id;
+      const num = existing.sectionNumber ?? existing.section_number;
+      const ownIds = new Set(
+        sections
+          .filter(s => (s.courseId ?? s.course_id) === cid && (s.sectionNumber ?? s.section_number) === num)
+          .map(s => s.id)
+      );
+      pool = sections.filter(s => !ownIds.has(s.id));
+    }
     const days = (() => {
       const tmpl = DAY_TEMPLATES[form.dayMode];
       if (tmpl?.days) return tmpl.days;
@@ -635,7 +654,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     const findings = [];
     // R-04: instructor overlap
     if (form.instructorId) {
-      const conflictsInstr = sections.filter(s =>
+      const conflictsInstr = pool.filter(s =>
         s.instructorId === form.instructorId &&
         days.includes(s.day) &&
         toMinutes(s.startTime) < endMin && startMin < toMinutes(s.endTime)
@@ -649,7 +668,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     }
     // R-05: venue overlap (skip for capstone — venue rules don't apply)
     if (form.venueId && !courseIsCapstone) {
-      const conflictsVen = sections.filter(s =>
+      const conflictsVen = pool.filter(s =>
         s.venueId === form.venueId &&
         days.includes(s.day) &&
         toMinutes(s.startTime) < endMin && startMin < toMinutes(s.endTime)
@@ -676,7 +695,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       }
     }
     return findings;
-  }, [mode, form, sections, venues, courseIsExternal, courseIsCapstone]);
+  }, [mode, form, sections, venues, courseIsExternal, courseIsCapstone, existing]);
 
   // NEW-FU-277 (Phase 53 #3): partition instructors into "prior" (taught
   // the selected course in any prior term) and "other" so the dropdown
@@ -738,31 +757,14 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   function quickCreateInstructor() { setSubModal('instructor'); }
   function quickCreateVenue()      { setSubModal('venue'); }
 
-  // NEW-FU-401 (Phase 101): EDIT-mode conflict awareness. Surface the live,
-  // backend-computed conflicts this section's GROUP is actually involved in
-  // (matched by section id across all the group's day-rows, deduped by
-  // rule+description), so the editor sees exactly what's wrong with THIS
-  // section — parity with the add-mode client-side preview.
-  const sectionConflicts = React.useMemo(() => {
-    if (mode !== 'edit' || !existing) return [];
-    const cid = existing.courseId ?? existing.course_id;
-    const num = existing.sectionNumber ?? existing.section_number;
-    const groupIds = new Set(
-      sections
-        .filter(s => (s.courseId ?? s.course_id) === cid && (s.sectionNumber ?? s.section_number) === num)
-        .map(s => s.id)
-    );
-    const seen = new Set();
-    const out = [];
-    for (const c of (conflicts || [])) {
-      if (!groupIds.has(c.sectionAId) && !groupIds.has(c.sectionBId)) continue;
-      const key = `${c.ruleId}|${c.description}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(c);
-    }
-    return out;
-  }, [mode, existing, sections, conflicts]);
+  // NEW-FU-510 (Batch 1): EDIT-mode conflict awareness is now LIVE. It was a
+  // stale snapshot of the backend `conflicts` array (only refreshed after a
+  // save), so editing the time/instructor/venue inside the modal didn't update
+  // the banner. We now drive the edit banner from `conflictPreview`, which
+  // recomputes from the current form on every keystroke and excludes this
+  // section's own group (so it never conflicts with itself). The backend
+  // `conflicts` array stays the grid's source of truth and is untouched.
+  const liveConflicts = mode === 'edit' ? (conflictPreview || []) : [];
 
   return (
     <>
@@ -1157,22 +1159,22 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               </>
             )}
 
-            {/* NEW-FU-401 (Phase 101): EDIT-mode live conflict panel — the real
-                backend conflicts this section's group is involved in. */}
-            {mode==='edit' && sectionConflicts.length > 0 && (
+            {/* NEW-FU-510 (Batch 1): EDIT-mode LIVE conflict panel — recomputes
+                from the current form, excludes this section's own group. */}
+            {mode==='edit' && liveConflicts.length > 0 && (
               <div className="sm-info-box sm-info-warn">
-                <strong><Ico name="alert" /> This section is in {sectionConflicts.length} conflict{sectionConflicts.length!==1?'s':''}:</strong>
+                <strong><Ico name="alert" /> This section is in {liveConflicts.length} conflict{liveConflicts.length!==1?'s':''}:</strong>
                 <ul className="sm-conflict-list">
-                  {sectionConflicts.map((c, i) => (
+                  {liveConflicts.map((f, i) => (
                     <li key={i}>
-                      <span className={`sm-sev sm-sev-${(c.severity||'').toLowerCase()}`}>{c.severity}</span>
-                      {/* NEW-FU-472: plain description only — no raw rule code */}{c.description}
+                      <span className={`sm-sev sm-sev-${(f.severity||'').toLowerCase()}`}>{f.severity}</span>
+                      {/* NEW-FU-472: plain message only — no raw rule code */}{f.msg}
                     </li>
                   ))}
                 </ul>
               </div>
             )}
-            {mode==='edit' && sectionConflicts.length === 0 && (
+            {mode==='edit' && liveConflicts.length === 0 && (
               <div className="sm-info-box sm-info-ok"><Ico name="check" /> <span>No conflicts for this section.</span></div>
             )}
 
@@ -1247,15 +1249,16 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
             {(timeError || durationError) && (
               <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>{timeError || durationError}</span></p>
             )}
-            {/* NEW-FU-401 (Phase 101): live conflict panel on the Time tab too. */}
-            {sectionConflicts.length > 0 && (
+            {/* NEW-FU-510 (Batch 1): live conflict panel on the Time tab too —
+                same live source, so moving the time updates it immediately. */}
+            {liveConflicts.length > 0 && (
               <div className="sm-info-box sm-info-warn">
-                <strong><Ico name="alert" /> This section is in {sectionConflicts.length} conflict{sectionConflicts.length!==1?'s':''}:</strong>
+                <strong><Ico name="alert" /> This section is in {liveConflicts.length} conflict{liveConflicts.length!==1?'s':''}:</strong>
                 <ul className="sm-conflict-list">
-                  {sectionConflicts.map((c, i) => (
+                  {liveConflicts.map((f, i) => (
                     <li key={i}>
-                      <span className={`sm-sev sm-sev-${(c.severity||'').toLowerCase()}`}>{c.severity}</span>
-                      {/* NEW-FU-472: plain description only — no raw rule code */}{c.description}
+                      <span className={`sm-sev sm-sev-${(f.severity||'').toLowerCase()}`}>{f.severity}</span>
+                      {/* NEW-FU-472: plain message only — no raw rule code */}{f.msg}
                     </li>
                   ))}
                 </ul>
