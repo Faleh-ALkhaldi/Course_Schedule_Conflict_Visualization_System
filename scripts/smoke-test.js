@@ -293,7 +293,9 @@ async function testTermPickerOpens(ctx) {
 // unarchives via the row button and confirms it's back in the default view.
 // Cleanup is in a finally so a half-failed run doesn't leave orphans.
 async function testTermArchiveFlow(ctx) {
-  const SMOKE_CODE = '991'; // reserved test-only code — must NEVER collide with a real working term (271 was a real term; the old value silently deleted it)
+  const SMOKE_CODE = '343'; // reserved test-only code — must be a VALID code in the allowed
+  // range (251–343; Summer 2034 is the last) AND never collide with a real working term.
+  // 271 was a real term (old default silently deleted it); 991 was out of range → POST 400.
   const adminToken = (await api('POST', '/auth/login', null, ADMIN)).token;
 
   // Pre-clean: if a prior crashed run left this code around, hard-delete it.
