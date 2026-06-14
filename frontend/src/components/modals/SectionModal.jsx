@@ -52,6 +52,34 @@ function legalDurationsForCourse({ credits, hasLab }) {
   return [50, 75];  // fallback
 }
 
+// NEW-FU-530 (Batch 10 Issue 1): identify a section group's pattern from its ACTUAL
+// day-set, not a single ambiguous anchor day. The old DAY_GROUPS[day] map read one
+// day → one pattern, but a day can belong to several patterns (Sunday is in both
+// Sun/Tue/Thu AND Sun/Tue), so a Sun/Tue group was mis-read as Sun/Tue/Thu — wrong
+// selector, wrong validation message, and a corrupting restructure. Match the sorted
+// day-set against DAY_TEMPLATES.
+function patternFromDays(days) {
+  const key = [...new Set(days)].sort().join('|');
+  for (const [name, t] of Object.entries(DAY_TEMPLATES)) {
+    if (t.days && [...t.days].sort().join('|') === key) return name;
+  }
+  return 'single';
+}
+
+// NEW-FU-531 (Batch 10 Issue 4): every day-pattern that EXISTS for a course's
+// credits, across all its legal durations — so the picker can SHOW the full set and
+// disable the ones illegal for the current duration (with a reason) rather than
+// hiding them. 3–4 cr → 2-day + 3-day; 2 cr → 2-day (+ 1-day at 75 min); 1/0 cr →
+// single day only. A 2-credit course never sees a 3-day pattern.
+function creditPatterns({ credits, hasLab }) {
+  const set = new Set([
+    ...legalDayTemplatesForCourse({ credits, hasLab, duration: 50 }),
+    ...legalDayTemplatesForCourse({ credits, hasLab, duration: 75 }),
+  ]);
+  // stable display order
+  return ['STT', 'MW', 'ST', 'TT', 'single'].filter(p => set.has(p));
+}
+
 // DAY_GROUPS / GROUP_DAYS retained for the edit-mode "existing group"
 // inference logic — those work off the pre-Phase-53 simple STT/MW/single
 // model and don't need to know about ST/TT.
@@ -156,7 +184,18 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   const existing = initial?.section;
 
   // ── Determine existing group ──────────────────────────────────────────────
-  const existingGroup = existing ? (DAY_GROUPS[existing.day] ?? 'single') : null;
+  // NEW-FU-530 (Batch 10 Issue 1): derive the pattern from the section group's REAL
+  // day-set (all linked rows), not the single anchor day — DAY_GROUPS[day] was
+  // ambiguous (Sunday → Sun/Tue/Thu even for a Sun/Tue group), which mis-labelled
+  // the selector, the validation message, and the restructure.
+  const existingGroup = existing
+    ? patternFromDays(
+        sections
+          .filter(s => (s.courseId ?? s.course_id) === (existing.courseId ?? existing.course_id)
+                    && (s.sectionNumber ?? s.section_number) === (existing.sectionNumber ?? existing.section_number))
+          .map(s => s.day)
+      )
+    : null;
 
   const [tab, setTab] = useState(mode === 'edit' ? 'time' : 'info');
   // 'info' = instructor/venue/section# | 'time' = day/startTime/duration
@@ -757,12 +796,16 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   const durAutoRef = React.useRef(null);
   useEffect(() => {
     if (mode !== 'edit' || form.sectionType !== 'Lec') { durAutoRef.current = form.duration; return; }
-    const firstRun = durAutoRef.current === null;
-    if (!firstRun && durAutoRef.current === form.duration) return;
+    // NEW-FU-530 (Batch 10 Issue 1): react ONLY to a real duration change — never on
+    // open. The previous version snapped an "illegal" section to a different pattern on
+    // mount, which made the selector show the WRONG (auto-changed) pattern instead of
+    // the section's real one. On open we just record the duration; the picker shows the
+    // true current pattern and disables any pattern illegal for that duration (with a
+    // reason). When the user actually changes the duration and the current pattern is no
+    // longer legal, snap to the first legal one for the new duration.
+    if (durAutoRef.current === null) { durAutoRef.current = form.duration; return; } // skip mount
+    if (durAutoRef.current === form.duration) return;
     durAutoRef.current = form.duration;
-    // Fires on a real duration change AND on first open — so a pre-existing illegal
-    // section (e.g. Sun/Tue/Thu at 75 min) opens already snapped to a legal pattern,
-    // ready to Save the fix. A legal pattern stays untouched (it's in legalPatternsNow).
     if (legalPatternsNow.length && !legalPatternsNow.includes(form.dayMode)) {
       const next = legalPatternsNow[0];
       setForm(f => ({ ...f, dayMode: next, day: DAY_TEMPLATES[next]?.days?.[0] ?? f.day }));
@@ -1345,22 +1388,32 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   onChange={e=>setForm(f=>({...f,duration:e.target.value}))} required aria-label="Duration in minutes" />
               </div>
             </div>
-            {/* NEW-FU-528 (Batch 9 Issue 1): days-per-week / pattern selector, restricted to
-                the legal patterns for this course's credits + the chosen duration. Changing the
-                duration above auto-switches to a legal pattern; picking a pill here restructures
-                the group on Save. Hidden for single-meeting-only courses (1-credit / Prj / Ths). */}
-            {legalPatternsNow.filter(p => p !== 'single').length > 0 && (
+            {/* NEW-FU-531 (Batch 10 Issue 4): the meeting-day pills are DYNAMIC per the
+                course's credits. Show every multi-day pattern that EXISTS for the credits
+                (a 2-credit course never sees a 3-day pattern); DISABLE the ones illegal for
+                the current duration, with a reason tooltip (e.g. 3-credit Sun/Tue/Thu needs
+                50 min). Picking an enabled pill restructures the group in place on Save. */}
+            {selectedCourse && form.sectionType === 'Lec'
+              && creditPatterns({ credits: selectedCourse.credits, hasLab: courseHasLab }).filter(p => p !== 'single').length > 0 && (
               <div className="sm-field">
-                <label>Meeting days <span className="sm-optional">(set by credits &amp; duration)</span></label>
+                <label>Meeting days <span className="sm-optional">(set by this course's {selectedCourse.credits} credit{Number(selectedCourse.credits)===1?'':'s'})</span></label>
                 <div className="sm-pill-group sm-pill-group-sm">
-                  {legalPatternsNow.map(p => (
-                    <button key={p} type="button"
-                      className={`sm-pill sm-pill-sm ${form.dayMode===p?'active':''}`}
-                      aria-pressed={form.dayMode===p}
-                      onClick={()=>setForm(f=>({...f, dayMode: p, day: DAY_TEMPLATES[p]?.days?.[0] ?? f.day }))}>
-                      {DAY_TEMPLATES[p]?.label ?? p}
-                    </button>
-                  ))}
+                  {creditPatterns({ credits: selectedCourse.credits, hasLab: courseHasLab })
+                    .filter(p => p !== 'single')
+                    .map(p => {
+                      const legal  = legalPatternsNow.includes(p);
+                      const okDur  = [50, 75].find(d => legalDayTemplatesForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab, duration: d }).includes(p));
+                      const reason = legal ? undefined
+                        : `${DAY_TEMPLATES[p]?.label} requires ${okDur} min for a ${selectedCourse.credits}-credit course (you have ${form.duration} min)`;
+                      return (
+                        <button key={p} type="button" disabled={!legal} title={reason}
+                          className={`sm-pill sm-pill-sm ${form.dayMode===p?'active':''}`}
+                          aria-pressed={form.dayMode===p}
+                          onClick={()=>setForm(f=>({...f, dayMode: p, day: DAY_TEMPLATES[p]?.days?.[0] ?? f.day }))}>
+                          {DAY_TEMPLATES[p]?.label ?? p}{!legal ? '  · needs ' + okDur + 'm' : ''}
+                        </button>
+                      );
+                    })}
                 </div>
               </div>
             )}
