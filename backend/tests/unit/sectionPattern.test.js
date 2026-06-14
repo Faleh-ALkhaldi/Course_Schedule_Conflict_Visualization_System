@@ -62,11 +62,11 @@ describe('validateSectionPattern - lecture rule table', () => {
     const r = validateSectionPattern(mk({ credits: 2, days: ['Sunday','Monday'], duration: DUR_50 }));
     expect(r.ok).toBe(false);
   });
-  test('2-credit · 75 min · single day → ok', () => {
+  test('2-credit · 75 min → rejected (FU-532: 75 min is 3/4-credit only)', () => {
     const r = validateSectionPattern(mk({ credits: 2, days: ['Wednesday'], duration: DUR_75 }));
-    expect(r).toEqual({ ok: true });
+    expect(r.ok).toBe(false);
   });
-  test('2-credit · 75 min · two days → rejected (no 2-day 75min combo)', () => {
+  test('2-credit · 75 min · two days → rejected', () => {
     const r = validateSectionPattern(mk({ credits: 2, days: ['Sunday','Tuesday'], duration: DUR_75 }));
     expect(r.ok).toBe(false);
   });
@@ -107,10 +107,17 @@ describe('validateSectionPattern - lecture rule table', () => {
     }));
     expect(r).toEqual({ ok: true });
   });
-  test('3-credit · 50 min · Sun+Tue+Thu (with lab) → still ok', () => {
-    // Adding a lab doesn't BREAK the canonical 3-day pattern — it remains valid.
+  test('3-credit · 50 min · Sun+Tue+Thu WITH lab → rejected (FU-532: +lab is a 2-day lecture)', () => {
+    // The 3-day Sun/Tue/Thu 50-min lecture is the NO-lab 3-credit pattern. A 3-credit
+    // course that HAS a lab meets the lecture in 2 days (ST/MW/TT) + a separate lab.
     const r = validateSectionPattern(mk({
       credits: 3, hasLab: true, days: ['Sunday','Tuesday','Thursday'], duration: DUR_50,
+    }));
+    expect(r.ok).toBe(false);
+  });
+  test('3-credit · 50 min · Sun+Tue WITH lab → ok (2-day lecture + lab)', () => {
+    const r = validateSectionPattern(mk({
+      credits: 3, hasLab: true, days: ['Sunday','Tuesday'], duration: DUR_50,
     }));
     expect(r).toEqual({ ok: true });
   });
@@ -184,13 +191,17 @@ describe('validateSectionPattern - credit cap', () => {
       credits: 5, days: ['Sunday','Tuesday','Thursday'], duration: DUR_50,
     }));
     expect(r.ok).toBe(false);
-    expect(r.error).toMatch(/1, 2, 3, or 4 credits/);
+    expect(r.error).toMatch(/0, 1, 2, 3, or 4 credits/);
   });
-  test('0 credits → rejected', () => {
+  test('0-credit (capstone SWE 413) · 50 min · single day → ok', () => {
     const r = validateSectionPattern(mk({
       credits: 0, days: ['Sunday'], duration: DUR_50,
     }));
-    expect(r.ok).toBe(false);
+    expect(r).toEqual({ ok: true });
+  });
+  test('0-credit · 75 min or multi-day → rejected', () => {
+    expect(validateSectionPattern(mk({ credits: 0, days: ['Sunday'], duration: DUR_75 })).ok).toBe(false);
+    expect(validateSectionPattern(mk({ credits: 0, days: ['Sunday','Tuesday'], duration: DUR_50 })).ok).toBe(false);
   });
 });
 
@@ -231,41 +242,35 @@ describe('legalPatternsForCourse', () => {
     expect(values(legalPatternsForCourse({ credits: 1, hasLab: false }))).toEqual(['ONE_DAY_50']);
   });
 
-  test('2-credit → 3 × 2-day-50 + 1-day 75min', () => {
+  test('2-credit → 3 × 2-day-50 only (FU-532: no 75 min for 2-credit)', () => {
     expect(values(legalPatternsForCourse({ credits: 2, hasLab: false }))).toEqual(
-      ['ST_50', 'MW_50', 'TT_50', 'ONE_DAY_75']
+      ['ST_50', 'MW_50', 'TT_50']
     );
   });
 
-  test('3-credit no lab → 4 lecture patterns (STT 50, MW/ST/TT 75)', () => {
+  test('0-credit (capstone) → [ONE_DAY_50]', () => {
+    expect(values(legalPatternsForCourse({ credits: 0, hasLab: false }))).toEqual(['ONE_DAY_50']);
+  });
+
+  test('3-credit no lab → 3-day 50min + 2-day 75min (STT 50, MW/ST/TT 75)', () => {
     expect(values(legalPatternsForCourse({ credits: 3, hasLab: false }))).toEqual(
       ['STT_50', 'MW_75', 'ST_75', 'TT_75']
     );
   });
 
-  test('3-credit with lab → adds the 2-day-50 lecture alternatives', () => {
+  test('3-credit WITH lab → 2-day lecture (50 + 75), never the 3-day Sun/Tue/Thu', () => {
     expect(values(legalPatternsForCourse({ credits: 3, hasLab: true }))).toEqual(
-      ['STT_50', 'MW_75', 'ST_75', 'TT_75', 'ST_50', 'MW_50', 'TT_50']
+      ['ST_50', 'MW_50', 'TT_50', 'MW_75', 'ST_75', 'TT_75']
     );
   });
 
-  test('4-credit (always lab) matches 3-credit + lab', () => {
+  test('4-credit → 3-day 50min + 2-day 75min (matches 3-credit no-lab)', () => {
     expect(values(legalPatternsForCourse({ credits: 4, hasLab: true }))).toEqual(
-      values(legalPatternsForCourse({ credits: 3, hasLab: true }))
-    );
-  });
-
-  test('4-credit without hasLab still surfaces the same lecture set', () => {
-    // hasLab is enforced at validateSectionPattern; the catalog just
-    // shows what lecture patterns the 4-cr course is allowed to use.
-    // (Caller is responsible for setting has_lab on the course row.)
-    expect(values(legalPatternsForCourse({ credits: 4, hasLab: false }))).toEqual(
-      ['STT_50', 'MW_75', 'ST_75', 'TT_75', 'ST_50', 'MW_50', 'TT_50']
+      ['STT_50', 'MW_75', 'ST_75', 'TT_75']
     );
   });
 
   test('invalid credits → empty list', () => {
-    expect(legalPatternsForCourse({ credits: 0, hasLab: false })).toEqual([]);
     expect(legalPatternsForCourse({ credits: 5, hasLab: false })).toEqual([]);
     expect(legalPatternsForCourse({ credits: -1, hasLab: false })).toEqual([]);
   });
@@ -333,8 +338,11 @@ describe('legalDurationsForCourse', () => {
   test('1-credit → [50]', () => {
     expect(legalDurationsForCourse({ credits: 1, hasLab: false })).toEqual([DUR_50]);
   });
-  test('2-credit → [50, 75]', () => {
-    expect(legalDurationsForCourse({ credits: 2, hasLab: false })).toEqual([DUR_50, DUR_75]);
+  test('0-credit → [50]', () => {
+    expect(legalDurationsForCourse({ credits: 0, hasLab: false })).toEqual([DUR_50]);
+  });
+  test('2-credit → [50] only (FU-532: 75 min is 3/4-credit only)', () => {
+    expect(legalDurationsForCourse({ credits: 2, hasLab: false })).toEqual([DUR_50]);
   });
   test('3-credit no lab → [50, 75]', () => {
     expect(legalDurationsForCourse({ credits: 3, hasLab: false })).toEqual([DUR_50, DUR_75]);
@@ -346,8 +354,8 @@ describe('legalDurationsForCourse', () => {
     expect(legalDurationsForCourse({ credits: 4, hasLab: true })).toEqual([DUR_50, DUR_75]);
   });
   test('invalid credits → []', () => {
-    expect(legalDurationsForCourse({ credits: 0, hasLab: false })).toEqual([]);
     expect(legalDurationsForCourse({ credits: 5, hasLab: true })).toEqual([]);
+    expect(legalDurationsForCourse({ credits: -1, hasLab: false })).toEqual([]);
   });
 });
 
@@ -361,24 +369,28 @@ describe('legalDayTemplatesForCourse', () => {
   test('2-credit · 50 → [ST, MW, TT]', () => {
     expect(T(2, false, DUR_50)).toEqual(['ST', 'MW', 'TT']);
   });
-  test('2-credit · 75 → [ONE_DAY]', () => {
-    expect(T(2, false, DUR_75)).toEqual(['ONE_DAY']);
+  test('0-credit · 50 → [ONE_DAY] (capstone SWE 413)', () => {
+    expect(T(0, false, DUR_50)).toEqual(['ONE_DAY']);
   });
-  test('3-credit no-lab · 50 → [STT] only (ST/MW/TT 50min requires lab)', () => {
+  test('2-credit · 75 → [] (FU-532: 75 min is 3/4-credit only)', () => {
+    expect(T(2, false, DUR_75)).toEqual([]);
+  });
+  test('3-credit no-lab · 50 → [STT] (3 meetings)', () => {
     expect(T(3, false, DUR_50)).toEqual(['STT']);
   });
-  test('3-credit +lab · 50 → [STT, ST, MW, TT] (the +lab 2-day alternatives unlock)', () => {
-    expect(T(3, true, DUR_50)).toEqual(['STT', 'ST', 'MW', 'TT']);
+  test('3-credit +lab · 50 → [ST, MW, TT] (2 lecture meetings; the 3-day belongs to no-lab)', () => {
+    expect(T(3, true, DUR_50)).toEqual(['ST', 'MW', 'TT']);
   });
   test('3-credit · 75 (with or without lab) → [MW, ST, TT]', () => {
     expect(T(3, false, DUR_75)).toEqual(['MW', 'ST', 'TT']);
     expect(T(3, true,  DUR_75)).toEqual(['MW', 'ST', 'TT']);
   });
-  test('4-credit · 50 → [STT, ST, MW, TT]', () => {
-    expect(T(4, true, DUR_50)).toEqual(['STT', 'ST', 'MW', 'TT']);
+  test('4-credit · 50 → [STT] only (3 meetings + lab)', () => {
+    expect(T(4, true, DUR_50)).toEqual(['STT']);
   });
   test('illegal (credits, duration) combo → []', () => {
     expect(T(1, false, DUR_75)).toEqual([]); // 1-credit doesn't get 75min
+    expect(T(2, false, DUR_75)).toEqual([]); // 2-credit doesn't get 75min
     expect(T(99, false, DUR_50)).toEqual([]);
   });
 });

@@ -159,8 +159,8 @@ function validateSectionPattern({ credits, hasLab, sectionType, days, startTime,
   // courses, and 4-credit courses must have a lab. Caller is
   // expected to enforce these at the course level too; we double-
   // check here so a stray section can't slip through.
-  if (![1, 2, 3, 4].includes(credits)) {
-    return { ok: false, error: `Invalid credits ${credits}. Courses must be 1, 2, 3, or 4 credits.` };
+  if (![0, 1, 2, 3, 4].includes(Number(credits))) {
+    return { ok: false, error: `Invalid credits ${credits}. Courses must be 0, 1, 2, 3, or 4 credits.` };
   }
   if (credits === 4 && !hasLab) {
     return { ok: false, error: '4-credit courses must have a lab section. Set hasLab on the course or use 3 credits.' };
@@ -202,21 +202,30 @@ function validateSectionPattern({ credits, hasLab, sectionType, days, startTime,
     return { ok: true };
   }
 
-  // Lecture section — match against the credits-specific rule list.
-  const rules = lectureRulesFor(credits, hasLab);
-  for (const rule of rules) {
-    if (rule.match({ days, duration })) {
-      return { ok: true };
+  // Lecture section — match against the credit-driven legal pattern set.
+  // legalDayTemplatesForCourse + legalDurationsForCourse are the SINGLE SOURCE OF
+  // TRUTH (mirrored on the frontend), so the validator, the picker, and Suggest can
+  // never drift. NEW-FU-532 (Batch 11): 75 min is 3/4-credit 2-day only; 50-min
+  // meetings-per-week is dictated by credits.
+  const c = Number(credits);
+  const durOk = legalDurationsForCourse({ credits: c, hasLab }).includes(duration);
+  const templates = durOk ? legalDayTemplatesForCourse({ credits: c, hasLab, duration }) : [];
+  const matched = templates.some(t =>
+    t === 'ONE_DAY' ? anyDay(days) : sameDays(days, DAY_TEMPLATES[t]));
+  if (matched) return { ok: true };
+
+  // Clear, plain-language error listing what IS allowed for this course.
+  const legal = [];
+  for (const dur of legalDurationsForCourse({ credits: c, hasLab })) {
+    for (const t of legalDayTemplatesForCourse({ credits: c, hasLab, duration: dur })) {
+      legal.push(`${dur} min on ${t === 'ONE_DAY' ? 'any single day' : DAY_TEMPLATE_LABELS[t]}`);
     }
   }
-  // Build a helpful error listing the allowed patterns for this credits.
-  const allowed = rules.map(r => `  • ${r.name}`).join('\n');
   return {
     ok: false,
     error:
-      `Lecture pattern not allowed for ${credits}-credit course ` +
-      `${hasLab ? '(with lab) ' : ''}` +
-      `on ${days.join('+')} for ${duration} min.\nAllowed patterns:\n${allowed}`,
+      `${days.join('+')} for ${duration} min isn't a valid pattern for a ${c}-credit ` +
+      `${hasLab ? 'with-lab ' : ''}course. Allowed: ${legal.join('; ') || 'none'}.`,
   };
 }
 
@@ -292,12 +301,12 @@ const DAY_TEMPLATE_LABELS = {
 
 // The legal duration set per (credits, hasLab). Mirrors the
 // validator's rule table.
+// NEW-FU-532 (Batch 11): the legal duration set per credits. 75 min is reserved for
+// 3- and 4-credit courses (a 2-day pattern); 0/1/2-credit courses are 50 min only.
 function legalDurationsForCourse({ credits, hasLab }) {
   const c = Number(credits);
-  if (c === 1) return [DUR_50];
-  if (c === 2) return [DUR_50, DUR_75];
-  if (c === 3) return [DUR_50, DUR_75];
-  if (c === 4) return [DUR_50, DUR_75];
+  if (c === 0 || c === 1 || c === 2) return [DUR_50];
+  if (c === 3 || c === 4) return [DUR_50, DUR_75];
   return [];
 }
 
@@ -313,16 +322,24 @@ function legalDurationsForCourse({ credits, hasLab }) {
 //   3-cr · 75  → MW, ST, TT
 //   4-cr · 50  → STT + ST/MW/TT (always has lab)
 //   4-cr · 75  → MW, ST, TT
+// NEW-FU-532 (Batch 11): legal day-templates per (credits, hasLab, duration).
+//   • 75 min → 3/4-credit only, ALWAYS a 2-day pattern (Mon/Wed, Sun/Tue, Tue/Thu).
+//   • 50 min → meetings-per-week is dictated by the credits:
+//       0 cr (capstone SWE 413) → 1 meeting   1 cr → 1 meeting
+//       2 cr (no lab)           → 2 meetings   3 cr no-lab → 3 meetings (Sun/Tue/Thu)
+//       3 cr +lab               → 2 lecture meetings (+ a separate lab)
+//       4 cr (+lab)             → 3 meetings (Sun/Tue/Thu) (+ a separate lab)
+//   (Lab duration never dictates credits.)
 function legalDayTemplatesForCourse({ credits, hasLab, duration }) {
   const c = Number(credits);
   const d = Number(duration);
-  if (c === 1 && d === DUR_50) return ['ONE_DAY'];
-  if (c === 2 && d === DUR_50) return ['ST', 'MW', 'TT'];
-  if (c === 2 && d === DUR_75) return ['ONE_DAY'];
-  if (c === 3 && d === DUR_50) return hasLab ? ['STT', 'ST', 'MW', 'TT'] : ['STT'];
-  if (c === 3 && d === DUR_75) return ['MW', 'ST', 'TT'];
-  if (c === 4 && d === DUR_50) return ['STT', 'ST', 'MW', 'TT'];
-  if (c === 4 && d === DUR_75) return ['MW', 'ST', 'TT'];
+  if (d === DUR_75) return (c === 3 || c === 4) ? ['MW', 'ST', 'TT'] : [];
+  // d === 50
+  if (c === 0) return ['ONE_DAY'];
+  if (c === 1) return ['ONE_DAY'];
+  if (c === 2) return ['ST', 'MW', 'TT'];
+  if (c === 3) return hasLab ? ['ST', 'MW', 'TT'] : ['STT'];
+  if (c === 4) return ['STT'];
   return [];
 }
 
@@ -370,15 +387,16 @@ function legalPatternsForCourse({ credits, hasLab }) {
     duration: PATTERN_DEFS[name].duration,
   });
 
+  // NEW-FU-532 (Batch 11): 75 min is 3/4-credit 2-day only; 50-min meetings-per-week
+  // is dictated by credits; 3-credit-with-lab is a 2-day lecture (the 3-day Sun/Tue/Thu
+  // belongs to no-lab 3-credit); 4-credit is a 3-day lecture (+ lab); 0-credit (SWE 413
+  // capstone) is a single 50-min meeting.
+  if (c === 0) return [wrap('ONE_DAY_50')];
   if (c === 1) return [wrap('ONE_DAY_50')];
-  if (c === 2) return ['ST_50', 'MW_50', 'TT_50', 'ONE_DAY_75'].map(wrap);
+  if (c === 2) return ['ST_50', 'MW_50', 'TT_50'].map(wrap);
   if (c === 3 && !hasLab) return ['STT_50', 'MW_75', 'ST_75', 'TT_75'].map(wrap);
-  if (c === 3 &&  hasLab) return ['STT_50', 'MW_75', 'ST_75', 'TT_75',
-                                  'ST_50', 'MW_50', 'TT_50'].map(wrap);
-  // 4-credit ALWAYS has a lab (validateSectionPattern enforces this);
-  // the lecture pattern set matches the 3+lab case.
-  if (c === 4) return ['STT_50', 'MW_75', 'ST_75', 'TT_75',
-                       'ST_50', 'MW_50', 'TT_50'].map(wrap);
+  if (c === 3 &&  hasLab) return ['ST_50', 'MW_50', 'TT_50', 'MW_75', 'ST_75', 'TT_75'].map(wrap);
+  if (c === 4) return ['STT_50', 'MW_75', 'ST_75', 'TT_75'].map(wrap);
   return [];
 }
 
