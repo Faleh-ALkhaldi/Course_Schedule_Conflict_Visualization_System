@@ -782,47 +782,59 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // while leaving Save enabled, so the user could commit a hard clash. Now Save is
   // disabled until the form is conflict-free (the busy pickers guide them to free
   // options). Soft findings (R-11/R-12 type hints) are advisory and do NOT block.
-  const hasHardConflict = (conflictPreview || []).some(f => f.severity === 'Hard');
-
-  // NEW-FU-533 (Batch 10 Issue 2): does a CONFLICT-FREE alternative exist for this
-  // section's current pattern + instructor + venue? Scan every start time in the
-  // teaching window; if any leaves the instructor AND venue free on all the pattern's
-  // days (excluding the section's own group), a clash-free option exists → the user
-  // must move there (save stays blocked). If NONE is free, the schedule is genuinely
-  // tight → we allow an explicit override. Same overlap logic as conflictPreview.
-  const anyConflictFreeSlot = React.useMemo(() => {
-    if (!hasHardConflict) return true;
-    if (courseIsExternal) return true;
+  // NEW-FU-534 (Batch 12): the AUTHORITATIVE conflict check runs the FULL engine on the
+  // backend for the proposed change — catching student/academic-level overlaps (R-01/R-02),
+  // the time window (R-06), etc., not just instructor/venue. Debounced; the client-side
+  // conflictPreview gives instant feedback while the server round-trips. The endpoint also
+  // reports whether ANY conflict-free start exists for the pattern → steer vs. override.
+  const [serverPreview, setServerPreview] = useState({ conflicts: [], conflictFreeStartExists: true, loaded: false, stale: false });
+  useEffect(() => {
+    if (!schedule?.id || !form.courseId || courseIsExternal) {
+      setServerPreview({ conflicts: [], conflictFreeStartExists: true, loaded: true, stale: false });
+      return;
+    }
     const days = (() => {
       const tmpl = DAY_TEMPLATES[form.dayMode];
       if (tmpl?.days) return tmpl.days;
       return form.day ? [form.day] : [];
     })();
-    const dur = parseInt(form.duration || 0, 10);
-    if (!days.length || !dur) return true;
-    const selfCourse = existing?.courseId ?? existing?.course_id ?? null;
-    const selfNum    = existing?.sectionNumber ?? existing?.section_number ?? null;
-    const pool = sections.filter(s =>
-      !(mode === 'edit' && selfCourse != null
-        && (s.courseId ?? s.course_id) === selfCourse
-        && (s.sectionNumber ?? s.section_number) === selfNum));
-    const win = timeWindow || TIME_WINDOWS.UG;
-    for (let start = win.start; start + dur <= win.end; start += 5) {
-      let free = true;
-      for (const s of pool) {
-        if (!days.includes(s.day)) continue;
-        if (!(toMinutes(s.startTime) < start + dur && start < toMinutes(s.endTime))) continue;
-        if ((form.instructorId && s.instructorId === form.instructorId) ||
-            (form.venueId && s.venueId === form.venueId)) { free = false; break; }
-      }
-      if (free) return true;
+    if (!days.length || !form.startTime || durationError || timeError) {
+      setServerPreview(p => ({ ...p, stale: false }));
+      return;
     }
-    return false;
-  }, [hasHardConflict, courseIsExternal, form, sections, existing, mode, timeWindow]);
+    setServerPreview(p => ({ ...p, stale: true }));
+    const change = {
+      sectionId: existing?.id ?? null,
+      courseId: form.courseId,
+      instructorId: form.instructorId || null,
+      venueId: form.venueId || null,
+      sectionNumber: form.sectionNumber || '01',
+      sectionType: form.sectionType || 'Lec',
+      days, startTime: form.startTime, endTime: computeEnd(),
+    };
+    const t = setTimeout(() => {
+      api.previewConflicts(schedule.id, change)
+        .then(data => setServerPreview({ conflicts: data.conflicts || [], conflictFreeStartExists: data.conflictFreeStartExists !== false, loaded: true, stale: false }))
+        .catch(() => setServerPreview(p => ({ ...p, stale: false, loaded: true })));
+    }, 350);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schedule?.id, form.courseId, form.instructorId, form.venueId, form.sectionNumber, form.sectionType, form.dayMode, form.day, form.startTime, form.duration, courseIsExternal, durationError, timeError]);
 
-  // The save-blocking rule: a hard conflict blocks Save UNLESS no conflict-free slot
-  // exists AND the user has explicitly approved the override ("schedule is tight").
-  const conflictBlocksSave = hasHardConflict && (anyConflictFreeSlot || !overrideConflict);
+  // Authoritative conflicts: the server's full-engine result once loaded, else the instant
+  // client preview. Drives the conflict banner AND the Save block.
+  const effectiveConflicts = serverPreview.loaded ? serverPreview.conflicts : (conflictPreview || []);
+  const hasHardConflict = effectiveConflicts.some(f => f.severity === 'Hard');
+  const hasAnyConflict  = effectiveConflicts.length > 0;
+  const conflictFreeAlt = serverPreview.conflictFreeStartExists;
+
+  // NEW-FU-534 (Batch 12): ANY conflict (hard OR soft) blocks Save. While the server
+  // re-check is pending Save is also blocked, so nothing slips through before the full
+  // engine confirms. When a conflict-free start exists the user is steered there; only
+  // when none exists (schedule tight) may they tick the explicit override.
+  const conflictBlocksSave =
+    (serverPreview.stale && !!form.courseId && !courseIsExternal)
+    || (hasAnyConflict && (conflictFreeAlt || !overrideConflict));
 
   // NEW-FU-528 (Batch 9 Issue 1): the day pattern (and meetings-per-week) is a
   // function of the course's CREDITS and the meeting DURATION. A 3-credit Lec is
@@ -940,7 +952,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // recomputes from the current form on every keystroke and excludes this
   // section's own group (so it never conflicts with itself). The backend
   // `conflicts` array stays the grid's source of truth and is untouched.
-  const liveConflicts = mode === 'edit' ? (conflictPreview || []) : [];
+  const liveConflicts = mode === 'edit' ? effectiveConflicts : [];
 
   return (
     <>
@@ -1295,21 +1307,22 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
             )}
 
             {/* NEW-FU-277 (Phase 53 #4): add-mode conflict preview. */}
-            {conflictPreview && conflictPreview.length > 0 && (
+            {effectiveConflicts.length > 0 && (
               <div className="sm-info-box sm-info-warn">
-                <strong><Ico name="alert" /> Submitting would create {conflictPreview.length} conflict{conflictPreview.length !== 1 ? 's' : ''}:</strong>
+                <strong><Ico name="alert" /> Submitting would create {effectiveConflicts.length} conflict{effectiveConflicts.length !== 1 ? 's' : ''}:</strong>
                 <ul className="sm-conflict-list">
-                  {conflictPreview.map((f, i) => (
+                  {effectiveConflicts.map((f, i) => (
                     <li key={i}>
-                      <span className={`sm-sev sm-sev-${f.severity.toLowerCase()}`}>{f.severity}</span>
-                      {/* NEW-FU-475: plain message only — no raw rule code on screen */}{f.msg}
+                      <span className={`sm-sev sm-sev-${String(f.severity || '').toLowerCase()}`}>{f.severity}</span>
+                      {/* plain message only — no raw rule code on screen. Server uses
+                          `description`, the instant client preview uses `msg`. */}{f.msg ?? f.description}
                     </li>
                   ))}
                 </ul>
                 {/* NEW-FU-533 (Batch 10 Issue 2): a conflicting save is BLOCKED by default.
                     If a clash-free time exists, steer the user there; only when none exists
                     (schedule is tight) offer an explicit override. */}
-                {anyConflictFreeSlot
+                {conflictFreeAlt
                   ? <p className="sm-inline-hint">A conflict-free time exists for this section — move it to a free slot instead of creating a conflict.</p>
                   : <label className="sm-override-check">
                       <input type="checkbox" checked={overrideConflict} onChange={e=>setOverrideConflict(e.target.checked)} />
@@ -1317,7 +1330,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     </label>}
               </div>
             )}
-            {conflictPreview && conflictPreview.length === 0 && form.courseId && !courseIsExternal && !durationError && !timeError && (
+            {effectiveConflicts.length === 0 && !serverPreview.stale && form.courseId && !courseIsExternal && !durationError && !timeError && (
               <div className="sm-info-box sm-info-ok"><Ico name="check" /> <span>No conflicts would be created.</span></div>
             )}
 
@@ -1376,7 +1389,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   {liveConflicts.map((f, i) => (
                     <li key={i}>
                       <span className={`sm-sev sm-sev-${(f.severity||'').toLowerCase()}`}>{f.severity}</span>
-                      {/* NEW-FU-472: plain message only — no raw rule code */}{f.msg}
+                      {/* NEW-FU-472: plain message only — no raw rule code */}{f.msg ?? f.description}
                     </li>
                   ))}
                 </ul>
@@ -1397,7 +1410,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               {/* External courses (SWE 399) need no section row — submit just closes. */}
               <button type="submit" className="sm-btn-save"
                 disabled={busy || scheduleLocked || courseMissing || sectionNumberMissing || !!sectionNumError || !!durationError || !!timeError || instructorMissing || venueMissing || venueTypeMismatch || conflictBlocksSave}
-                title={scheduleLocked ? lockedMsg : courseMissing ? 'Choose a course first' : sectionNumberMissing ? 'Enter a section number first' : durationError || timeError || (instructorMissing ? 'Choose an instructor first' : venueMissing ? 'Choose a venue first' : venueTypeMismatch ? 'Pick a venue that matches the section type first' : sectionNumError ? 'Fix the section number first' : conflictBlocksSave ? (anyConflictFreeSlot ? 'This would create a conflict — a clash-free time exists, move it there' : 'Schedule is tight — tick the box to save with a conflict') : undefined)}>
+                title={scheduleLocked ? lockedMsg : courseMissing ? 'Choose a course first' : sectionNumberMissing ? 'Enter a section number first' : durationError || timeError || (instructorMissing ? 'Choose an instructor first' : venueMissing ? 'Choose a venue first' : venueTypeMismatch ? 'Pick a venue that matches the section type first' : sectionNumError ? 'Fix the section number first' : conflictBlocksSave ? (conflictFreeAlt ? 'This would create a conflict — a clash-free time exists, move it there' : 'Schedule is tight — tick the box to save with a conflict') : undefined)}>
                 {busy ? 'Saving…' : mode==='add'
                   ? (courseIsExternal ? 'OK, course noted' : 'Add section')
                   : 'Save'}
@@ -1498,12 +1511,12 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   {liveConflicts.map((f, i) => (
                     <li key={i}>
                       <span className={`sm-sev sm-sev-${(f.severity||'').toLowerCase()}`}>{f.severity}</span>
-                      {/* NEW-FU-472: plain message only — no raw rule code */}{f.msg}
+                      {/* NEW-FU-472: plain message only — no raw rule code */}{f.msg ?? f.description}
                     </li>
                   ))}
                 </ul>
                 {/* NEW-FU-533 (Batch 10 Issue 2): block by default; offer override only when tight. */}
-                {hasHardConflict && (anyConflictFreeSlot
+                {hasAnyConflict && (conflictFreeAlt
                   ? <p className="sm-inline-hint">A conflict-free time exists — move this section to a free slot instead of creating a conflict.</p>
                   : <label className="sm-override-check">
                       <input type="checkbox" checked={overrideConflict} onChange={e=>setOverrideConflict(e.target.checked)} />
@@ -1523,7 +1536,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   the section number in edit mode also disables Save (parity with add). */}
               <button type="submit" className="sm-btn-save"
                 disabled={busy || scheduleLocked || sectionNumberMissing || !!timeError || !!durationError || conflictBlocksSave}
-                title={scheduleLocked ? lockedMsg : sectionNumberMissing ? 'Enter a section number first' : timeError || durationError || (conflictBlocksSave ? (anyConflictFreeSlot ? 'This would create a conflict — a clash-free time exists, move it there' : 'Schedule is tight — tick the box to save with a conflict') : undefined)}>
+                title={scheduleLocked ? lockedMsg : sectionNumberMissing ? 'Enter a section number first' : timeError || durationError || (conflictBlocksSave ? (conflictFreeAlt ? 'This would create a conflict — a clash-free time exists, move it there' : 'Schedule is tight — tick the box to save with a conflict') : undefined)}>
                 {busy ? 'Saving…' : 'Save'}
               </button>
             </div>

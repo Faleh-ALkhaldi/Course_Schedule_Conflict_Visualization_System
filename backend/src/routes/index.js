@@ -144,6 +144,8 @@ router.post('/schedules',                           ctrl.createSchedule);
 // Section CRUD is the scheduler's core workflow — open to scheduler role.
 router.get   ('/schedules/:scheduleId/sections', ctrl.getSections);
 router.post  ('/schedules/:scheduleId/sections', ctrl.createSection);
+// NEW-FU-534 (Batch 12): dry-run the FULL conflict engine for a proposed change.
+router.post  ('/schedules/:scheduleId/conflicts/preview', ctrl.previewConflicts);
 router.put   ('/sections/:sectionId',            ctrl.updateSection);
 router.delete('/sections/:sectionId',            ctrl.deleteSection);
 // NEW-FU-277: extend a section group with additional meeting days. The

@@ -612,6 +612,137 @@ const deleteSection = ah(async (req, res) => {
   }
 });
 
+// NEW-FU-534 (Batch 12): preview the FULL conflict-engine result for a PROPOSED
+// section change, without writing anything. The edit modal used a partial client-side
+// check (instructor/venue only) and missed student/academic-level overlaps (R-01/R-02),
+// the time window (R-06), etc. — so a conflicting change could be saved unflagged. This
+// runs the SAME engine Quick Fix / Suggest use, against the live schedule with the
+// change applied in memory, so the modal can flag every resulting conflict and block
+// Save. Also reports whether ANY conflict-free start time exists for the proposed
+// pattern (instructor/venue/days fixed) — the modal steers the user there, and only
+// offers an explicit override when none exists (the schedule is genuinely tight).
+const SECTION_SNAPSHOT_SQL = `
+  SELECT s.id, s.schedule_id, s.course_id, s.instructor_id, s.venue_id,
+         s.section_number, s.day, s.start_time::text, s.end_time::text,
+         s.section_type, s.gender,
+         c.course_code, c.name AS course_name, c.academic_level, c.category,
+         c.num_sections, c.has_lab, c.credits, c.is_capstone, c.is_external,
+         i.name AS instructor_name, v.name AS venue_name, v.type AS venue_type
+  FROM sections s
+  JOIN courses c ON c.id = s.course_id
+  LEFT JOIN instructors i ON i.id = s.instructor_id
+  LEFT JOIN venues v ON v.id = s.venue_id
+  WHERE s.schedule_id = $1`;
+
+const previewConflicts = ah(async (req, res) => {
+  const { scheduleId } = req.params;
+  const { sectionId, courseId, instructorId, venueId, sectionNumber, sectionType,
+          days, startTime, endTime } = req.body;
+  if (!isUuid(scheduleId)) return badRequest(res, 'scheduleId must be a UUID.');
+  // Not enough to evaluate yet → no conflicts (the modal keeps Save logic on its own
+  // required-field checks).
+  if (!courseId || !Array.isArray(days) || days.length === 0 || !startTime || !endTime) {
+    return res.json({ conflicts: [], conflictFreeStartExists: true });
+  }
+
+  const Section = require('../domain/Section');
+  const ConflictEngine = require('../engine/ConflictEngine');
+  const engine = new ConflictEngine();
+
+  const mk = (row) => new Section({
+    id: row.id, scheduleId: row.schedule_id, courseId: row.course_id,
+    instructorId: row.instructor_id, venueId: row.venue_id,
+    sectionNumber: row.section_number, day: row.day,
+    startTime: row.start_time, endTime: row.end_time,
+    courseCode: row.course_code, courseName: row.course_name,
+    academicLevel: row.academic_level, category: row.category,
+    numSections: row.num_sections, instructorName: row.instructor_name,
+    venueName: row.venue_name, sectionType: row.section_type, venueType: row.venue_type,
+    hasLab: row.has_lab, credits: row.credits, isCapstone: row.is_capstone,
+    gender: row.gender, isExternal: row.is_external,
+  });
+
+  const snap = await query(SECTION_SNAPSHOT_SQL, [scheduleId]);
+  const all = snap.rows.map(mk);
+
+  // Exclude the EDITED section's own group (so it can't conflict with itself). Identify
+  // it by sectionId when editing, else by (courseId, sectionNumber).
+  let selfCourse = courseId, selfNum = sectionNumber;
+  if (sectionId) {
+    const own = all.find(s => s.id === sectionId);
+    if (own) { selfCourse = own.courseId; selfNum = own.sectionNumber; }
+  }
+  const others = all.filter(s => !(s.courseId === selfCourse && s.sectionNumber === String(selfNum)));
+
+  // Course / venue / instructor metadata for the proposed section.
+  const cRes = await query(
+    `SELECT course_code, name, academic_level, category, num_sections, has_lab, credits, is_capstone, is_external FROM courses WHERE id = $1`,
+    [courseId]);
+  const course = cRes.rows[0];
+  if (!course) return res.json({ conflicts: [], conflictFreeStartExists: true });
+  let venue = null, instrName = null;
+  if (venueId)      venue     = (await query(`SELECT name, type FROM venues WHERE id = $1`, [venueId])).rows[0] || null;
+  if (instructorId) instrName = (await query(`SELECT name FROM instructors WHERE id = $1`, [instructorId])).rows[0]?.name || null;
+
+  // OH map for every instructor in play (incl. the proposed one).
+  const instrIds = [...new Set([...others.map(s => s.instructorId), instructorId].filter(Boolean))];
+  const ohMap = new Map();
+  if (instrIds.length) {
+    const ohRes = await query(
+      `SELECT instructor_id, day, start_time::text AS start_time, end_time::text AS end_time
+       FROM office_hours WHERE instructor_id = ANY($1)`, [instrIds]);
+    for (const row of ohRes.rows) {
+      if (!ohMap.has(row.instructor_id)) ohMap.set(row.instructor_id, []);
+      ohMap.get(row.instructor_id).push({ day: row.day, startTime: row.start_time, endTime: row.end_time });
+    }
+  }
+
+  const hm = t => { const [h, m] = String(t).slice(0, 5).split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+  const fromMin = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const durMin = hm(endTime) - hm(startTime);
+
+  // Build the proposed group at a given start minute and return the conflicts that
+  // INVOLVE it, using the real engine over (others + proposed).
+  const evalAt = (startMin) => {
+    const proposed = days.map((day, i) => mk({
+      id: `__preview__${i}`, schedule_id: scheduleId, course_id: courseId,
+      instructor_id: instructorId || null, venue_id: venueId || null,
+      section_number: String(sectionNumber ?? '01'), day,
+      start_time: fromMin(startMin), end_time: fromMin(startMin + durMin),
+      course_code: course.course_code, course_name: course.name,
+      academic_level: course.academic_level, category: course.category,
+      num_sections: course.num_sections, instructor_name: instrName,
+      venue_name: venue?.name, section_type: sectionType || 'Lec', venue_type: venue?.type,
+      has_lab: course.has_lab, credits: course.credits, is_capstone: course.is_capstone,
+      gender: 'M', is_external: course.is_external,
+    }));
+    const ids = new Set(proposed.map(p => p.id));
+    const result = engine.evaluateAll([...others, ...proposed], ohMap);
+    return result.conflicts.filter(c => ids.has(c.sectionAId) || ids.has(c.sectionBId));
+  };
+
+  // Conflicts for the EXACT proposed change.
+  const raw = evalAt(hm(startTime));
+  const seen = new Set();
+  const conflicts = raw.filter(c => {
+    const k = `${c.ruleId}|${c.description}`;
+    if (seen.has(k)) return false; seen.add(k); return true;
+  }).map(c => ({ ruleId: c.ruleId, severity: c.severity, description: c.description }));
+
+  // If the exact change conflicts, scan the teaching window for a fully conflict-free
+  // start (same days/instructor/venue/pattern) so the modal can steer vs. override.
+  let conflictFreeStartExists = conflicts.length === 0;
+  if (!conflictFreeStartExists) {
+    const win = (course.category === 'GR' && !course.is_capstone)
+      ? { start: 17 * 60 + 20, end: 22 * 60 } : { start: 7 * 60, end: 17 * 60 + 10 };
+    for (let st = win.start; st + durMin <= win.end; st += 30) {
+      if (evalAt(st).length === 0) { conflictFreeStartExists = true; break; }
+    }
+  }
+
+  res.json({ conflicts, conflictFreeStartExists });
+});
+
 // ── Save ──────────────────────────────────────────────────────────────────────
 const saveSchedule = ah(async (req, res) => {
   const { scheduleId } = req.params;
@@ -1688,7 +1819,7 @@ const deleteTerm = ah(async (req, res) => {
 module.exports = {
   login, logout,
   listSchedules, createSchedule,
-  getSections, createSection, updateSection, deleteSection, extendSection,
+  getSections, createSection, updateSection, deleteSection, extendSection, previewConflicts,
   quickFixPlan, quickFixApply,
   importSchedule, upload,
   suggestSchedule, suggestRecommend,

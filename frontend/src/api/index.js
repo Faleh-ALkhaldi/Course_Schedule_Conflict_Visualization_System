@@ -204,6 +204,11 @@ export const quickFixApply = (scheduleId, ops) =>
 export const getConflicts = (scheduleId) =>
   api.get(`/schedules/${scheduleId}/conflicts`).then(r => r.data);
 
+// NEW-FU-534 (Batch 12): dry-run the full conflict engine for a proposed section
+// change. Returns { conflicts: [{ruleId,severity,description}], conflictFreeStartExists }.
+export const previewConflicts = (scheduleId, change) =>
+  api.post(`/schedules/${scheduleId}/conflicts/preview`, change).then(r => r.data);
+
 // NEW-FU-78: optional `confirmSoftIds` argument scopes the dismiss to
 // exactly the conflict ids the user saw in the modal. Falls back to the
 // legacy boolean form when no ids are supplied.
