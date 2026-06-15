@@ -19,7 +19,11 @@
 // (`section_number`) so callers don't have to remember which layer
 // produced the row.
 function sectionLabel(section, { withSection = true } = {}) {
-  const num    = (section?.sectionNumber ?? section?.section_number ?? '').toString();
+  const raw    = (section?.sectionNumber ?? section?.section_number ?? '').toString();
+  // NEW-FU-561 (audit P3): match the frontend sectionLabel EXACTLY — zero-pad pure-digit
+  // section numbers to 2 digits (1 → 01) so synthetic/preview rows read "§01" not "§1".
+  // Non-numeric labels ("__") pass through; stored values are already padded (no-op).
+  const num    = /^\d+$/.test(raw) ? raw.padStart(2, '0') : raw;
   const gender = section?.gender ?? 'M';
   const prefix = withSection ? '§' : '';
   return gender === 'F' ? `${prefix}F-${num}` : `${prefix}${num}`;

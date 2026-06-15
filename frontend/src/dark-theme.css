@@ -168,3 +168,21 @@
   background: var(--accent-hover) !important;
   border-color: var(--accent-hover) !important;
 }
+
+/* NEW-FU-561 (audit P2-13): the "No instructor / No venue" card warning hardcodes
+   #7c2d12 (tuned for LIGHT pastel/conflict cards) with no dark override → ~1.6:1 on the
+   dark section cards, effectively invisible. Lift to a light amber that clears AA on the
+   darkest card bg (SoftConflict #33280a → #fbbf24 ≈ 7:1). */
+[data-theme="dark"] .sblock-no-instr { color: #fbbf24; }
+
+/* NEW-FU-561 (audit P2-15): the Office-Hours grid card hardcoded an all-light palette
+   (light hatch bg, grey border, dark label/time) with no dark override, so it stayed a
+   light hatched block on the dark grid. Re-tint to dark surfaces with theme-aware light
+   text (these tokens flip per mode). */
+[data-theme="dark"] .oh-block {
+  border-color: var(--border-strong);
+  background: repeating-linear-gradient(45deg, #1b2640 0px, #1b2640 4px, #141d30 4px, #141d30 8px);
+}
+[data-theme="dark"] .oh-block:hover { border-color: var(--border-strong); }
+[data-theme="dark"] .oh-label { color: var(--text-secondary); }
+[data-theme="dark"] .oh-time  { color: var(--text-muted); }

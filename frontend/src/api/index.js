@@ -209,6 +209,15 @@ export const getConflicts = (scheduleId) =>
 export const previewConflicts = (scheduleId, change) =>
   api.post(`/schedules/${scheduleId}/conflicts/preview`, change).then(r => r.data);
 
+// NEW-FU-541 (Batch 13 Issue 2): constrained, move-only Quick Fix for the edit/add
+// panels. plan() returns { feasible, moves:[{sectionId,courseCode,sectionNumber,day,
+// fromStart,toStart,toEnd}] }; apply() commits ONLY those time moves on OTHER sections
+// (never drops sections, never assigns dummy resources).
+export const autoFixAround = (scheduleId, change) =>
+  api.post(`/schedules/${scheduleId}/conflicts/auto-fix`, change).then(r => r.data);
+export const autoFixAroundApply = (scheduleId, moves) =>
+  api.post(`/schedules/${scheduleId}/conflicts/auto-fix/apply`, { moves }).then(r => r.data);
+
 // NEW-FU-78: optional `confirmSoftIds` argument scopes the dismiss to
 // exactly the conflict ids the user saw in the modal. Falls back to the
 // legacy boolean form when no ids are supplied.

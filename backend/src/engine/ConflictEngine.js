@@ -109,11 +109,21 @@ class ConflictEngine {
         // For two-section conflicts, the [idA, idB].sort() already gives
         // good dedup since pair semantics hold; no description needed.
         const isR04OhOverlap = c.ruleId === 'R-04' && !c.sectionBId;
-        const key = c.sectionBId
-          ? [idA, idB].sort().join('||') + '|' + c.ruleId
-          : isR04OhOverlap
-            ? idA + '|' + c.ruleId + '|' + (c.description ?? '')
-            : idA + '|' + c.ruleId;
+        // NEW-FU-561 (audit P1-1): R-01 is a COURSE-pair violation, but each emitted
+        // Conflict carries the per-call `changed` section as sectionAId, so the
+        // section-pair key [idA,idB] varies across evaluate() calls and the SAME
+        // course-pair conflict was admitted once per section — 3-9x duplicate HARD
+        // cards (count = sectionsA + sectionsB - 1). Dedup R-01 by the unordered
+        // COURSE pair (its description is already canonical per FU-80) so it
+        // collapses to exactly one.
+        const isR01Pair = c.ruleId === 'R-01' && c.sectionBId;
+        const key = isR01Pair
+          ? 'R-01|' + [secA?.courseId ?? c.sectionAId, secB?.courseId ?? c.sectionBId].sort().join('||')
+          : c.sectionBId
+            ? [idA, idB].sort().join('||') + '|' + c.ruleId
+            : isR04OhOverlap
+              ? idA + '|' + c.ruleId + '|' + (c.description ?? '')
+              : idA + '|' + c.ruleId;
 
         if (!seen.has(key)) {
           seen.add(key);

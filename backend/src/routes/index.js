@@ -146,6 +146,11 @@ router.get   ('/schedules/:scheduleId/sections', ctrl.getSections);
 router.post  ('/schedules/:scheduleId/sections', ctrl.createSection);
 // NEW-FU-534 (Batch 12): dry-run the FULL conflict engine for a proposed change.
 router.post  ('/schedules/:scheduleId/conflicts/preview', ctrl.previewConflicts);
+// NEW-FU-541 (Batch 13 Issue 2): constrained, move-only Quick Fix for the edit/add
+// panels — plan reschedules OTHER groups so the proposed change fits; apply commits
+// only those time moves (never drops sections, never assigns dummies).
+router.post  ('/schedules/:scheduleId/conflicts/auto-fix',       ctrl.autoFixAround);
+router.post  ('/schedules/:scheduleId/conflicts/auto-fix/apply', refuseIfActiveTermArchived, ctrl.autoFixAroundApply);
 router.put   ('/sections/:sectionId',            ctrl.updateSection);
 router.delete('/sections/:sectionId',            ctrl.deleteSection);
 // NEW-FU-277: extend a section group with additional meeting days. The

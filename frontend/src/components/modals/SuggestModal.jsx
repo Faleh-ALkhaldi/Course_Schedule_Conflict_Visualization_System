@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 // NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
 import Ico from '../shared/Icons.jsx';
 import { useApp, LEVEL_COLORS } from '../../context/AppContext.jsx';
@@ -58,12 +59,13 @@ function defaultDayTemplateFor(course, duration) {
 // user picks BOTH the duration AND the specific day (FU-254
 // replaces the prior "Any day" placeholder with explicit per-day
 // buttons so the choice is unambiguous).
-const LAB_DURATIONS = [50, 75, 165];
+const LAB_DURATIONS = [50, 75, 160];
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
 // Short labels for the day buttons to keep the row compact.
 const DAY_SHORT = { Sunday: 'Sun', Monday: 'Mon', Tuesday: 'Tue', Wednesday: 'Wed', Thursday: 'Thu' };
 
 export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
+  useFocusTrap();
   // NEW-FU-35: Escape dismisses the modal, matching the pattern used by the
   // other modals (SoftConflictModal / OfficeHourModal / GroupChangeModal).
   useEffect(() => {
@@ -563,7 +565,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
 
   return (
     <div className="sm-overlay" onClick={e => e.target===e.currentTarget && onClose()}>
-      <div className="sm-card suggest-card">
+      <div className="sm-card suggest-card" role="dialog" aria-modal="true" aria-label="Suggest schedule">
         <div className="sm-header">
           <h2 className="sm-title"><Ico name="sparkles" /> Auto-Suggest Schedule</h2>
           <button className="sm-close" onClick={onClose}>×</button>
@@ -929,7 +931,7 @@ cd backend && npm run dev`}
                                       <input type="radio" name={`lab-dur-${course.id}`}
                                         value={d} checked={cfg.labDuration === d}
                                         onChange={() => setField(course.id, 'labDuration', d)} />
-                                      <span>{d === 165 ? '2h 45m' : `${d} min`}</span>
+                                      <span>{d === 160 ? '2h 40m' : `${d} min`}</span>
                                     </label>
                                   ))}
                                 </div>

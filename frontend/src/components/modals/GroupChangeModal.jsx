@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 // NEW-FU-503 (Phase 123): SVG icon replaces the ⚠️ emoji in the title.
 import Ico from '../shared/Icons.jsx';
 import { sectionLabel } from '../../context/AppContext.jsx';
@@ -14,6 +15,7 @@ const GROUP_INFO = {
 };
 
 export default function GroupChangeModal({ sec, newDay, newStartTime, actualSiblingCount, onConfirm, onCancel }) {
+  useFocusTrap();
   // NEW-L13: Escape closes the modal (same as Cancel) — matches the
   // dismiss-on-Escape behaviour the other modals already have.
   useEffect(() => {
@@ -40,7 +42,7 @@ export default function GroupChangeModal({ sec, newDay, newStartTime, actualSibl
 
   return (
     <div className="sm-overlay" onClick={e => e.target===e.currentTarget && onCancel()}>
-      <div className="sm-card" style={{ maxWidth:460, borderTopColor:'var(--amber-500)' }}>
+      <div className="sm-card" role="dialog" aria-modal="true" aria-label="Change meeting group" style={{ maxWidth:460, borderTopColor:'var(--amber-500)' }}>
         <div className="sm-header">
           <h2 className="sm-title"><Ico name="alert" /> Change Day Group?</h2>
           <button className="sm-close" onClick={onCancel}>×</button>

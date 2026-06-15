@@ -132,10 +132,13 @@ function cellToTimeString(value) {
 async function buildTableWorkbook(scheduleId, semester) {
   const sections = await sectionRepo.findBySchedule(scheduleId);
 
-  // Group by courseId+sectionNumber (logical section)
+  // Group by courseId+sectionNumber+gender (logical section). Gender is part of the
+  // identity: the UNIQUE constraint is (schedule,course,section_number,day,gender), so a
+  // male §01 and a female §01 of one course legally coexist and must NOT collapse into
+  // one exported row (that silently dropped a section on xlsx round-trip).
   const groups = new Map();
   for (const sec of sections) {
-    const key = `${sec.courseId}|${sec.sectionNumber}`;
+    const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;
     if (!groups.has(key)) {
       groups.set(key, { sec, days: [] });
     }

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 // NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
 import Ico from '../shared/Icons.jsx';
 import { useApp } from '../../context/AppContext.jsx';
@@ -34,6 +35,7 @@ function inferImportFormat(file) {
 }
 
 export default function ExportModal({ onExport, onExportImage, onClose, showToast, initialTab = 'export' }) {
+  useFocusTrap();
   // NEW-FU-35: Escape dismisses the modal, matching the established pattern
   // in SoftConflictModal / OfficeHourModal / GroupChangeModal.
   useEffect(() => {
@@ -42,7 +44,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
 
-  const { view, filterId, instructors, venues, schedule, loadView, loadReference, dispatch } = useApp();
+  const { view, filterId, instructors, venues, schedule, loadView, loadReference, dispatch, clearHistory } = useApp();
 
   // NEW-FU-228 (Phase 97): open on the caller's tab so the top-bar "Import"
   // button lands directly on Import instead of burying it behind Export.
@@ -152,6 +154,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
       await loadReference();
       dispatch({ type:'SET_CONFLICTS', conflicts: result.conflicts?.conflicts ?? [] });
       await loadView(schedule.id, view, filterId);
+      clearHistory?.();   // NEW-FU-549 (Batch 16): import replaces the schedule → reset undo history
       const skippedMsg = result.skipped ? ` (${result.skipped} duplicate row(s) skipped)` : '';
       const errMsg = result.errors?.length ? ` · ${result.errors.length} row(s) had errors` : '';
       // Non-Excel imports are best-effort — surface a yellow warning toast when
@@ -173,7 +176,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
 
   return (
     <div className="sm-overlay" onClick={e => e.target===e.currentTarget && onClose()}>
-      <div className="sm-card" style={{ width:560, maxWidth:'95vw' }}>
+      <div className="sm-card" role="dialog" aria-modal="true" aria-label="Export schedule" style={{ width:560, maxWidth:'95vw' }}>
         <div className="sm-header">
           <h2 className="sm-title">📊 Schedule Data</h2>
           <button className="sm-close" onClick={onClose}>×</button>
@@ -352,7 +355,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
               <div style={{
                 background:'rgba(13,148,136,.06)', border:'1px solid rgba(13,148,136,.2)',
                 borderRadius:8, padding:'12px 14px', fontSize:'.82rem',
-                color:'var(--slate-700)', lineHeight:1.6, marginBottom:12
+                color:'var(--text-secondary)', lineHeight:1.6, marginBottom:12
               }}>
                 <strong>Supported formats:</strong>{' '}
                 {IMPORT_FORMATS.map(f => `${f.icon} ${f.label} (${f.accept})`).join(' · ')}

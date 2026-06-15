@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useApp, DAYS, DAY_DURATION, fromMinutes, toMinutes, sectionLabel, TIME_WINDOWS } from '../../context/AppContext.jsx';
 import * as api from '../../api/index.js';
 // NEW-FU-280/281 (Phase 56): replace window.prompt-based "+ New"
@@ -103,14 +104,14 @@ const GROUP_DAYS = {
 // limits as min/max attributes.
 const DURATION_DEFAULTS_BY_TYPE = {
   Lec: [50, 75],
-  Lab: [50, 75, 165],
+  Lab: [50, 75, 160],
   // NEW-FU-498 (Phase 122): Project/Thesis meet in long single blocks.
   Prj: [75, 100, 160],
   Ths: [75, 100, 160],
 };
 const DURATION_LIMITS_BY_TYPE = {
   Lec: { min: 50, max: 75  },
-  Lab: { min: 50, max: 165 },
+  Lab: { min: 50, max: 160 },
   Prj: { min: 50, max: 180 },
   Ths: { min: 50, max: 180 },
 };
@@ -161,6 +162,7 @@ function Ico({ name, className }) {
 }
 
 export default function SectionModal({ mode, initial, onClose, showToast }) {
+  useFocusTrap();
   // NEW-FU-35: Escape dismisses the modal, matching the established pattern
   // in SoftConflictModal / OfficeHourModal / GroupChangeModal.
   useEffect(() => {
@@ -178,6 +180,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // the edit banner is now driven by the live, form-derived `conflictPreview`.
   const { courses, instructors, venues, schedule, sections,
           addSection, moveSection, removeSection, loadView, view, filterId,
+          recordMutation,   // NEW-FU-549 (Batch 16): record restructure as one undo step
         } = useApp();
 
   // NEW-FU-280/281 (Phase 56): tracks which "+ New" sub-modal is open.
@@ -244,6 +247,14 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // creates a conflict — ONLY offered when no conflict-free slot exists ("schedule is
   // tight"). When a conflict-free alternative exists, the save stays blocked instead.
   const [overrideConflict, setOverrideConflict] = useState(false);
+  // NEW-FU-541 (Batch 13 Issue 2): constrained, move-only Quick Fix. status:
+  // 'idle' | 'planning' | 'ready' (feasible w/ moves) | 'applying' | 'infeasible' | 'error'.
+  const [autoFix, setAutoFix] = useState({ status: 'idle', moves: [], error: '' });
+  // Invalidation token: bumped whenever the proposed change inputs change, so an
+  // in-flight plan that resolves AFTER an edit is dropped instead of showing stale moves.
+  const autoFixToken = React.useRef(0);
+  // Bumped after an auto-fix is applied to force the conflict preview to re-fetch.
+  const [previewNonce, setPreviewNonce] = useState(0);
   // NEW-FU-417 (Phase 103 items 3+4): LIVE, runtime section-number validation.
   // Recomputed every render from the current input, so an out-of-range value is
   // flagged the instant it is typed — no waiting for Save, and no bare native
@@ -304,7 +315,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // NEW-FU-113: when section type changes, adapt the dayMode and duration
   // to match what makes sense for the new type:
   //   - Switching to 'Lab' → force dayMode='single' (labs are once-weekly
-  //     per spec) and pick 165 min (the typical lab block) if the current
+  //     per spec) and pick 160 min (the typical lab block) if the current
   //     duration is outside the Lab range or matches an old Lec default.
   //   - Switching to 'Lec' → restore the FU-39 derived dayMode from
   //     initial.day (or 'STT' fallback) and pick 50/75 if current duration
@@ -321,9 +332,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
         if (f.dayMode !== 'single') next.dayMode = 'single';
         if (!Number.isInteger(curDur) || curDur < limits.min || curDur > limits.max
             || curDur === 50 || curDur === 75) {
-          // Default Lab to 165 unless the user has already typed a value
+          // Default Lab to 160 unless the user has already typed a value
           // that fits and isn't one of the Lec defaults.
-          next.duration = '165';
+          next.duration = '160';
         }
       } else {
         // Lec: clamp duration into 50..75 if it's out of range.
@@ -508,30 +519,63 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       effectiveDay = origDay;
     }
     // NEW-FU-528 (Batch 9 Issue 1): if the duration change forced a different day
-    // pattern (e.g. 3-credit 50min Sun/Tue/Thu → 75min Mon/Wed), RESTRUCTURE the
-    // group instead of a time-only move: create the new pattern's day rows first
-    // (createSection validates the credits×duration×days rule), THEN delete the old
-    // group — so a failed create leaves the original group intact (mirrors
-    // confirmGroupChange's safe ordering). A same-pattern edit takes the move path.
+    // pattern (e.g. 3-credit 50min Sun/Tue/Thu → 75min Mon/Wed), RESTRUCTURE the group.
+    // NEW-FU-543 (Batch 14 Issue 2): DELETE the old group FIRST, then create the new
+    // pattern. The previous create-first ordering collided with the section's OWN rows
+    // on any day shared between the old and new pattern (e.g. Sun/Tue/Thu → Sun/Tue, or
+    // single-Tue → Tue/Thu) — the UNIQUE (schedule, course, section_number, day) index
+    // then surfaced as the PHANTOM "section number already used" error even though no
+    // OTHER section was involved. Deleting first frees those days. To keep the original
+    // create-first safety (no data loss on failure), we snapshot the old group and
+    // restore it if the new create fails.
     const targetGroup = form.dayMode;
     const patternChanged = targetGroup && targetGroup !== existingGroup
       && !(targetGroup === 'single' && existingGroup === 'single');
     if (patternChanged) {
       const targetDays = (targetGroup !== 'single') ? DAY_TEMPLATES[targetGroup].days : [form.day];
+      const origType  = existing.sectionType ?? existing.section_type;
+      const origInstr = existing.instructorId ?? existing.instructor_id ?? null;
+      const origVenue = existing.venueId ?? existing.venue_id ?? null;
+      const origStart = String(existing.startTime ?? existing.start_time ?? form.startTime).slice(0, 5);
+      const origEnd   = String(existing.endTime ?? existing.end_time ?? computeEnd()).slice(0, 5);
+      const origDays  = sections
+        .filter(s => (s.courseId ?? s.course_id) === existingCourseId
+                  && (s.sectionNumber ?? s.section_number) === existingSecNum)
+        .map(s => s.day);
+      const restoreDays = origDays.length ? origDays : [existing.day];
       try {
         const { createSection, deleteSection } = await import('../../api/index.js');
-        await createSection(schedule.id, {
-          courseId:      existingCourseId,
-          instructorId:  form.instructorId || existing.instructorId || existing.instructor_id || null,
-          venueId:       form.venueId      || existing.venueId      || existing.venue_id      || null,
-          sectionNumber: existingSecNum,
-          sectionType:   existing.sectionType ?? existing.section_type,
-          days:          targetDays,
-          day:           targetDays[0],
-          startTime:     form.startTime,
-          endTime:       computeEnd(),
-        });
-        await deleteSection(existing.id);   // removes the whole old group
+        await deleteSection(existing.id);   // remove the whole old group FIRST
+        try {
+          await createSection(schedule.id, {
+            courseId:      existingCourseId,
+            instructorId:  form.instructorId || origInstr,
+            venueId:       form.venueId      || origVenue,
+            sectionNumber: existingSecNum,
+            sectionType:   origType,
+            // NEW-FU-560 (audit P1-5): preserve gender across a pattern restructure.
+            // The delete+recreate dropped gender → createSection defaulted it to 'M',
+            // silently turning a §F section male (data corruption). Mirror origType.
+            gender:        existing.gender ?? form.gender ?? 'M',
+            days:          targetDays,
+            day:           targetDays[0],
+            startTime:     form.startTime,
+            endTime:       computeEnd(),
+          });
+        } catch (createErr) {
+          // Restore the original group so nothing is lost.
+          try {
+            await createSection(schedule.id, {
+              courseId: existingCourseId, instructorId: origInstr, venueId: origVenue,
+              sectionNumber: existingSecNum, sectionType: origType,
+              gender: existing.gender ?? form.gender ?? 'M',   // audit P1-5: preserve gender on restore
+              days: restoreDays, day: restoreDays[0],
+              startTime: origStart, endTime: origEnd,
+            });
+          } catch { /* best-effort restore */ }
+          throw createErr;
+        }
+        recordMutation?.('change meeting pattern');   // NEW-FU-549: one undo step
         showToast('✓ Meeting pattern updated.', 'success');
         loadView(schedule.id, view, filterId);
         onClose();
@@ -548,6 +592,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
         startTime:    form.startTime,
         endTime:      computeEnd(),
       });
+      // NEW-FU-550 (Batch 16 fix): ALWAYS refetch from server after the edit, exactly
+      // like the drag path. moveSection returns null for a GROUP update (no optimistic
+      // UPSERT), so without this reload the grid kept showing the old positions — a
+      // stale view that read as "the class was dropped". Reloading paints server truth.
+      loadView(schedule.id, view, filterId);
       showToast('✓ Time updated for all linked days.', 'success');
       onClose();
     } catch(err) {
@@ -731,13 +780,27 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     })();
     const startMin = toMinutes(form.startTime);
     const endMin   = startMin + parseInt(form.duration || 0, 10);
+    // NEW-FU-560 (Batch 19): mirror the backend R-04/R-05 KFUPM dual-audience
+    // exemption (R04Rule/R05Rule). A male section and the SAME course's female
+    // sibling at the EXACT same slot share one physical room — same instructor and
+    // venue by design, NOT a clash. This instant client preview was the one place
+    // that still omitted the exemption Batch 18 added server-side, so on first open
+    // (before the ~350 ms server round-trip) it fabricated a HARD self-conflict
+    // (e.g. §F-12 vs §02) that the gender-aware server preview then cleared — the
+    // "phantom" conflict that flashed in the panel. `toMinutes` trims seconds, so
+    // the exact-slot compare is format-robust ("09:30" === "09:30:00").
+    const isDualAudienceSibling = (s) =>
+      (s.courseId ?? s.course_id) === form.courseId &&
+      s.gender && form.gender && s.gender !== form.gender &&
+      toMinutes(s.startTime) === startMin && toMinutes(s.endTime) === endMin;
     const findings = [];
     // R-04: instructor overlap
     if (form.instructorId) {
       const conflictsInstr = pool.filter(s =>
         s.instructorId === form.instructorId &&
         days.includes(s.day) &&
-        toMinutes(s.startTime) < endMin && startMin < toMinutes(s.endTime)
+        toMinutes(s.startTime) < endMin && startMin < toMinutes(s.endTime) &&
+        !isDualAudienceSibling(s)
       );
       if (conflictsInstr.length) {
         findings.push({
@@ -751,7 +814,8 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       const conflictsVen = pool.filter(s =>
         s.venueId === form.venueId &&
         days.includes(s.day) &&
-        toMinutes(s.startTime) < endMin && startMin < toMinutes(s.endTime)
+        toMinutes(s.startTime) < endMin && startMin < toMinutes(s.endTime) &&
+        !isDualAudienceSibling(s)
       );
       if (conflictsVen.length) {
         findings.push({
@@ -803,6 +867,10 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       return;
     }
     setServerPreview(p => ({ ...p, stale: true }));
+    // Any change to the proposed section invalidates a prior move-only fix plan
+    // (and drops any in-flight plan via the token bump).
+    autoFixToken.current++;
+    setAutoFix(a => (a.status === 'idle' ? a : { status: 'idle', moves: [], error: '' }));
     const change = {
       sectionId: existing?.id ?? null,
       courseId: form.courseId,
@@ -810,6 +878,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       venueId: form.venueId || null,
       sectionNumber: form.sectionNumber || '01',
       sectionType: form.sectionType || 'Lec',
+      gender: form.gender || 'M',   // NEW-FU-555 (Batch 18): real gender → no false different-gender clashes
       days, startTime: form.startTime, endTime: computeEnd(),
     };
     const t = setTimeout(() => {
@@ -819,12 +888,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     }, 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schedule?.id, form.courseId, form.instructorId, form.venueId, form.sectionNumber, form.sectionType, form.dayMode, form.day, form.startTime, form.duration, courseIsExternal, durationError, timeError]);
+  }, [schedule?.id, form.courseId, form.instructorId, form.venueId, form.sectionNumber, form.sectionType, form.dayMode, form.day, form.startTime, form.duration, courseIsExternal, durationError, timeError, previewNonce]);
 
   // Authoritative conflicts: the server's full-engine result once loaded, else the instant
   // client preview. Drives the conflict banner AND the Save block.
   const effectiveConflicts = serverPreview.loaded ? serverPreview.conflicts : (conflictPreview || []);
-  const hasHardConflict = effectiveConflicts.some(f => f.severity === 'Hard');
   const hasAnyConflict  = effectiveConflicts.length > 0;
   const conflictFreeAlt = serverPreview.conflictFreeStartExists;
 
@@ -835,6 +903,153 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   const conflictBlocksSave =
     (serverPreview.stale && !!form.courseId && !courseIsExternal)
     || (hasAnyConflict && (conflictFreeAlt || !overrideConflict));
+
+  // NEW-FU-541 (Batch 13 Issue 2): constrained, move-only Quick Fix handlers.
+  // Builds the same proposed-change payload the preview uses, asks the backend for a
+  // plan that reschedules OTHER groups (never drops sections, never assigns dummies),
+  // and — only on explicit confirmation — applies just those time moves.
+  function buildChange() {
+    if (!schedule?.id || !form.courseId || courseIsExternal) return null;
+    const tmpl = DAY_TEMPLATES[form.dayMode];
+    const days = tmpl?.days ? tmpl.days : (form.day ? [form.day] : []);
+    if (!days.length || !form.startTime || durationError || timeError) return null;
+    return {
+      sectionId: existing?.id ?? null,
+      courseId: form.courseId,
+      instructorId: form.instructorId || null,
+      venueId: form.venueId || null,
+      sectionNumber: form.sectionNumber || '01',
+      sectionType: form.sectionType || 'Lec',
+      gender: form.gender || 'M',   // NEW-FU-555 (Batch 18)
+      days, startTime: form.startTime, endTime: computeEnd(),
+    };
+  }
+  async function requestAutoFix() {
+    const change = buildChange();
+    if (!change) return;
+    const myToken = autoFixToken.current;          // snapshot; dropped if inputs change
+    setAutoFix({ status: 'planning', moves: [], error: '' });
+    try {
+      const data = await api.autoFixAround(schedule.id, change);
+      if (autoFixToken.current !== myToken) return; // a newer edit superseded this plan
+      if (data.feasible && data.moves && data.moves.length) {
+        setAutoFix({ status: 'ready', moves: data.moves, error: '' });
+      } else if (data.feasible) {
+        // Feasible with no moves needed → nothing to reschedule; just refresh.
+        setPreviewNonce(n => n + 1);
+        setAutoFix({ status: 'idle', moves: [], error: '' });
+      } else {
+        setAutoFix({ status: 'infeasible', moves: [], error: '' });
+      }
+    } catch (e) {
+      if (autoFixToken.current !== myToken) return;
+      setAutoFix({ status: 'error', moves: [], error: 'Could not compute a fix right now.' });
+    }
+  }
+  // NEW-FU-546 (Batch 15 Issue 2): ONE click = reschedule the other sections AND save
+  // the user's own change, atomically. No leftover "now click Save" step, and never a
+  // half-applied state (other sections moved but the user's section unchanged).
+  async function applyAutoFix() {
+    if (autoFix.status !== 'ready') return;
+    setAutoFix(a => ({ ...a, status: 'applying' }));
+    try {
+      const moves = autoFix.moves.map(m => ({ sectionId: m.sectionId, startTime: m.toStart, endTime: m.toEnd }));
+      await api.autoFixAroundApply(schedule.id, moves);
+      // Immediately persist the user's own change in the SAME action. The save handler
+      // (handleSubmitInfo for add, handleSubmitTime for edit) refreshes the grid, shows
+      // its success toast, and closes the modal.
+      setAutoFix({ status: 'idle', moves: [], error: '' });
+      const noop = { preventDefault() {} };
+      // Dispatch to the save handler of the ACTIVE form, not by mode: the conflict box
+      // (and this offer) renders in the INFO form (add OR edit-Details) and in the TIME
+      // form (edit-Time). The Time form alone uses handleSubmitTime; everything else
+      // (add, edit-Details) uses handleSubmitInfo.
+      const isTimeForm = mode === 'edit' && tab === 'time';
+      if (isTimeForm) await handleSubmitTime(noop);
+      else            await handleSubmitInfo(noop);
+    } catch (e) {
+      setAutoFix({ status: 'error', moves: autoFix.moves, error: e.response?.data?.error || 'Failed to reschedule the other sections.' });
+    }
+  }
+  // Compact, de-duplicated summary of the planned moves for display.
+  const autoFixMoveLines = React.useMemo(() => {
+    const byUnit = new Map();
+    for (const m of autoFix.moves) {
+      const k = `${m.courseCode}|${m.sectionNumber}|${m.toStart}`;
+      if (!byUnit.has(k)) byUnit.set(k, { courseCode: m.courseCode, sectionNumber: m.sectionNumber, toStart: m.toStart, days: [] });
+      byUnit.get(k).days.push(m.day);
+    }
+    return [...byUnit.values()];
+  }, [autoFix.moves]);
+
+  // NEW-FU-542 (Batch 14 Issue 1): decide the move-only fix's feasibility UP FRONT.
+  // As soon as the full-engine preview reports a conflict, request the plan once — so
+  // the panel only ever offers a fix that truly exists (no bait-and-block dead end).
+  useEffect(() => {
+    if (!schedule?.id || courseIsExternal) return;
+    if (!serverPreview.loaded || serverPreview.stale) return;
+    if (!hasAnyConflict) return;
+    if (autoFix.status !== 'idle') return;
+    requestAutoFix();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schedule?.id, courseIsExternal, serverPreview.loaded, serverPreview.stale, hasAnyConflict, autoFix.status]);
+
+  // Shared, self-contained conflict-resolution affordance for both conflict boxes.
+  // Drives ALL of: the proactive "checking…" state, the move-only Quick-Fix offer (only
+  // shown when a fix genuinely exists), the "move this section instead" steer, and the
+  // last-resort "Schedule is tight … Save anyway" override. Only rendered when a
+  // conflict is present (the caller gates on that).
+  function renderAutoFix() {
+    const s = autoFix.status;
+    if (s === 'idle' || s === 'planning') {
+      return <p className="sm-inline-hint">Checking whether other sections can be moved to fit…</p>;
+    }
+    if (s === 'applying') {
+      return <p className="sm-inline-hint">Rescheduling other sections…</p>;
+    }
+    if (s === 'error') {
+      return (
+        <p className="sm-inline-error" role="alert">
+          <Ico name="alert" /> <span>{autoFix.error}</span>{' '}
+          <button type="button" className="sm-linkbtn" onClick={requestAutoFix}>Try again</button>
+        </p>
+      );
+    }
+    if (s === 'ready') {
+      return (
+        <div className="sm-autofix">
+          <p className="sm-inline-hint">
+            <strong>Quick Fix</strong> can keep this section's time by moving{' '}
+            {autoFixMoveLines.length} other section{autoFixMoveLines.length !== 1 ? 's' : ''} to a free slot:
+          </p>
+          <ul className="sm-conflict-list">
+            {autoFixMoveLines.map((u, i) => (
+              <li key={i}>{u.courseCode} {sectionLabel({ sectionNumber: u.sectionNumber })} · {u.days.join(', ')} → <strong>{fmtTimeForDisplay(u.toStart)}</strong></li>
+            ))}
+          </ul>
+          <div className="sm-autofix-actions">
+            <button type="button" className="sm-btn-primary sm-btn-sm" onClick={applyAutoFix}>Reschedule &amp; save</button>
+          </div>
+          {conflictFreeAlt && <p className="sm-inline-hint">…or move this section to a free slot instead.</p>}
+        </div>
+      );
+    }
+    // s === 'infeasible' — no move-only fix exists.
+    if (conflictFreeAlt) {
+      return <p className="sm-inline-hint">A conflict-free time exists — move this section to a free slot instead of creating a conflict.</p>;
+    }
+    return (
+      <>
+        <p className="sm-inline-error" role="alert">
+          <Ico name="alert" /> <span>Schedule is tight — changing this section's meeting time will cause conflicts.</span>
+        </p>
+        <label className="sm-override-check">
+          <input type="checkbox" checked={overrideConflict} onChange={e=>setOverrideConflict(e.target.checked)} />
+          <span><strong>Save anyway</strong> (this will create a conflict).</span>
+        </label>
+      </>
+    );
+  }
 
   // NEW-FU-528 (Batch 9 Issue 1): the day pattern (and meetings-per-week) is a
   // function of the course's CREDITS and the meeting DURATION. A 3-credit Lec is
@@ -915,6 +1130,13 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     for (const s of sections) {
       if (mode === 'edit' && selfCourse != null &&
           s.courseId === selfCourse && s.sectionNumber === selfNum) continue;
+      // NEW-FU-560 (audit P1-6): KFUPM dual-audience exemption — a same-course
+      // different-gender section at the EXACT same slot shares the room+instructor
+      // by design, so it must NOT mark them "busy" (else the legitimate shared
+      // instructor/venue become unpickable for the female sibling). Mirrors the
+      // conflict-preview isDualAudienceSibling guard.
+      if (s.courseId === form.courseId && s.gender && form.gender && s.gender !== form.gender
+          && toMinutes(s.startTime) === startMin && toMinutes(s.endTime) === endMin) continue;
       if (!days.includes(s.day)) continue;
       if (toMinutes(s.startTime) < endMin && startMin < toMinutes(s.endTime)) {
         if (s.instructorId) instructors.add(s.instructorId);
@@ -1171,7 +1393,10 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   </div>
                   <div className="sm-field">
                     <label>Duration</label>
-                    {/* NEW-FU-113: per-type quick-picks + a bounded numeric input. */}
+                    {/* NEW-FU-540 (Batch 13): duration is pills-only — the free-entry
+                        numeric input was removed so an illegal value (e.g. 72 min) can
+                        never be typed. The only selectable durations are the legal
+                        per-type presets (Lec 50/75; Lab 50/75/160). */}
                     <div className="sm-pill-group sm-pill-group-sm">
                       {DURATION_DEFAULTS_BY_TYPE[form.sectionType].map(d => {
                         // NEW-FU-532 (Batch 11): durations are credit-aware — 75 min is
@@ -1189,20 +1414,6 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                         );
                       })}
                     </div>
-                    <input type="number" className="sm-dur-input" value={form.duration}
-                      min={DURATION_LIMITS_BY_TYPE[form.sectionType].min}
-                      max={DURATION_LIMITS_BY_TYPE[form.sectionType].max}
-                      aria-invalid={!!durationError}
-                      onChange={e=>{
-                        // NEW-FU-453 (Phase 108): clamp the UPPER bound at INPUT so a typed/
-                        // pasted value (e.g. 999999999) can never overflow the end-time, and
-                        // reject letters/symbols. Below-min is allowed while typing but flagged.
-                        const raw = e.target.value;
-                        if (raw === '') { setForm(f=>({...f,duration:''})); return; }
-                        if (!/^\d+$/.test(raw)) return;
-                        const n = Math.min(parseInt(raw,10), DURATION_LIMITS_BY_TYPE[form.sectionType].max);
-                        setForm(f=>({...f,duration:String(n)}));
-                      }} required aria-label="Duration in minutes" />
                     {durationError
                       ? <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>{durationError}</span></p>
                       : <p className="sm-hint">
@@ -1319,15 +1530,10 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     </li>
                   ))}
                 </ul>
-                {/* NEW-FU-533 (Batch 10 Issue 2): a conflicting save is BLOCKED by default.
-                    If a clash-free time exists, steer the user there; only when none exists
-                    (schedule is tight) offer an explicit override. */}
-                {conflictFreeAlt
-                  ? <p className="sm-inline-hint">A conflict-free time exists for this section — move it to a free slot instead of creating a conflict.</p>
-                  : <label className="sm-override-check">
-                      <input type="checkbox" checked={overrideConflict} onChange={e=>setOverrideConflict(e.target.checked)} />
-                      <span>The schedule is tight — no conflict-free slot exists for this instructor/venue on these days. <strong>Save anyway</strong> (this will create a conflict).</span>
-                    </label>}
+                {/* NEW-FU-542 (Batch 14 Issue 1): one self-contained affordance — proactive
+                    feasibility, the move-only Quick Fix (only when it truly exists), the
+                    "move this section instead" steer, and the last-resort override. */}
+                {renderAutoFix()}
               </div>
             )}
             {effectiveConflicts.length === 0 && !serverPreview.stale && form.courseId && !courseIsExternal && !durationError && !timeError && (
@@ -1448,21 +1654,25 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               </div>
               <div className="sm-field">
                 <label>Duration</label>
-                {/* NEW-FU-113: type-scoped quick-picks + bounded numeric input. */}
+                {/* NEW-FU-540 (Batch 13): duration is pills-only — the free-entry numeric
+                    input was removed so an illegal value can never be typed. Pills are the
+                    legal per-type presets (Lec 50/75; Lab 50/75/160) and stay credit-aware
+                    (75 min disabled for 0/1/2-credit lectures), matching the Add panel. */}
                 <div className="sm-pill-group sm-pill-group-sm">
-                  {DURATION_DEFAULTS_BY_TYPE[form.sectionType].map(d => (
-                    <button key={d} type="button"
+                  {DURATION_DEFAULTS_BY_TYPE[form.sectionType].map(d => {
+                    const okDur = form.sectionType !== 'Lec' || !selectedCourse
+                      || legalDurationsForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab }).includes(d);
+                    return (
+                    <button key={d} type="button" disabled={!okDur}
+                      title={okDur ? undefined : `${d} min isn't allowed for a ${selectedCourse?.credits}-credit course (75 min is for 3- and 4-credit courses)`}
                       className={`sm-pill sm-pill-sm ${form.duration===String(d)?'active':''}`}
                       aria-pressed={form.duration===String(d)}
                       onClick={()=>setForm(f=>({...f, duration: String(d)}))}>
                       {d}m
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
-                <input type="number" className="sm-dur-input" value={form.duration}
-                  min={DURATION_LIMITS_BY_TYPE[form.sectionType].min}
-                  max={DURATION_LIMITS_BY_TYPE[form.sectionType].max}
-                  onChange={e=>setForm(f=>({...f,duration:e.target.value}))} required aria-label="Duration in minutes" />
               </div>
             </div>
             {/* NEW-FU-531 (Batch 10 Issue 4): the meeting-day pills are DYNAMIC per the
@@ -1515,13 +1725,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     </li>
                   ))}
                 </ul>
-                {/* NEW-FU-533 (Batch 10 Issue 2): block by default; offer override only when tight. */}
-                {hasAnyConflict && (conflictFreeAlt
-                  ? <p className="sm-inline-hint">A conflict-free time exists — move this section to a free slot instead of creating a conflict.</p>
-                  : <label className="sm-override-check">
-                      <input type="checkbox" checked={overrideConflict} onChange={e=>setOverrideConflict(e.target.checked)} />
-                      <span>The schedule is tight — no conflict-free slot exists on these days. <strong>Save anyway</strong> (this will create a conflict).</span>
-                    </label>)}
+                {/* NEW-FU-542 (Batch 14 Issue 1): proactive move-only Quick Fix + steer +
+                    override, all in one. Only shown when there is a live conflict. */}
+                {hasAnyConflict && renderAutoFix()}
               </div>
             )}
             {error && <div className="sm-error" role="alert"><Ico name="alert" /> <span>{error}</span></div>}

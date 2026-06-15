@@ -26,9 +26,13 @@ function evaluate(changed, allSections) {
     // NEW-FU-272 (Phase 50 #3): KFUPM convention — a male section and the
     // female-pool sibling of the SAME course at the SAME slot share the
     // physical classroom. The venue isn't double-booked, just dual-audience.
+    // NEW-FU-555 (Batch 18): compare by MINUTES, not raw time strings. A proposed row
+    // in the conflict-preview carries "HH:MM" times while persisted rows carry
+    // "HH:MM:SS", so string === silently failed the exemption and surfaced a FALSE
+    // venue clash between a male section and its female sibling at the same slot.
     if (other.courseId === changed.courseId &&
         other.gender && changed.gender && other.gender !== changed.gender &&
-        other.startTime === changed.startTime && other.endTime === changed.endTime) continue;
+        other.startMinutes === changed.startMinutes && other.endMinutes === changed.endMinutes) continue;
     if (other.venueId !== changed.venueId) continue;
     if (!changed.overlaps(other)) continue;
 

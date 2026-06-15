@@ -22,7 +22,27 @@ class ConflictRepository {
   }
 
   async replaceAll(scheduleId, conflicts, client) {
-    const db = client ?? { query: (t,p) => query(t,p) };
+    // NEW-FU-561 (audit P3): without a transaction client the old fallback ran DELETE then
+    // INSERT as two separate AUTOCOMMIT statements — a crash between them left the conflicts
+    // table wiped. Acquire our own client and wrap the whole op in ONE transaction so the
+    // no-client path is atomic too. (All current callers pass a client; this hardens the
+    // otherwise-latent path.)
+    if (!client) {
+      const own = await getClient();
+      try {
+        await own.query('BEGIN');
+        const out = await this.replaceAll(scheduleId, conflicts, own);
+        await own.query('COMMIT');
+        return out;
+      } catch (err) {
+        await own.query('ROLLBACK').catch(() => {});
+        try { own.release(err); } catch { /* ignore */ }
+        throw err;
+      } finally {
+        try { own.release(); } catch { /* already released via catch path */ }
+      }
+    }
+    const db = client;
 
     // NEW-FU-87: preserve `confirmed=true` across replaceAll by snapshotting
     // the existing confirmed signatures BEFORE the wipe, then carrying them

@@ -7,7 +7,7 @@
  *
  * Severity depends on whether an escape exists in the OTHER course:
  *   - No escape (all sections of other course overlap) → HARD, blocks save
- *   - Escape exists (some sections of other course are free) → HARD but dismissible
+ *   - Escape exists (some sections of other course are free) → SOFT (dismissible)
  *     (user can acknowledge and save, since students CAN take both via the free section)
  *
  * Adjacent level (±1): always SOFT (scheduling preference, not requirement).

@@ -16,17 +16,29 @@ function courseCodeError(code) {
 }
 function isValidCourseCode(code) { return courseCodeError(code) === null; }
 
-// Name: a real title — start with a letter, ≥3 chars, only letters / digits /
-// spaces / basic title punctuation. NEW-FU-455 (Phase 108): also reject gibberish
-// the old charset-only rule let through ("hhhhhhhhhhhhhh", "h......"):
+// Name: a real, multi-word title in ENGLISH only — start with a letter, only
+// English letters / digits / spaces / basic title punctuation (incl. apostrophe).
+// NEW-FU-455 (Phase 108): reject gibberish the charset-only rule let through
+// ("hhhhhhhhhhhhhh", "h......"):
 //   (?!.*(.)\1{3})   — no run of 4+ identical characters
 //   (?=.*[A-Za-z]{2}) — must contain at least one real 2-letter word
-const COURSE_NAME_RE = /^(?!.*(.)\1{3})(?=.*[A-Za-z]{2})[A-Za-z][A-Za-z0-9 .,&()/+\-]{2,}$/;
+// NEW-FU-552 (Batch 17 Issue 1): the allowed CHARSET is the single source of truth
+// for both the runtime input filter (frontend strips anything outside it) and this
+// validator; non-English letters ($cript, Arabic, etc.) and junk symbols ($ # @ %)
+// are excluded by construction. A real course name is never a single word (even a
+// one-word title carries a Roman numeral, e.g. "Compilers II"), so a SPACE is required.
+const COURSE_NAME_CHARSET = "A-Za-z0-9 .,&()/+'\\-";
+const COURSE_NAME_RE = new RegExp(`^(?!.*(.)\\1{3})(?=.*[A-Za-z]{2})[A-Za-z][${COURSE_NAME_CHARSET}]+$`);
 
 function courseNameError(name) {
   const n = String(name ?? '').trim();
   if (n.length < 3) return 'Course name must be at least 3 characters.';
-  if (!COURSE_NAME_RE.test(n)) return 'Course name must be a real title (letters, spaces, and basic punctuation only).';
+  if (!/\s/.test(n)) return 'Course name needs at least two words (e.g. "Software Architecture").';
+  if (!COURSE_NAME_RE.test(n))
+    // NEW-FU-561 (audit P3): COURSE_NAME_RE also rejects gibberish (a char repeated 4+
+    // times) and names with no real 2-letter word — the old "no symbols/other scripts"
+    // message mis-described those valid-charset failures. Cover all of its conditions.
+    return 'Course name must be a real English title (letters, digits, spaces, basic punctuation) — no symbols, other scripts, gibberish, or a character repeated 4+ times.';
   return null;
 }
 function isValidCourseName(name) { return courseNameError(name) === null; }
@@ -40,9 +52,21 @@ function courseFlagError({ hasLab, isCapstone, isExternal } = {}) {
     : null;
 }
 
+// NEW-FU-561 (audit P2-8): a 4-credit course MUST have a lab. sectionPattern enforces
+// `credits === 4 && !hasLab` at SECTION create, but the course-level validators never
+// did — so a 4-credit no-lab (or capstone/external) course was creatable and then could
+// accept NO section (every section failed pattern validation). Enforce the invariant
+// where the course is DEFINED. (capstone/external are mutually exclusive with hasLab via
+// courseFlagError, so this also blocks a 4-credit capstone/external.)
+function creditsFlagError({ credits, hasLab } = {}) {
+  return (Number(credits) === 4 && !hasLab)
+    ? '4-credit courses must be marked “Has lab” — a 4-credit course requires a lab section.'
+    : null;
+}
+
 module.exports = {
   COURSE_CODE_RE, COURSE_NAME_RE,
   isValidCourseCode, courseCodeError,
   isValidCourseName, courseNameError,
-  courseFlagError,
+  courseFlagError, creditsFlagError,
 };

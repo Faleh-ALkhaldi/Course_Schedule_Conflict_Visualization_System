@@ -1,5 +1,12 @@
-import React, { createContext, useContext, useReducer, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useState } from 'react';
 import * as api from '../api/index.js';
+// NEW-FU-547 (Batch 15 Issue 5): a THEMED, app-wide confirm dialog replaces the native
+// window.confirm() (which renders a non-theme-aware white panel in dark mode). Backed by
+// the existing dark-compatible DecisionModal and exposed via the context as `confirm()`.
+import DecisionModal from '../components/modals/DecisionModal.jsx';
+import Ico from '../components/shared/Icons.jsx';
+// NEW-FU-549 (Batch 16): snapshot+reconcile undo/redo for schedule section edits.
+import { snapshotSchedule, sameSnapshot, reconcileSchedule, describeDelta } from '../history/scheduleHistory.js';
 
 export const VIEWS = { COURSE: 'course', TEACHER: 'teacher', VENUE: 'venue' };
 
@@ -315,6 +322,141 @@ export function AppProvider({ children }) {
     }
   }, [state.schedule, state.view, state.filterId, loadView]);
 
+  // ── Undo / Redo history (NEW-FU-549, Batch 16) ────────────────────────────────
+  // Snapshot+reconcile model (see history/scheduleHistory.js): each schedule SECTION
+  // mutation records ONE step = the full-schedule snapshot delta. Undo/redo reconcile
+  // the live schedule back to a stored snapshot. Reference-data edits aren't undoable
+  // (they're global with cascades) but resyncBaseline keeps the baseline honest.
+  const MAX_HISTORY = 50;
+  const undoRef    = React.useRef([]);
+  const redoRef    = React.useRef([]);
+  const baselineRef = React.useRef(null);   // last snapshot = the "before" of the next action
+  const histBusyRef = React.useRef(false);
+  const recordChainRef = React.useRef(Promise.resolve());  // serialize snapshot reads
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const bumpHistory = () => setHistoryVersion(v => v + 1);
+
+  // Always-current refs so the []-memoized history callbacks never read stale state.
+  const scheduleRef = React.useRef(state.schedule); scheduleRef.current = state.schedule;
+  const viewRef     = React.useRef(state.view);     viewRef.current     = state.view;
+  const filterIdRef = React.useRef(state.filterId); filterIdRef.current = state.filterId;
+  const refDataRef  = React.useRef(null);
+  refDataRef.current = { courses: state.courses, instructors: state.instructors, venues: state.venues };
+
+  const isScheduleEditable = () => {
+    const s = scheduleRef.current;
+    return !!s && s.status !== 'Finalized' && !s.archived_at;
+  };
+  const snapshotNow = async (sid) =>
+    snapshotSchedule((await api.getSections(sid, 'course', null)).sections ?? []);
+  const resolvers = () => {
+    const { courses, instructors, venues } = refDataRef.current;
+    const idByName = (list, name) => (list || []).find(x => (x.name ?? '') === name)?.id ?? null;
+    return {
+      courseIdByCode:     (code) => (courses || []).find(c => (c.course_code ?? c.courseCode) === code)?.id ?? null,
+      instructorIdByName: (name) => idByName(instructors, name),
+      venueIdByName:      (name) => idByName(venues, name),
+    };
+  };
+
+  // Record a section mutation as ONE undo step (serialized; best-effort).
+  const recordMutation = useCallback((label = 'change') => {
+    recordChainRef.current = recordChainRef.current.then(async () => {
+      const sid = scheduleRef.current?.id;
+      if (!sid || histBusyRef.current || !isScheduleEditable()) return;
+      try {
+        const after = await snapshotNow(sid);
+        const before = baselineRef.current;
+        baselineRef.current = after;
+        // NEW-FU-561 (audit P2-10): the load-time baseline is fetched asynchronously
+        // (effect below). If the user's FIRST edit lands before that resolves, `before`
+        // is null and the old `{ before: before ?? after }` recorded a SELF-EQUAL step —
+        // a dead Cmd+Z that undoes to nothing. Adopt this snapshot as the baseline and
+        // skip recording this one edit, rather than push a no-op entry.
+        if (!before) return;
+        if (sameSnapshot(before, after)) return;   // nothing actually changed
+        // Richer label for the tooltip/toast, e.g. "move SWE 206 §01".
+        const desc = describeDelta(before, after);
+        const fullLabel = (desc && desc !== 'change') ? `${label} ${desc}` : label;
+        undoRef.current.push({ before, after, label: fullLabel });
+        if (undoRef.current.length > MAX_HISTORY) undoRef.current.shift();
+        redoRef.current = [];
+        bumpHistory();
+      } catch { /* never break the mutation on a history hiccup */ }
+    });
+    return recordChainRef.current;
+  }, []);
+
+  // Advance the baseline after a deliberately-non-undoable change (reference data), so
+  // the next recorded section edit doesn't bundle the reference change into its step.
+  const resyncBaseline = useCallback(() => {
+    recordChainRef.current = recordChainRef.current.then(async () => {
+      const sid = scheduleRef.current?.id;
+      if (!sid) return;
+      try { baselineRef.current = await snapshotNow(sid); } catch {}
+    });
+    return recordChainRef.current;
+  }, []);
+
+  const applySnapshot = async (target, label) => {
+    if (histBusyRef.current || !isScheduleEditable()) return null;
+    const sid = scheduleRef.current?.id;
+    if (!sid) return null;
+    histBusyRef.current = true; bumpHistory();
+    try {
+      await reconcileSchedule(api, sid, target, resolvers());
+      baselineRef.current = target;
+      await loadView(sid, viewRef.current, filterIdRef.current);
+      return { label };
+    } catch (e) {
+      dispatch({ type: 'SET_ERROR', error: e.response?.data?.error || 'Could not apply undo/redo.' });
+      return null;
+    } finally {
+      histBusyRef.current = false; bumpHistory();
+    }
+  };
+
+  const undo = useCallback(async () => {
+    if (histBusyRef.current || undoRef.current.length === 0 || !isScheduleEditable()) return null;
+    const entry = undoRef.current[undoRef.current.length - 1];
+    const res = await applySnapshot(entry.before, entry.label);
+    if (res) { undoRef.current.pop(); redoRef.current.push(entry); bumpHistory(); }
+    return res;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadView]);
+
+  const redo = useCallback(async () => {
+    if (histBusyRef.current || redoRef.current.length === 0 || !isScheduleEditable()) return null;
+    const entry = redoRef.current[redoRef.current.length - 1];
+    const res = await applySnapshot(entry.after, entry.label);
+    if (res) { redoRef.current.pop(); undoRef.current.push(entry); bumpHistory(); }
+    return res;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadView]);
+
+  const clearHistory = useCallback(() => {
+    undoRef.current = []; redoRef.current = []; bumpHistory();
+    const sid = scheduleRef.current?.id;
+    if (sid) snapshotNow(sid).then(s => { baselineRef.current = s; }).catch(() => {});
+    else baselineRef.current = null;
+  }, []);
+
+  // Reset + re-baseline history whenever the active schedule (term) or its lock state
+  // changes — undo must never act across a term switch or on a finalized/archived term.
+  React.useEffect(() => {
+    undoRef.current = []; redoRef.current = []; baselineRef.current = null; bumpHistory();
+    const sid = state.schedule?.id;
+    if (sid) snapshotNow(sid).then(s => { baselineRef.current = s; }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.schedule?.id, state.schedule?.status, state.schedule?.archived_at]);
+
+  // Derived flags for the toolbar; historyVersion forces recompute on every change.
+  void historyVersion;
+  const canUndo = undoRef.current.length > 0 && !histBusyRef.current && isScheduleEditable();
+  const canRedo = redoRef.current.length > 0 && !histBusyRef.current && isScheduleEditable();
+  const undoLabel = undoRef.current.length ? undoRef.current[undoRef.current.length - 1].label : null;
+  const redoLabel = redoRef.current.length ? redoRef.current[redoRef.current.length - 1].label : null;
+
   const moveSection = useCallback(async (sectionId, updates) => {
     const { section, conflicts:result } = await api.updateSection(sectionId, updates);
     // section may be null for group updates — reload whole view to get all siblings
@@ -322,8 +464,9 @@ export function AppProvider({ children }) {
       dispatch({ type:'UPSERT_SECTION', section });
     }
     dispatch({ type:'SET_CONFLICTS', conflicts:result.conflicts??[] });
+    recordMutation('edit section');   // NEW-FU-549: one undo step
     return result;
-  }, []);
+  }, [recordMutation]);
 
   const addSection = useCallback(async (scheduleId, data) => {
     const { section, conflicts:result } = await api.createSection(scheduleId, data);
@@ -331,8 +474,9 @@ export function AppProvider({ children }) {
       dispatch({ type:'UPSERT_SECTION', section });
     }
     dispatch({ type:'SET_CONFLICTS', conflicts:result.conflicts??[] });
+    recordMutation('add section');    // NEW-FU-549
     return { section, conflictResult:result };
-  }, []);
+  }, [recordMutation]);
 
   const removeSection = useCallback(async (sectionId) => {
     try {
@@ -349,11 +493,12 @@ export function AppProvider({ children }) {
       for (const id of deletedIds) {
         dispatch({ type:'REMOVE_SECTION', id });
       }
+      recordMutation('delete section');   // NEW-FU-549
     } catch(err) {
       console.error('Delete section failed:', err.response?.data?.error ?? err.message);
       throw err;
     }
-  }, []);
+  }, [recordMutation]);
 
   const addInstructor = useCallback(async (data) => {
     // NEW-FU-434 (Phase 106 item 6): thread the active term so the backend can
@@ -369,8 +514,9 @@ export function AppProvider({ children }) {
       // reload effect it relied on was removed in FU-55.)
       reloadCurrentView();
     }
+    resyncBaseline();   // NEW-FU-549: reference change isn't undoable; keep baseline fresh
     return { ...instructor, replacedDummy };
-  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView]);
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView, resyncBaseline]);
 
   const removeInstructor = useCallback(async (id) => {
     await api.deleteInstructor(id);
@@ -379,7 +525,8 @@ export function AppProvider({ children }) {
     // NULL on affected rows). The old CLEAR_SECTIONS relied on a SchedulerPage
     // reload effect that FU-55 removed, so the grid blanked with no re-fetch.
     reloadCurrentView();
-  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView]);
+    resyncBaseline();   // NEW-FU-549
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView, resyncBaseline]);
 
   const addVenue = useCallback(async (data) => {
     // NEW-FU-434 (Phase 106 item 6): auto-replace the oldest placeholder venue of
@@ -392,8 +539,9 @@ export function AppProvider({ children }) {
       // placeholder's reassigned sections (CLEAR_SECTIONS only blanked it).
       reloadCurrentView();
     }
+    resyncBaseline();   // NEW-FU-549
     return { ...venue, replacedDummy };
-  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView]);
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView, resyncBaseline]);
 
   const removeVenue = useCallback(async (id) => {
     await api.deleteVenue(id);
@@ -401,7 +549,8 @@ export function AppProvider({ children }) {
     // NEW-FU-437 (Phase 107 H3): reload so the deleted venue's name disappears
     // from the grid (sections.venue_id is NULL via cascade).
     reloadCurrentView();
-  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView]);
+    resyncBaseline();   // NEW-FU-549
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView, resyncBaseline]);
 
   const addCourse = useCallback(async (data) => {
     const course = await api.createCourse(data);
@@ -416,11 +565,12 @@ export function AppProvider({ children }) {
       // NEW-FU-437 (Phase 107 H3): reload so the deleted course's sections leave
       // the grid (CLEAR_SECTIONS alone blanked it — FU-55 removed the reload effect).
       reloadCurrentView();
+      resyncBaseline();   // NEW-FU-549
     } catch(err) {
       console.error('Delete course failed:', err.response?.data?.error ?? err.message);
       throw err;
     }
-  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView]);
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView, resyncBaseline]);
 
   // NEW-FU-78: accept either a boolean (legacy "confirm all softs") or an
   // array of explicit conflict ids the user saw and acknowledged. The
@@ -464,6 +614,21 @@ export function AppProvider({ children }) {
     dispatch({ type:'SET_VIEW', view, filterId });
   }, []);
 
+  // NEW-FU-547 (Batch 15 Issue 5): themed confirm. `confirm({ title, message,
+  // confirmLabel, tone })` resolves to true/false. Renders the dark-compatible
+  // DecisionModal instead of the OS window.confirm() white panel.
+  const [confirmSpec, setConfirmSpec] = useState(null);
+  const confirm = useCallback((opts = {}) => new Promise(resolve => {
+    setConfirmSpec({ ...opts, resolve });
+  }), []);
+  // Resolve OUTSIDE the state updater (a state updater must stay pure — resolving the
+  // promise there runs a side effect during render and double-fires under StrictMode).
+  const closeConfirm = (value) => {
+    const r = confirmSpec?.resolve;
+    setConfirmSpec(null);
+    r?.(value);
+  };
+
   return (
     <AppContext.Provider value={{
       ...state,
@@ -473,8 +638,27 @@ export function AppProvider({ children }) {
       addVenue, removeVenue,
       addCourse, removeCourse,
       saveSchedule, unfinalizeSchedule, switchView, dispatch,
+      confirm,
+      // NEW-FU-549 (Batch 16): undo/redo
+      undo, redo, canUndo, canRedo, undoLabel, redoLabel,
+      recordMutation, resyncBaseline, clearHistory,
     }}>
       {children}
+      {confirmSpec && (
+        <DecisionModal
+          icon={<Ico name="alert" />}
+          title={confirmSpec.title}
+          lead={confirmSpec.message}
+          // Cancel first → it receives the autofocus + Enter default, so a destructive
+          // confirm is never one stray keypress away. Delete sits on the right (danger).
+          options={[
+            { label: confirmSpec.cancelLabel || 'Cancel', value: false, tone: 'neutral' },
+            { label: confirmSpec.confirmLabel || 'Delete', value: true, tone: confirmSpec.tone || 'danger' },
+          ]}
+          onChoose={closeConfirm}
+          onDismiss={() => closeConfirm(false)}
+        />
+      )}
     </AppContext.Provider>
   );
 }

@@ -63,7 +63,7 @@ async function loadSectionLocked(client, sectionId) {
   const r = await client.query(`
     SELECT schedule_id, course_id, instructor_id, venue_id, section_number,
            day, start_time::text AS start_time, end_time::text AS end_time,
-           section_type
+           section_type, gender
     FROM sections WHERE id = $1 FOR UPDATE
   `, [sectionId]);
   if (r.rowCount === 0) throw new Error(`Section ${sectionId} not found.`);
@@ -79,6 +79,7 @@ async function loadSectionLocked(client, sectionId) {
     startTime:     row.start_time,
     endTime:       row.end_time,
     sectionType:   row.section_type,
+    gender:        row.gender,
   };
 }
 
@@ -168,10 +169,10 @@ class ScheduleService {
         const collision = await client.query(
           `SELECT 1 FROM sections
            WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3
-             AND day = $4 AND id != $5
+             AND day = $4 AND gender = $6 AND id != $5
            LIMIT 1`,
           [section.scheduleId, section.courseId, section.sectionNumber,
-           updates.day, sectionId]
+           updates.day, sectionId, section.gender ?? 'M']
         );
         if (collision.rowCount > 0) {
           updates = { ...updates, day: section.day };
@@ -517,7 +518,7 @@ class ScheduleService {
       // group is defined by course + number, not by time).
       const groupRes = await client.query(`
         SELECT id, day, start_time::text AS start_time, end_time::text AS end_time,
-               instructor_id, venue_id, section_type, course_id, section_number
+               instructor_id, venue_id, section_type, course_id, section_number, gender
         FROM sections
         WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3
         FOR UPDATE
@@ -577,15 +578,15 @@ class ScheduleService {
         const res = await client.query(`
           INSERT INTO sections
             (schedule_id, course_id, instructor_id, venue_id, section_number,
-             day, start_time, end_time, section_type)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+             day, start_time, end_time, section_type, gender)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
           RETURNING id
         `, [
           scheduleId, template.course_id,
           template.instructor_id, template.venue_id,
           template.section_number, day,
           template.start_time, template.end_time,
-          template.section_type,
+          template.section_type, template.gender,
         ]);
         if (!firstNewId) firstNewId = res.rows[0].id;
       }
@@ -801,7 +802,7 @@ class ScheduleService {
     for (const sec of sections) {
       const check = sectionRepo.validateOneInstructor(sec);
       if (check) {
-        const key = `${sec.courseId}|${sec.sectionNumber}`;
+        const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;   // audit: gender in identity
         if (f09Seen.has(key)) continue;
         f09Seen.add(key);
         result.add(new Conflict({
@@ -821,7 +822,7 @@ class ScheduleService {
     for (const sec of sections) {
       const check = sectionRepo.validateOneVenue(sec);
       if (check) {
-        const key = `${sec.courseId}|${sec.sectionNumber}`;
+        const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;   // audit: gender in identity
         if (f10Seen.has(key)) continue;
         f10Seen.add(key);
         result.add(new Conflict({
@@ -852,7 +853,7 @@ class ScheduleService {
       if (sec.isCapstone) continue;                // Phase 50 #1
       if (sec.isExternal) continue;                // Phase 52 #5 (SWE 399)
       if (sec.venueType === 'Multipurpose') continue; // Phase 50 #3
-      const key = `${sec.courseId}|${sec.sectionNumber}`;
+      const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;   // audit: gender in identity
       // R-11: Lab section in a non-Lab venue
       if (sec.sectionType === 'Lab' && sec.venueType !== 'Laboratory') {
         if (!f11Seen.has(key)) {
@@ -962,7 +963,7 @@ class ScheduleService {
     // We only check lecture sections — lab integrity is handled by R-14
     // (must exist) and pattern-table policy at write time. The KFUPM
     // rule table only specifies legal lecture patterns; lab durations
-    // (50/75/165 min) span a wider range and don't follow the same
+    // (50/75/160 min) span a wider range and don't follow the same
     // credit-hour math.
     //
     // Dedup by section_group (courseId + sectionNumber). A single group
@@ -979,7 +980,7 @@ class ScheduleService {
       // SWE 412/413/414 (1cr lecture + 6 lab hrs = "project") would otherwise
       // fire R-15 every term they're scheduled.
       if (sec.isCapstone) continue;
-      const key = `${sec.courseId}|${sec.sectionNumber}`;
+      const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;   // audit: gender in identity
       let group = f15Groups.get(key);
       if (!group) {
         group = {

@@ -2,7 +2,7 @@
  * SuggestService — assign time slots AND instructors to minimize conflicts.
  *
  * Constraints:
- *   - Max 4 courses in the same time slot (5 acceptable, 6+ rejected)
+ *   - Max 4 courses in the same time slot (5+ rejected — see MAX_PARALLEL_HARD)
  *   - Instructor must be free at the assigned time (no double booking)
  *   - Instructor must not have office hours at the assigned time
  *   - GR courses: 17:20–22:00 only   (windows live in constants.TIME_WINDOWS,
@@ -84,16 +84,16 @@ function generateSlots(pattern, category) {
 }
 
 // NEW-FU-111: Lab-specific slot generator. Labs are once-a-week on any
-// single day, with the standard 165-minute (2h45min) duration (Feature 3
+// single day, with the standard 160-minute (2h40min) duration (Feature 3
 // default — also the longest of the legal range so the slot is the most
 // constrained, yielding the most predictable placement). The slot search
 // covers every weekday so the greedy assigner has maximum room.
-const LAB_DURATION = 165;
+const LAB_DURATION = 160;
 const ALL_WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
 // NEW-FU-252: generateLabSlots now accepts optional { day, duration }
 // overrides. `day` constrains the slot search to a single weekday
 // (when the user picks one in the modal); `duration` overrides the
-// 165-min default (the modal lets the user pick 50/75/165).
+// 160-min default (the modal lets the user pick 50/75/160).
 // Defaults (no overrides) preserve pre-FU-252 behavior so legacy
 // callers continue to work unchanged.
 function generateLabSlots(category, { day, duration } = {}) {
@@ -731,7 +731,7 @@ class SuggestService {
     }
 
     // For the lab side: pick the least-saturated weekday for the lab
-    // meeting. Lab patterns are single-day (50, 75, or 165 min); the
+    // meeting. Lab patterns are single-day (50, 75, or 160 min); the
     // duration choice is independent of day saturation, so we keep the
     // 50min default but pick a smart day. Uses the SAME working map as
     // lectures, so labs and lectures together drive spread.
@@ -1112,7 +1112,7 @@ class SuggestService {
     //     This satisfies Feature 1 (R-14 coexistence) by construction —
     //     the suggested output always pairs Lec with Lab when has_lab=true.
     //   - Lab tasks generate a single-day slot (Feature 3: Lab is once-
-    //     weekly per spec, with duration 165 min by default — the longest
+    //     weekly per spec, with duration 160 min by default — the longest
     //     standard lab block).
     const tasks = [];
     for (const cfg of courseConfigs) {
@@ -1148,7 +1148,7 @@ class SuggestService {
       // as the Lec sections (1 Lec → §01 + §50, 2 Lec → §01,§02 + §50,§51).
       if (info.hasLab) {
         // NEW-FU-252: honor cfg.labDay (single weekday) and
-        // cfg.labDuration (50 / 75 / 165 min) when the modal sent them.
+        // cfg.labDuration (50 / 75 / 160 min) when the modal sent them.
         // Defaults preserved when fields are absent.
         const labSlots = generateLabSlots(info.category, {
           day: cfg.labDay,

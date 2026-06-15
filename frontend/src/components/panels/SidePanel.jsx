@@ -24,7 +24,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
     courses, instructors, venues,
     sections, officeHours, conflicts,
     switchView, loadView,
-    addSection, removeSection,
+    removeSection,
     // NEW-FU-280 (Phase 56): addInstructor / addVenue / addCourse are no
     // longer destructured here — each lives inside its dedicated modal,
     // which calls useApp() on its own. Only the remove* helpers stay,
@@ -32,6 +32,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
     removeInstructor,
     removeVenue,
     removeCourse,
+    confirm,   // NEW-FU-547 (Batch 15 Issue 5): themed, dark-mode-compatible confirm
   } = useApp();
 
   // NEW-FU-205: archived-view UI lockdown. When the active schedule is
@@ -112,12 +113,6 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
     }
   }
 
-  // ── Section form state ────────────────────────────────────────────────────
-  const [secForm, setSecForm] = useState({
-    courseId:'', instructorId:'', venueId:'',
-    sectionNumber:'', day:'Sunday', startTime:'08:00', duration:'50',
-  });
-
   // ── Office Hours form (still inline — scoped to a selected instructor) ────
   // NEW-FU-280 (Phase 56): instrForm + venueForm + courseForm + their
   // handlers all moved into dedicated modal components
@@ -183,7 +178,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
     const label = oh
       ? `${oh.day} ${(oh.start_time ?? oh.startTime ?? '').substring(0,5)}–${(oh.end_time ?? oh.endTime ?? '').substring(0,5)}`
       : 'this office hour';
-    if (!window.confirm(`Delete the ${label} office hour?`)) return;
+    if (!await confirm({ title: `Delete the ${label} office hour?`, confirmLabel: 'Delete' })) return;
     try {
       await api.deleteInstructorOfficeHour(filterId, ohId);
       setOhList(prev => prev.filter(o => o.id !== ohId));
@@ -204,34 +199,9 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
     switchView(view, newId);
   }
 
-  // compute end time from start + duration
-  function computeEndTime(startTime, duration) {
-    const [h, m] = startTime.split(':').map(Number);
-    const total = h * 60 + m + parseInt(duration || 0);
-    return `${String(Math.floor(total/60)).padStart(2,'0')}:${String(total%60).padStart(2,'0')}`;
-  }
-
-  async function handleAddSection(e) {
-    e.preventDefault();
-    if (!schedule) return;
-    setBusy(true); setFormError('');
-    try {
-      const endTime = computeEndTime(secForm.startTime, secForm.duration);
-      await addSection(schedule.id, {
-        courseId:      secForm.courseId,
-        instructorId:  secForm.instructorId || undefined,
-        venueId:       secForm.venueId      || undefined,
-        sectionNumber: secForm.sectionNumber,
-        day:           secForm.day,
-        startTime:     secForm.startTime,
-        endTime,
-      });
-      setOpenForm(null);
-      setSecForm({ courseId:'', instructorId:'', venueId:'', sectionNumber:'', day:'Sunday', startTime:'08:00', duration:'50' });
-    } catch(err) {
-      setFormError(err.response?.data?.error || 'Failed to add section.');
-    } finally { setBusy(false); }
-  }
+  // NEW-FU-561 (audit P3): removed the dead inline add-section form cluster (secForm
+  // state + computeEndTime + handleAddSection) — superseded by the SectionModal flow and
+  // never wired to any JSX. Only the contextual Office-Hours form remains inline.
 
   // NEW-FU-280 (Phase 56): handleAddInstructor / handleAddVenue /
   // handleAddCourse moved into their respective modal components
@@ -474,7 +444,11 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                                     // don't accidentally wipe a whole section by misclick.
                                     // Phase 22 wired the side panel ✕ to group-scope (correct);
                                     // a confirmation surface makes the scope inescapable.
-                                    if (!window.confirm(`Remove the entire ${courseCode} ${sectionLabel(grp)} section (all meeting days)?`)) {
+                                    if (!await confirm({
+                                      title: `Remove the ${courseCode} ${sectionLabel(grp)} section?`,
+                                      message: 'All meeting days for this section will be removed.',
+                                      confirmLabel: 'Remove',
+                                    })) {
                                       return;
                                     }
                                     try {
@@ -563,10 +537,11 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   onClick={async () => {
                     // NEW-M17: confirm before deleting (cascades to office_hours,
                     // sets sections.instructor_id to NULL across all schedules).
-                    if (!window.confirm(
-                      `Delete instructor "${instr.name}"?\n` +
-                      `Their office hours will be removed and any sections they teach will lose their instructor.`
-                    )) return;
+                    if (!await confirm({
+                      title: `Delete instructor "${instr.name}"?`,
+                      message: 'Their office hours will be removed and any sections they teach will lose their instructor.',
+                      confirmLabel: 'Delete',
+                    })) return;
                     try { await removeInstructor(instr.id); }
                     catch (err) {
                       showToast && showToast(
@@ -696,10 +671,11 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   onClick={async () => {
                     // NEW-M17: confirm before deleting (sections.venue_id is
                     // set to NULL across every schedule that used this venue).
-                    if (!window.confirm(
-                      `Delete venue "${v.name}"?\n` +
-                      `Any sections currently scheduled in this venue will lose their venue assignment.`
-                    )) return;
+                    if (!await confirm({
+                      title: `Delete venue "${v.name}"?`,
+                      message: 'Any sections currently scheduled in this venue will lose their venue assignment.',
+                      confirmLabel: 'Delete',
+                    })) return;
                     try { await removeVenue(v.id); }
                     catch (err) {
                       showToast && showToast(
@@ -807,6 +783,7 @@ function DraggableCourse({ course, level, onRemove, showToast, isArchived = fals
   // attributes is still safe; dnd-kit no-ops them under disabled.
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({ id: course.id, disabled: isArchived });
+  const { confirm } = useApp();   // NEW-FU-547 (Batch 15 Issue 5): themed confirm
   const colors = LEVEL_COLORS[level] ?? LEVEL_COLORS.Freshman;
   // NEW-FU-295 (Phase 59): auto-fit the course name. The 3-line clamp
   // from Phase 58 still works for the common case, but if the user
@@ -847,7 +824,7 @@ function DraggableCourse({ course, level, onRemove, showToast, isArchived = fals
         onPointerDown={e => e.stopPropagation()}
         onClick={async e => {
           e.stopPropagation();
-          if (!window.confirm(`Delete ${course.course_code} and ALL its sections?`)) return;
+          if (!await confirm({ title: `Delete ${course.course_code} and ALL its sections?`, confirmLabel: 'Delete' })) return;
           try {
             await onRemove(course.id);
           } catch (err) {

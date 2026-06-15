@@ -17,6 +17,7 @@
 // modal (`.sm-overlay` / `.sm-card`) for consistency.
 
 import React, { useState, useEffect, useMemo } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useApp } from '../../context/AppContext.jsx';
 
 // Re-use the Add Section modal's styling so spacing, button shapes,
@@ -25,7 +26,19 @@ import { useApp } from '../../context/AppContext.jsx';
 // modals folder by the SectionModal import chain).
 import './SectionModal.css';
 
+// NEW-FU-552 (Batch 17 Issue 1): runtime input filter + validation for the course
+// NAME, mirroring the Add-Instructor full-name approach and the backend rule
+// (domain/courseFormat.js). The charset is the single source of truth: anything
+// outside it — non-English letters (Arabic, etc.), symbols ($ # @ % …) — is stripped
+// the instant it's typed, so it can never enter the field. A real course name is
+// never a single word (a one-word title carries a Roman numeral, e.g. "Compilers II"),
+// so a space is required.
+const COURSE_NAME_DISALLOWED = /[^A-Za-z0-9 .,&()/+'-]/g;
+const sanitizeCourseName = (raw) => String(raw ?? '').replace(COURSE_NAME_DISALLOWED, '');
+const COURSE_NAME_RE = /^(?!.*(.)\1{3})(?=.*[A-Za-z]{2})[A-Za-z][A-Za-z0-9 .,&()/+'-]+$/;
+
 export default function AddCourseModal({ onClose, showToast }) {
+  useFocusTrap();
   const { addCourse, courses } = useApp();
 
   // Escape closes — matches every other modal in the app.
@@ -73,10 +86,11 @@ export default function AddCourseModal({ onClose, showToast }) {
     const nm = (form.name || '').trim();
     if (!nm) return null;
     if (nm.length < 3) return 'Name must be at least 3 characters.';
-    // NEW-FU-455 (Phase 108): mirror the hardened backend rule — reject runs of 4+
-    // identical chars ("hhhhhhhhhhhhhh") and names with no real 2-letter word.
-    if (!/^(?!.*(.)\1{3})(?=.*[A-Za-z]{2})[A-Za-z][A-Za-z0-9 .,&()/+\-]{2,}$/.test(nm))
-      return 'Name must be a real title (letters, spaces, and basic punctuation; no gibberish).';
+    // NEW-FU-552 (Batch 17 Issue 1): mirror the backend rule — require ≥2 words and
+    // the English-only title charset (the input filter already strips the rest).
+    if (!/\s/.test(nm)) return 'Course name needs at least two words (e.g. "Software Architecture").';
+    if (!COURSE_NAME_RE.test(nm))
+      return 'Use English letters, digits, spaces and basic punctuation only — no symbols or other scripts.';
     return null;
   })();
   // NEW-FU-457 (Phase 108): runtime DUPLICATE checks — flag a duplicate course
@@ -151,7 +165,7 @@ export default function AddCourseModal({ onClose, showToast }) {
 
   return (
     <div className="sm-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="sm-card" style={{ maxWidth: 480 }}>
+      <div className="sm-card" role="dialog" aria-modal="true" aria-label="Add course" style={{ maxWidth: 480 }}>
         <div className="sm-header">
           <h2 className="sm-title">+ Add Course</h2>
           <button className="sm-close" onClick={onClose}>×</button>
@@ -178,7 +192,7 @@ export default function AddCourseModal({ onClose, showToast }) {
             <label>Course name</label>
             <input placeholder="e.g. Software Architecture" value={form.name}
               aria-invalid={!!nameError || !!dupNameError}
-              onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+              onChange={e => setForm(f => ({ ...f, name: sanitizeCourseName(e.target.value) }))} />
             {nameError && <p className="sm-inline-error" role="alert"><span>{nameError}</span></p>}
             {!nameError && dupNameError && <p className="sm-inline-error" role="alert"><span>{dupNameError}</span></p>}
           </div>

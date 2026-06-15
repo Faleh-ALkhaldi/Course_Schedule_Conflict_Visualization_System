@@ -28,6 +28,9 @@ const ICONS = {
   restore:   'M3 12a9 9 0 1 0 3-6.7M3 3v6h6',
   tag:       'M12 2H2v10l9.3 9.3a1 1 0 0 0 1.4 0l8.6-8.6a1 1 0 0 0 0-1.4L12 2zM7 7h.01',
   book:      'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z',
+  // NEW-FU-549 (Batch 16): undo / redo (Lucide undo-2 / redo-2 — two subpaths in one d).
+  undo:      'M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11',
+  redo:      'm15 14 5-5-5-5M20 9H9.5A5.5 5.5 0 0 0 4 14.5 5.5 5.5 0 0 0 9.5 20H13',
 };
 
 export default function Ico({ name, className }) {

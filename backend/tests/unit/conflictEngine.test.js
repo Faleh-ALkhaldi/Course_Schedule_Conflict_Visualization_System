@@ -732,7 +732,7 @@ describe('Type-scoped section number format (NEW-FU-105/108)', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Type-scoped duration validation (NEW-FU-106 / NEW-FU-109)
 //   Lec: 50..75 minutes
-//   Lab: 50..165 minutes
+//   Lab: 50..160 minutes
 // ─────────────────────────────────────────────────────────────────────────────
 
 function durationMinutes(start, end) {
@@ -741,7 +741,7 @@ function durationMinutes(start, end) {
   return (h2*60+m2) - (h1*60+m1);
 }
 function isLecDurationOk(d) { return d >= 50 && d <= 75; }
-function isLabDurationOk(d) { return d >= 50 && d <= 165; }
+function isLabDurationOk(d) { return d >= 50 && d <= 160; }
 
 describe('Per-type duration validation (NEW-FU-106/109)', () => {
   test('TC-38: Lec accepts 50, 60, 75; rejects 30, 90, 165', () => {
@@ -752,17 +752,18 @@ describe('Per-type duration validation (NEW-FU-106/109)', () => {
     expect(isLecDurationOk(90)).toBe(false);
     expect(isLecDurationOk(165)).toBe(false);
   });
-  test('TC-39: Lab accepts 50, 75, 100, 165; rejects 30, 200', () => {
+  test('TC-39: Lab accepts 50, 75, 100, 160; rejects 30, 165, 200', () => {
     expect(isLabDurationOk(50)).toBe(true);
     expect(isLabDurationOk(75)).toBe(true);
     expect(isLabDurationOk(100)).toBe(true);
-    expect(isLabDurationOk(165)).toBe(true);
+    expect(isLabDurationOk(160)).toBe(true);
     expect(isLabDurationOk(30)).toBe(false);
+    expect(isLabDurationOk(165)).toBe(false);
     expect(isLabDurationOk(200)).toBe(false);
   });
   test('TC-40: durationMinutes computes correctly from HH:MM strings', () => {
     expect(durationMinutes('08:00', '09:15')).toBe(75);
-    expect(durationMinutes('13:00', '15:45')).toBe(165);
+    expect(durationMinutes('13:00', '15:40')).toBe(160);
     expect(durationMinutes('09:00', '09:50')).toBe(50);
   });
 });

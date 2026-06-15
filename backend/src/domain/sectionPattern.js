@@ -24,7 +24,7 @@ const VALID_DAYS = new Set(Object.keys(DAY_INDEX));
 // Standard durations in minutes.
 const DUR_50  = 50;
 const DUR_75  = 75;
-const DUR_165 = 165;   // 2h 45m — lab only
+const DUR_160 = 160;   // 2h 40m — lab only
 
 // Per-row helpers. Each rule has a `match` predicate that takes
 // `{ days, duration }` and returns true if the candidate fits. We
@@ -51,67 +51,17 @@ function twoDayWithGap(days) {
   return ALLOWED_2DAY.some(pair => sameDays(days, pair));
 }
 
-// LECTURE pattern rules, indexed by credits. The matcher iterates
-// the array for the credits value and tries each predicate.
-const LEC_RULES = {
-  1: [
-    {
-      name: '1-credit · 50 min · any single day Sun–Thu',
-      match: ({ days, duration }) => duration === DUR_50 && anyDay(days),
-    },
-  ],
-  2: [
-    {
-      name: '2-credit · 50 min · 2 days with 1-day gap (Sun+Tue, Mon+Wed, or Tue+Thu)',
-      match: ({ days, duration }) => duration === DUR_50 && twoDayWithGap(days),
-    },
-    {
-      name: '2-credit · 75 min · 1 day (any of Sun–Thu)',
-      match: ({ days, duration }) => duration === DUR_75 && anyDay(days),
-    },
-  ],
-  3: [
-    {
-      name: '3-credit · 50 min · Sun+Tue+Thu',
-      match: ({ days, duration }) =>
-        duration === DUR_50 && sameDays(days, ['Sunday','Tuesday','Thursday']),
-    },
-    {
-      name: '3-credit · 75 min · Mon+Wed',
-      match: ({ days, duration }) =>
-        duration === DUR_75 && sameDays(days, ['Monday','Wednesday']),
-    },
-    {
-      name: '3-credit · 75 min · Sun+Tue',
-      match: ({ days, duration }) =>
-        duration === DUR_75 && sameDays(days, ['Sunday','Tuesday']),
-    },
-    {
-      name: '3-credit · 75 min · Tue+Thu',
-      match: ({ days, duration }) =>
-        duration === DUR_75 && sameDays(days, ['Tuesday','Thursday']),
-    },
-    // 3-credit-with-lab alternative: 2-day 50-min lecture. The pattern
-    // is the same as the 2-credit-50-min combo, but only allowed when
-    // a lab section accompanies the course (caller passes hasLab).
-    {
-      name: '3-credit (+lab) · 50 min · 2 days with 1-day gap',
-      requiresLab: true,
-      match: ({ days, duration }) => duration === DUR_50 && twoDayWithGap(days),
-    },
-  ],
-  4: [
-    // 4-credit ALWAYS has a lab; the lecture portion follows the
-    // 3-credit lecture rules. We delegate to the LEC_RULES[3] list
-    // dynamically in matchLectureRule below to avoid duplication.
-  ],
-};
+// NEW-FU-561 (audit P3): removed the dead, divergent LEC_RULES table (and lectureRulesFor
+// below) — the lecture-pattern rules now live in legalDurationsForCourse /
+// legalDayTemplatesForCourse (the live single source of truth, mirrored on the frontend).
+// The old table was unused by validateSectionPattern yet read as "the spec", so it was a
+// drift hazard.
 
 // LAB rule — single rule that matches by duration AND single-day.
 const LAB_RULE = {
-  name: 'Lab · 50 / 75 / 165 min · single day Sun–Thu',
+  name: 'Lab · 50 / 75 / 160 min · single day Sun–Thu',
   match: ({ days, duration }) =>
-    [DUR_50, DUR_75, DUR_165].includes(duration) && anyDay(days),
+    [DUR_50, DUR_75, DUR_160].includes(duration) && anyDay(days),
 };
 
 function durationMinutes(startTime, endTime) {
@@ -121,25 +71,6 @@ function durationMinutes(startTime, endTime) {
   return (eh * 60 + em) - (sh * 60 + sm);
 }
 
-// Choose the lecture rule list for a given (credits, hasLab) pair.
-// Returns the list of candidate rules; the validator tries each in
-// order, considering the `requiresLab` flag on rules that need it.
-function lectureRulesFor(credits, hasLab) {
-  if (credits === 4) {
-    // 4-credit = 3-credit lecture pattern + REQUIRED lab. Caller is
-    // responsible for ensuring a lab section was created separately;
-    // the pattern check itself reuses the 3-credit rules. We mark
-    // those rules as lab-required transitively since 4-credit is
-    // never lab-less.
-    return LEC_RULES[3].filter(r => !r.requiresLab || hasLab);
-  }
-  if (credits === 3 && !hasLab) {
-    // Without a lab, the 2-day-50-min lecture isn't legal — it's the
-    // pattern reserved for courses that pair lecture with a lab.
-    return LEC_RULES[3].filter(r => !r.requiresLab);
-  }
-  return LEC_RULES[credits] || [];
-}
 
 /**
  * Validate a section against KFUPM's scheduling patterns.
@@ -196,7 +127,7 @@ function validateSectionPattern({ credits, hasLab, sectionType, days, startTime,
     if (!LAB_RULE.match({ days, duration })) {
       return {
         ok: false,
-        error: `Lab section pattern not allowed. Lab must be 50, 75, or 165 minutes on a single day. Got ${days.join('+')} for ${duration} min.`,
+        error: `Lab section pattern not allowed. Lab must be 50, 75, or 160 minutes on a single day. Got ${days.join('+')} for ${duration} min.`,
       };
     }
     return { ok: true };
@@ -460,8 +391,8 @@ function resolvePattern(input) {
 module.exports = {
   validateSectionPattern,
   // Exported for tests + auto-suggester filtering.
-  LEC_RULES, LAB_RULE,
-  DUR_50, DUR_75, DUR_165,
+  LAB_RULE,
+  DUR_50, DUR_75, DUR_160,
   // NEW-FU-240: pattern catalog
   PATTERN_DEFS, PATTERN_LABELS, legalPatternsForCourse, resolvePattern,
   // NEW-FU-247: two-axis pattern model — frontend uses this for the

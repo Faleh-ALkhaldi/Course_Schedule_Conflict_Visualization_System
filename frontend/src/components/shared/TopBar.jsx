@@ -15,8 +15,13 @@ const SEMESTER_DISPLAY = {
 };
 const displayCode = (sem) => (sem ? (SEMESTER_DISPLAY[sem] || sem) : '');
 
-export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitchTerm, onUnlock, onLogout }) {
-  const { user, doLogout, schedule, view, filterId, saveBlocked, softPending, loading, switchView, conflicts } = useApp();
+// NEW-FU-549 (Batch 16): platform-correct modifier glyph for shortcut hints.
+const IS_MAC = typeof navigator !== 'undefined' && /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || '');
+const MOD = IS_MAC ? '⌘' : 'Ctrl';
+
+export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitchTerm, onUnlock, onLogout, onUndo, onRedo }) {
+  const { user, doLogout, schedule, view, filterId, saveBlocked, softPending, loading, switchView, conflicts,
+          canUndo, canRedo, undoLabel, redoLabel } = useApp();
   const isAdmin = user?.role === 'admin';
   // NEW-FU-314 (Phase 29): derive live conflict counts from the conflicts
   // array in app state. The badge displayed on the term chip was reading
@@ -103,6 +108,20 @@ export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitch
       </nav>
 
       <div className="topbar-actions">
+        {/* NEW-FU-549 (Batch 16): Undo / Redo. Disabled when the respective stack is
+            empty or the term is read-only; tooltip shows the shortcut + next action. */}
+        <div className="topbar-undo-group">
+          <button className="topbar-btn icon-only" onClick={onUndo} disabled={!canUndo}
+            aria-label="Undo"
+            title={canUndo ? `Undo ${undoLabel} (${MOD}Z)` : `Nothing to undo (${MOD}Z)`}>
+            <Ico name="undo" />
+          </button>
+          <button className="topbar-btn icon-only" onClick={onRedo} disabled={!canRedo}
+            aria-label="Redo"
+            title={canRedo ? `Redo ${redoLabel} (${MOD}⇧Z)` : `Nothing to redo (${MOD}⇧Z)`}>
+            <Ico name="redo" />
+          </button>
+        </div>
         <button className="topbar-btn suggest" onClick={onSuggest}
           disabled={!schedule || loading || incompleteFilter || isLocked}
           title={

@@ -142,13 +142,13 @@ const SECTION_NUMBER_RANGE = {
 // ── Section duration limits (NEW-FU-106) ──────────────────────────────────────
 // Lec: 50..75 minutes (default offered: 50, 75 — the two standard
 //      class-period lengths)
-// Lab: 50..165 minutes (default offered: 50, 75, 165 — standard half-period,
-//      full-period, and the 2h45 lab block)
+// Lab: 50..160 minutes (default offered: 50, 75, 160 — standard half-period,
+//      full-period, and the 2h40 lab block)
 // The DEFAULTS array is what the frontend's SectionModal renders as quick-
 // pick buttons; the MIN/MAX bounds are what the backend validates against.
 const SECTION_DURATION = {
   Lec: { min: 50, max: 75,  defaults: [50, 75] },
-  Lab: { min: 50, max: 165, defaults: [50, 75, 165] },
+  Lab: { min: 50, max: 160, defaults: [50, 75, 160] },
   // NEW-FU-498 (Phase 122): Project/Thesis meet in long single blocks (or, for
   // thesis, often no fixed meeting at all — the duration check is skipped when
   // no time is set). 50–180 covers the registrar's PRJ spread (75-min SWE 413,

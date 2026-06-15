@@ -34,7 +34,7 @@
 //     ResizeObserver fires for both cases automatically and is
 //     debounced by the browser per animation frame.
 
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect } from 'react';
 
 // Use useLayoutEffect on the client (synchronous DOM access before
 // paint) and fall back to useEffect during SSR so React doesn't warn.
@@ -62,17 +62,12 @@ const FIT_TOLERANCE_PX = 1;
  * Returns nothing — the hook mutates inline style on the element.
  *
  * `ref` — a React ref pointing at the text-bearing element.
- * `options.minPx` — floor for the shrink (default 5px). If the text
+ * `options.minPx` — floor for the shrink (default 2px). If the text
  *   still overflows at the floor, the hook stops and accepts the
  *   ellipsis-clip; the tooltip remains the authoritative source.
  */
 export function useFitText(ref, options = {}) {
   const { minPx = DEFAULT_MIN_PX } = options;
-  // Cache the tier's natural font size so we can recover it cheaply
-  // when the container grows back. Read once per mount; tier-class
-  // changes during the lifetime of the card are rare enough that the
-  // cache rarely needs invalidation.
-  const naturalSizeRef = useRef(null);
 
   useIsomorphicLayoutEffect(() => {
     const el = ref.current;
@@ -86,10 +81,18 @@ export function useFitText(ref, options = {}) {
       const cs = getComputedStyle(el);
       const naturalSize = parseFloat(cs.fontSize);
       if (!Number.isFinite(naturalSize)) return;
-      naturalSizeRef.current = naturalSize;
+
+      // NEW-FU-561 (audit P2-12): fit on BOTH axes. The SidePanel name spans WRAP
+      // (line-clamped), so WIDTH never overflows and the hook used to no-op — long names
+      // hit the clamp ellipsis instead of shrinking. The height term only bites when the
+      // element has a CONSTRAINED height (clamp/fixed) that's exceeded; an unconstrained
+      // element grows freely (scrollHeight == clientHeight) so nothing shrinks (no
+      // over-shrink, so width-only callers are unaffected).
+      const fits = () => el.scrollWidth  <= el.clientWidth  + FIT_TOLERANCE_PX
+                      && el.scrollHeight <= el.clientHeight + FIT_TOLERANCE_PX;
 
       // Fits at natural size — nothing to do.
-      if (el.scrollWidth <= el.clientWidth + FIT_TOLERANCE_PX) return;
+      if (fits()) return;
 
       // Binary-search the largest size in [minPx, naturalSize] that fits.
       let lo = minPx;
@@ -97,7 +100,7 @@ export function useFitText(ref, options = {}) {
       while (hi - lo > 0.5) {
         const mid = (lo + hi) / 2;
         el.style.fontSize = `${mid}px`;
-        if (el.scrollWidth <= el.clientWidth + FIT_TOLERANCE_PX) lo = mid;
+        if (fits()) lo = mid;
         else hi = mid;
       }
       // Apply the floor of the binary-search interval — the largest

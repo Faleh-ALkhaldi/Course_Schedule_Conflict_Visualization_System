@@ -77,7 +77,7 @@ async function buildTablePdfBuffer(scheduleId, semester) {
   // either format see the same logical rows).
   const groups = new Map();
   for (const sec of sections) {
-    const key = `${sec.courseId}|${sec.sectionNumber}`;
+    const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;
     if (!groups.has(key)) groups.set(key, { sec, days: [] });
     groups.get(key).days.push(sec.day);
   }

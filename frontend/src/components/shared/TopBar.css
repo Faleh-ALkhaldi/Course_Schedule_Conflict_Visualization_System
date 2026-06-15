@@ -142,6 +142,25 @@
 .topbar-btn.export:hover:not(:disabled),
 .topbar-btn.import:hover:not(:disabled) { background: rgba(255,255,255,.15); }
 
+/* NEW-FU-549 (Batch 16): Undo / Redo — neutral icon chips, grouped with a divider. */
+.topbar-undo-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 4px;
+  padding-right: 8px;
+  border-right: 1px solid rgba(255,255,255,.15);
+}
+.topbar-btn.icon-only {
+  background: rgba(255,255,255,.08);
+  border-color: rgba(255,255,255,.20);
+  color: var(--slate-200);
+  padding: 0;
+  width: 34px;
+  justify-content: center;
+}
+.topbar-btn.icon-only:hover:not(:disabled) { background: rgba(255,255,255,.15); }
+
 .topbar-user {
   display: flex;
   align-items: center;

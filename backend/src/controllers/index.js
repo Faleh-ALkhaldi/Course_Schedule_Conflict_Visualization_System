@@ -17,7 +17,7 @@ const suggestSvc = require('../services/SuggestService');
 // to filter candidates before greedy assignment.
 const sectionPattern = require('../domain/sectionPattern');
 const { filterCoursesForTerm, isCourseAllowedInTerm, disallowReason } = require('../domain/courseTermValidity');
-const { courseCodeError, courseNameError, courseFlagError } = require('../domain/courseFormat');
+const { courseCodeError, courseNameError, courseFlagError, creditsFlagError } = require('../domain/courseFormat');
 const { R06_TIME_EXEMPT_COURSES, TIME_WINDOWS } = require('../config/constants'); // NEW-FU-497 (Phase 121)
 const { ScheduleRepository, VenueRepository, CourseRepository } = require('../repositories/repositories');
 const InstructorRepository = require('../repositories/InstructorRepository');
@@ -81,7 +81,7 @@ const SECTION_NUM_RE_BY_TYPE = {
 // NEW-FU-498 (Phase 122): Prj/Ths allow long single blocks (50–180).
 const SECTION_DURATION_BY_TYPE = {
   Lec: { min: 50, max: 75  },
-  Lab: { min: 50, max: 165 },
+  Lab: { min: 50, max: 160 },
   Prj: { min: 50, max: 180 },
   Ths: { min: 50, max: 180 },
 };
@@ -322,7 +322,7 @@ const createSection = ah(async (req, res) => {
   const expectedRange = effectiveSectionType === 'Lab' ? '50–99' : '01–49';
   if (!SECTION_NUM_RE_BY_TYPE[effectiveSectionType].test(normSectionNumber))
     return badRequest(res, `sectionNumber for ${effectiveSectionType} sections must be in ${expectedRange} (01–99, single digits accepted and zero-padded).`);
-  // NEW-FU-109: duration validation by type. Lec: 50..75; Lab: 50..165.
+  // NEW-FU-109: duration validation by type. Lec: 50..75; Lab: 50..160.
   const dur = durationMinutes(startTime, endTime);
   const durLimits = SECTION_DURATION_BY_TYPE[effectiveSectionType];
   if (dur < durLimits.min || dur > durLimits.max)
@@ -445,7 +445,7 @@ const updateSection = ah(async (req, res) => {
     const dur = durationMinutes(startTime, endTime);
     // NEW-FU-445 (Phase 107 M5): validate duration against the section's ACTUAL
     // type, not a 'Lab' default. A time-only edit (drag-resize) sends no type, so
-    // the old default (50–165) let a Lec be resized to an illegal 76–165 minutes.
+    // the old default (50–160) let a Lec be resized to an illegal 76–160 minutes.
     let typeForDuration = sectionType;
     if (!typeForDuration) {
       const r = await query(`SELECT section_type FROM sections WHERE id = $1`, [sectionId]);
@@ -531,7 +531,12 @@ const updateSection = ah(async (req, res) => {
         [sectionId]
       );
       const g = grpRow.rows[0];
-      if (g && g.section_type === 'Lec') {
+      // NEW-FU-561 (audit P2-7): also validate LAB edits against the pattern. Create
+      // runs validateSectionPattern for every type, but this edit-time gate was Lec-only,
+      // so a Lab drag-resize was checked only against the loose continuous range and could
+      // persist an illegal duration (LAB_RULE allows ONLY 50/75/160 min). Prj/Ths stay
+      // ungated here (their flexible meeting has no fixed-duration rule).
+      if (g && (g.section_type === 'Lec' || g.section_type === 'Lab')) {
         const check = sectionPattern.validateSectionPattern({
           credits:     Number(g.credits),
           hasLab:      Boolean(g.has_lab),
@@ -637,7 +642,7 @@ const SECTION_SNAPSHOT_SQL = `
 const previewConflicts = ah(async (req, res) => {
   const { scheduleId } = req.params;
   const { sectionId, courseId, instructorId, venueId, sectionNumber, sectionType,
-          days, startTime, endTime } = req.body;
+          days, startTime, endTime, gender } = req.body;
   if (!isUuid(scheduleId)) return badRequest(res, 'scheduleId must be a UUID.');
   // Not enough to evaluate yet → no conflicts (the modal keeps Save logic on its own
   // required-field checks).
@@ -667,10 +672,10 @@ const previewConflicts = ah(async (req, res) => {
 
   // Exclude the EDITED section's own group (so it can't conflict with itself). Identify
   // it by sectionId when editing, else by (courseId, sectionNumber).
-  let selfCourse = courseId, selfNum = sectionNumber;
+  let selfCourse = courseId, selfNum = sectionNumber, selfGender = gender;
   if (sectionId) {
     const own = all.find(s => s.id === sectionId);
-    if (own) { selfCourse = own.courseId; selfNum = own.sectionNumber; }
+    if (own) { selfCourse = own.courseId; selfNum = own.sectionNumber; selfGender = selfGender ?? own.gender; }
   }
   const others = all.filter(s => !(s.courseId === selfCourse && s.sectionNumber === String(selfNum)));
 
@@ -714,7 +719,12 @@ const previewConflicts = ah(async (req, res) => {
       num_sections: course.num_sections, instructor_name: instrName,
       venue_name: venue?.name, section_type: sectionType || 'Lec', venue_type: venue?.type,
       has_lab: course.has_lab, credits: course.credits, is_capstone: course.is_capstone,
-      gender: 'M', is_external: course.is_external,
+      // NEW-FU-555 (Batch 18): use the section's REAL gender — hardcoding 'M' flipped a
+      // female section to male and defeated the engine's different-gender exemption
+      // (R-04/R-05 treat a male + female pair sharing a room/instructor as dual-audience,
+      // not a clash). That produced false self-looking conflicts ("§F-12" rendered as
+      // "§12" vs "§02") the grid never showed.
+      gender: selfGender || 'M', is_external: course.is_external,
     }));
     const ids = new Set(proposed.map(p => p.id));
     const result = engine.evaluateAll([...others, ...proposed], ohMap);
@@ -741,6 +751,171 @@ const previewConflicts = ah(async (req, res) => {
   }
 
   res.json({ conflicts, conflictFreeStartExists });
+});
+
+// NEW-FU-541 (Batch 13 Issue 2): constrained, move-only Quick Fix for the section
+// EDIT / ADD panels. Tries to make the PROPOSED change conflict-free purely by
+// retiming OTHER existing groups — never dropping sections, never assigning dummy
+// resources. Returns a plan of moves when achievable, else { feasible:false } so the
+// panel can show "Schedule is tight …" and block the change.
+const autoFixAround = ah(async (req, res) => {
+  const { scheduleId } = req.params;
+  const { sectionId, courseId, instructorId, venueId, sectionNumber, sectionType,
+          days, startTime, endTime, gender } = req.body;
+  if (!isUuid(scheduleId)) return badRequest(res, 'scheduleId must be a UUID.');
+  if (!courseId || !Array.isArray(days) || days.length === 0 || !startTime || !endTime) {
+    return res.json({ feasible: false, moves: [] });
+  }
+
+  const Section = require('../domain/Section');
+  const ConflictEngine = require('../engine/ConflictEngine');
+  const { planRescheduleAround } = require('../services/RescheduleAroundService');
+  const engine = new ConflictEngine();
+
+  const mk = (row) => new Section({
+    id: row.id, scheduleId: row.schedule_id, courseId: row.course_id,
+    instructorId: row.instructor_id, venueId: row.venue_id,
+    sectionNumber: row.section_number, day: row.day,
+    startTime: row.start_time, endTime: row.end_time,
+    courseCode: row.course_code, courseName: row.course_name,
+    academicLevel: row.academic_level, category: row.category,
+    numSections: row.num_sections, instructorName: row.instructor_name,
+    venueName: row.venue_name, sectionType: row.section_type, venueType: row.venue_type,
+    hasLab: row.has_lab, credits: row.credits, isCapstone: row.is_capstone,
+    gender: row.gender, isExternal: row.is_external,
+  });
+
+  const snap = await query(SECTION_SNAPSHOT_SQL, [scheduleId]);
+  const all = snap.rows;
+
+  // Identify and exclude the proposed section's OWN group (it must not appear among
+  // the movable "others", and it can't conflict with itself).
+  let selfCourse = courseId, selfNum = sectionNumber, selfGender = gender;
+  if (sectionId) {
+    const own = all.find(r => r.id === sectionId);
+    if (own) { selfCourse = own.course_id; selfNum = own.section_number; selfGender = selfGender ?? own.gender; }
+  }
+  const otherRows = all.filter(r => !(r.course_id === selfCourse && r.section_number === String(selfNum)));
+
+  // Proposed course / venue / instructor metadata.
+  const cRes = await query(
+    `SELECT course_code, name, academic_level, category, num_sections, has_lab, credits, is_capstone, is_external FROM courses WHERE id = $1`,
+    [courseId]);
+  const course = cRes.rows[0];
+  if (!course) return res.json({ feasible: false, moves: [] });
+  let venue = null, instrName = null;
+  if (venueId)      venue     = (await query(`SELECT name, type FROM venues WHERE id = $1`, [venueId])).rows[0] || null;
+  if (instructorId) instrName = (await query(`SELECT name FROM instructors WHERE id = $1`, [instructorId])).rows[0]?.name || null;
+
+  const hm = t => { const [h, m] = String(t).slice(0, 5).split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+  const fromMin = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const durMin = hm(endTime) - hm(startTime);
+
+  // OH map for every instructor in play.
+  const instrIds = [...new Set([...otherRows.map(r => r.instructor_id), instructorId].filter(Boolean))];
+  const ohMap = new Map();
+  if (instrIds.length) {
+    const ohRes = await query(
+      `SELECT instructor_id, day, start_time::text AS start_time, end_time::text AS end_time
+       FROM office_hours WHERE instructor_id = ANY($1)`, [instrIds]);
+    for (const row of ohRes.rows) {
+      if (!ohMap.has(row.instructor_id)) ohMap.set(row.instructor_id, []);
+      ohMap.get(row.instructor_id).push({ day: row.day, startTime: row.start_time, endTime: row.end_time });
+    }
+  }
+
+  // Proposed group rows at the desired time.
+  const startMin = hm(startTime);
+  const proposedRows = days.map((day, i) => ({
+    id: `__proposed__${i}`, schedule_id: scheduleId, course_id: courseId,
+    instructor_id: instructorId || null, venue_id: venueId || null,
+    section_number: String(sectionNumber ?? '01'), day,
+    start_time: fromMin(startMin), end_time: fromMin(startMin + durMin),
+    course_code: course.course_code, course_name: course.name,
+    academic_level: course.academic_level, category: course.category,
+    num_sections: course.num_sections, instructor_name: instrName,
+    venue_name: venue?.name, section_type: sectionType || 'Lec', venue_type: venue?.type,
+    has_lab: course.has_lab, credits: course.credits, is_capstone: course.is_capstone,
+    // NEW-FU-555 (Batch 18): real gender (see previewConflicts) so the move-only Quick
+    // Fix doesn't see false different-gender venue/instructor clashes.
+    gender: selfGender || 'M', is_external: course.is_external,
+  }));
+
+  // Group the other rows by (course, section-number); each group moves as a unit.
+  const groupMap = new Map();
+  for (const r of otherRows) {
+    if (!r.start_time || !r.end_time) continue;           // no fixed time → can't retime
+    const key = `${r.course_id}|${r.section_number}`;
+    if (!groupMap.has(key)) {
+      groupMap.set(key, {
+        key, rows: [], startMin: hm(r.start_time), durMin: hm(r.end_time) - hm(r.start_time),
+        category: r.category, isCapstone: r.is_capstone, isExternal: r.is_external,
+        instructorId: r.instructor_id, venueId: r.venue_id,
+      });
+    }
+    groupMap.get(key).rows.push(r);
+  }
+  const groups = [...groupMap.values()].map(g => {
+    // Movable = a real, non-external group whose duration fits its teaching window.
+    const win = (g.category === 'GR' && !g.isCapstone)
+      ? { start: 17 * 60 + 20, end: 22 * 60 } : { start: 7 * 60, end: 17 * 60 + 10 };
+    g.movable = !g.isExternal && (g.startMin >= 0) && (win.start + g.durMin <= win.end);
+    return g;
+  });
+
+  const plan = planRescheduleAround({
+    engine, ohMap, mk, fromMin,
+    proposedRows,
+    groups,
+  });
+
+  res.json({ feasible: plan.feasible, moves: plan.moves || [] });
+});
+
+// NEW-FU-541 (Batch 13 Issue 2): apply a move-only Quick-Fix plan. Atomically shifts
+// the START/END time of the named OTHER sections (the plan from autoFixAround). It
+// NEVER creates/deletes sections and NEVER touches resources — only times. The
+// caller then saves its own proposed change through the normal path.
+const autoFixAroundApply = ah(async (req, res) => {
+  const { scheduleId } = req.params;
+  const { moves } = req.body;
+  if (!isUuid(scheduleId)) return badRequest(res, 'scheduleId must be a UUID.');
+  if (!Array.isArray(moves) || moves.length === 0) return badRequest(res, 'moves must be a non-empty array.');
+  const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+  for (const m of moves) {
+    if (!isUuid(m.sectionId)) return badRequest(res, 'each move.sectionId must be a UUID.');
+    const st = String(m.startTime ?? m.toStart ?? '').slice(0, 5);
+    const en = String(m.endTime ?? m.toEnd ?? '').slice(0, 5);
+    if (!TIME_RE.test(st) || !TIME_RE.test(en)) return badRequest(res, 'each move needs valid HH:MM start/end times.');
+    m._st = st; m._en = en;
+  }
+
+  const { getClient } = require('../config/db');
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    // NEW-FU-561 (audit P1-2): take the SAME editability row-lock every other section
+    // writer takes (createSection/assignSection/extendSection all call this). Without
+    // it, a move-only Quick-Fix could mutate section times on a FINALIZED or archived
+    // schedule, bypassing the immutability contract. Throws err.status (409/423),
+    // propagated by the ah() wrapper to the global error handler.
+    await schedSvc.assertSchedulerEditableLocked(client, scheduleId);
+    let moved = 0;
+    for (const m of moves) {
+      const r = await client.query(
+        `UPDATE sections SET start_time = $1, end_time = $2
+           WHERE id = $3 AND schedule_id = $4`,
+        [m._st, m._en, m.sectionId, scheduleId]);
+      moved += r.rowCount;
+    }
+    await client.query('COMMIT');
+    res.json({ ok: true, moved });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 });
 
 // ── Save ──────────────────────────────────────────────────────────────────────
@@ -871,6 +1046,7 @@ const createCourse = ah(async (req, res) => {
   { const e = courseCodeError(courseCode); if (e) return badRequest(res, e); }
   { const e = courseNameError(name);       if (e) return badRequest(res, e); }
   { const e = courseFlagError({ hasLab, isCapstone, isExternal }); if (e) return badRequest(res, e); }
+  { const e = creditsFlagError({ credits, hasLab }); if (e) return badRequest(res, e); }   // audit P2-8: 4cr ⇒ has-lab
   // NEW-FU-484 (Phase 118 item 3): level-gated flag constraints.
   // CAPSTONE requires Undergraduate + Senior; EXTERNAL requires Undergraduate + Junior.
   // Frontend disables the checkboxes, but the backend is the authoritative gate.
@@ -923,6 +1099,19 @@ const updateCourse = ah(async (req, res) => {
     // NEW-FU-278 (Phase 54): align with createCourse — 0..4 range.
     if (!Number.isInteger(n) || n < 0 || n > 4)
       return badRequest(res, 'credits must be an integer between 0 and 4.');
+  }
+  // NEW-FU-561 (audit P2-8): enforce 4-credit ⇒ has-lab on the MERGED state — a partial
+  // update could set credits=4 without touching hasLab, or clear hasLab on an existing
+  // 4-credit course. Validate the effective values against the current row.
+  if (credits != null || hasLab != null) {
+    const existingCourse = await courseRepo.findById(req.params.courseId);
+    if (existingCourse) {
+      const e = creditsFlagError({
+        credits: credits != null ? credits : existingCourse.credits,
+        hasLab:  hasLab  != null ? hasLab  : existingCourse.has_lab,
+      });
+      if (e) return badRequest(res, e);
+    }
   }
   if (numSections != null) {
     const n = parseInt(numSections, 10);
@@ -1017,6 +1206,21 @@ async function suggestedOfficeHour() {
 }
 const getSuggestedOfficeHour = ah(async (_req, res) => { res.json(await suggestedOfficeHour()); });
 
+// NEW-FU-561 (audit P2-2): shared instructor-name validator so updateInstructor (PUT)
+// enforces the SAME English-charset + real-full-name rules createInstructor does — the
+// server-side backstop must not be bypassable via PUT. Returns an error message or null.
+// Solver "NEW INSTRUCTOR <n>" placeholders are exempt (minted programmatically).
+function instructorNameError(name) {
+  const trimmed = String(name ?? '').trim();
+  if (/^NEW INSTRUCTOR \d+$/i.test(trimmed)) return null;
+  if (!/^[A-Za-z\s'-]+$/.test(trimmed))
+    return 'name may contain only letters, spaces, hyphens and apostrophes.';
+  const parts = trimmed.split(/\s+/).filter(Boolean);
+  if (parts.length < 2 || !parts.every(p => /^[A-Za-z][A-Za-z'-]*$/.test(p)))
+    return 'Enter a full name — at least a first and last name (English letters only, separated by a space).';
+  return null;
+}
+
 const createInstructor = ah(async (req, res) => {
   const { name, email } = req.body;
   if (!name || !email)
@@ -1028,16 +1232,10 @@ const createInstructor = ah(async (req, res) => {
   // NEW-FU-46: enforce DB VARCHAR limits before pg sees the value.
   if (!isBoundedString(name,  120)) return badLength(res, 'name',  120);
   if (!isBoundedString(email, 120)) return badLength(res, 'email', 120);
-  // NEW-FU-510 (Batch 2): instructor names accept only English letters plus
-  // space, HYPHEN and APOSTROPHE — the seed already has "HASAN AL-KAF" and
-  // "AL-KHALDI", so a letters-only rule would reject legitimate names. This is
-  // the server-side backstop for the live front-end charset filter.
-  // EXEMPT the solver's placeholder names ("NEW INSTRUCTOR 1") — they carry a
-  // digit and are minted programmatically, never typed by a user, so a
-  // letters-only check must not break dummy creation.
-  const isDummyInstrName = /^NEW INSTRUCTOR \d+$/i.test(String(name).trim());
-  if (!isDummyInstrName && !/^[A-Za-z\s'-]+$/.test(String(name).trim()))
-    return badRequest(res, 'name may contain only letters, spaces, hyphens and apostrophes.');
+  // NEW-FU-510 (Batch 2) + NEW-FU-544 (Batch 14 Issue 3): English-charset + real
+  // full-name rules (server-side backstop for the front-end filter), now shared with
+  // updateInstructor via instructorNameError. Placeholders ("NEW INSTRUCTOR 1") exempt.
+  { const ne = instructorNameError(name); if (ne) return badRequest(res, ne); }
   // NEW-FU-59: trim leading/trailing whitespace so " Dr. Hassan " and
   // "Dr. Hassan" don't end up as two distinct DB rows under the UNIQUE
   // constraint they nominally share.
@@ -1095,6 +1293,9 @@ const updateInstructor = ah(async (req, res) => {
   // NEW-FU-46: enforce DB VARCHAR limits when these fields are provided.
   if (name  != null && !isBoundedString(name,  120)) return badLength(res, 'name',  120);
   if (email != null && !isBoundedString(email, 120)) return badLength(res, 'email', 120);
+  // NEW-FU-561 (audit P2-2): enforce the same charset + full-name rules as create when a
+  // name is supplied — otherwise the PUT path silently bypassed the server-side backstop.
+  if (name != null) { const ne = instructorNameError(name); if (ne) return badRequest(res, ne); }
   // NEW-FU-59: trim before write so updates match the same normalization
   // applied at create time.
   // NEW-FU-439 (Phase 107 M4): partial update — COALESCE so a body with only one
@@ -1111,7 +1312,20 @@ const updateInstructor = ah(async (req, res) => {
 });
 
 const deleteInstructor = ah(async (req, res) => {
-  await query(`DELETE FROM instructors WHERE id = $1`, [req.params.instructorId]);
+  const id = req.params.instructorId;
+  // NEW-FU-561 (audit P2-1): instructors.id is referenced by sections.instructor_id with
+  // ON DELETE SET NULL, so a raw DELETE silently nulls assignments in EVERY term — incl.
+  // Finalized/archived ones (immutability violation) — and left stale conflicts behind
+  // (no revalidation). (a) Refuse if any affected schedule is locked; (b) otherwise delete
+  // and revalidate each affected schedule so the now-instructor-less sections surface R-09.
+  const affected = await query(
+    `SELECT DISTINCT sc.id, sc.status, sc.archived_at
+       FROM sections s JOIN schedules sc ON sc.id = s.schedule_id
+      WHERE s.instructor_id = $1`, [id]);
+  if (affected.rows.some(r => r.status === 'Finalized' || r.archived_at !== null))
+    return res.status(409).json({ error: 'This instructor is assigned in a finalized or archived term and cannot be deleted. Reassign those sections first.' });
+  await query(`DELETE FROM instructors WHERE id = $1`, [id]);
+  for (const r of affected.rows) await schedSvc.revalidateSchedule(r.id).catch(() => {});
   res.json({ deleted: true });
 });
 
@@ -1377,7 +1591,18 @@ const updateVenue = ah(async (req, res) => {
 });
 
 const deleteVenue = ah(async (req, res) => {
-  await venueRepo.delete(req.params.venueId);
+  const id = req.params.venueId;
+  // NEW-FU-561 (audit P2-1): venues.id is referenced by sections.venue_id ON DELETE SET
+  // NULL — same hazard as deleteInstructor. Refuse if assigned in a finalized/archived
+  // term; otherwise delete and revalidate each affected schedule (orphaned sections → R-10).
+  const affected = await query(
+    `SELECT DISTINCT sc.id, sc.status, sc.archived_at
+       FROM sections s JOIN schedules sc ON sc.id = s.schedule_id
+      WHERE s.venue_id = $1`, [id]);
+  if (affected.rows.some(r => r.status === 'Finalized' || r.archived_at !== null))
+    return res.status(409).json({ error: 'This venue is assigned in a finalized or archived term and cannot be deleted. Reassign those sections first.' });
+  await venueRepo.delete(id);
+  for (const r of affected.rows) await schedSvc.revalidateSchedule(r.id).catch(() => {});
   res.json({ deleted: true });
 });
 
@@ -1454,13 +1679,13 @@ const suggestSchedule = ah(async (req, res) => {
         error: `Invalid labDay "${cfg.labDay}". Expected one of Sunday, Monday, Tuesday, Wednesday, Thursday.`,
       });
     }
-    // NEW-FU-253: optional lab duration override (50, 75, or 165 min
+    // NEW-FU-253: optional lab duration override (50, 75, or 160 min
     // — the allowed lab durations from the FU-236 rule table).
     if (cfg.labDuration != null) {
       const ld = Number(cfg.labDuration);
-      if (![50, 75, 165].includes(ld)) {
+      if (![50, 75, 160].includes(ld)) {
         return res.status(400).json({
-          error: `Invalid labDuration ${cfg.labDuration}. Expected 50, 75, or 165 minutes.`,
+          error: `Invalid labDuration ${cfg.labDuration}. Expected 50, 75, or 160 minutes.`,
         });
       }
       cfg.labDuration = ld;
@@ -1630,11 +1855,16 @@ const quickFixApply = ah(async (req, res) => {
   // 400 every plan that resolves a capacity bind with a placeholder.
   const ALLOWED_OP_TYPES = ['reassign-instructor', 'reassign-venue', 'drop', 'add-day', 'move', 'compound',
     'mark-venue-exempt', 'reclassify-venue', 'untag-has-lab',
-    'add-dummy-instructor', 'add-dummy-venue'];
+    'add-dummy-instructor', 'add-dummy-venue',
+    // NEW-FU-561 (audit P1-8): QuickFixService emits this (Phase 109 / FU-460) but it
+    // was never added here, so quickFixApply 400'd and aborted ANY plan containing it.
+    'assign-office-hours'];
   // These metadata ops act on a course or venue row, not a section, so they
   // carry courseId / venueId instead of sectionId.
   const COURSE_LEVEL_OPS = new Set(['mark-venue-exempt', 'untag-has-lab']);
   const VENUE_LEVEL_OPS  = new Set(['reclassify-venue']);
+  // assign-office-hours is instructor-scoped: it carries instructorId + officeHours, no sectionId.
+  const INSTRUCTOR_LEVEL_OPS = new Set(['assign-office-hours']);
   const isHHMM = (s) => typeof s === 'string' && /^\d{2}:\d{2}(:\d{2})?$/.test(s);
   function validateOp(o, depth = 0) {
     if (!o || typeof o.type !== 'string') return 'Each op must have a type field.';
@@ -1647,6 +1877,11 @@ const quickFixApply = ah(async (req, res) => {
     if (VENUE_LEVEL_OPS.has(o.type)) {
       if (typeof o.venueId !== 'string') return 'reclassify-venue op requires venueId: string.';
       if (typeof o.newType !== 'string') return 'reclassify-venue op requires newType: string.';
+      return null;
+    }
+    if (INSTRUCTOR_LEVEL_OPS.has(o.type)) {
+      if (typeof o.instructorId !== 'string') return 'assign-office-hours op requires instructorId: string.';
+      if (!o.officeHours || typeof o.officeHours !== 'object') return 'assign-office-hours op requires officeHours: object.';
       return null;
     }
     if (typeof o.sectionId !== 'string') return 'op.sectionId must be a string.';
@@ -1820,6 +2055,7 @@ module.exports = {
   login, logout,
   listSchedules, createSchedule,
   getSections, createSection, updateSection, deleteSection, extendSection, previewConflicts,
+  autoFixAround, autoFixAroundApply,
   quickFixPlan, quickFixApply,
   importSchedule, upload,
   suggestSchedule, suggestRecommend,

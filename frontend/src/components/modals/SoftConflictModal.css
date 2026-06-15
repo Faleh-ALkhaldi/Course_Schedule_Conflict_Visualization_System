@@ -74,7 +74,7 @@
 
 .modal-desc {
   font-size: .82rem;
-  color: var(--slate-700);
+  color: var(--text-secondary);
   line-height: 1.4;
 }
 

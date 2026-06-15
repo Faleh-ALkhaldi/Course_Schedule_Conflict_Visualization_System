@@ -18,9 +18,11 @@ function evaluate(changed, allSections, officeHours = []) {
     // NEW-FU-272 (Phase 50 #3): KFUPM convention — a male section and the
     // female-pool sibling of the SAME course at the SAME slot share the
     // physical class. Same instructor here is intentional, not a conflict.
+    // NEW-FU-555 (Batch 18): minutes, not raw strings — the preview's "HH:MM" vs the
+    // snapshot's "HH:MM:SS" broke this exemption and surfaced false instructor clashes.
     if (other.courseId === changed.courseId &&
         other.gender && changed.gender && other.gender !== changed.gender &&
-        other.startTime === changed.startTime && other.endTime === changed.endTime) continue;
+        other.startMinutes === changed.startMinutes && other.endMinutes === changed.endMinutes) continue;
     if (other.instructorId !== changed.instructorId) continue;
     if (!other.startTime || !other.endTime) continue;
     if (!changed.overlaps(other)) continue;

@@ -75,7 +75,9 @@ export default function SchedulerPage() {
           loadReference, loadView, saveSchedule, moveSection,
           // NEW-FU-283 (Phase 56): `venues` added so the audit effect
           // below can walk the loaded list.
-          sections, courses, venues, instructors, error, dispatch, unfinalizeSchedule, doLogout } = useApp();
+          sections, courses, venues, instructors, error, dispatch, unfinalizeSchedule, doLogout,
+          // NEW-FU-549 (Batch 16): undo/redo
+          undo, redo, recordMutation, clearHistory } = useApp();
   const reduceMotion = useReducedMotion();
 
   // NEW-FU-482 (Phase 116): a term is locked (read-only) when archived OR finalized — the
@@ -196,6 +198,19 @@ export default function SchedulerPage() {
   // below then refetches sections for the newly-active schedule.
   // View-mode + filterId are preserved across the switch.
   const handleSwitchTerm = async (term) => {
+    // NEW-FU-561 (audit P1-7): the contract is a term OBJECT ({scheduleId, code,
+    // status, archivedAt}), but TermPicker's archive/delete/rename-the-ACTIVE-term
+    // flows call this with a bare term-CODE STRING (altCode / newCode). A string has
+    // no .scheduleId, so the old guard silently dropped the switch and left the user
+    // stranded on the just-removed schedule. Accept either form: resolve a string
+    // code to its schedule via the same source the bootstrap uses.
+    if (typeof term === 'string') {
+      const { listSchedules } = await import('../api/index.js');   // dynamic import — matches boot()
+      const list = await listSchedules(DEPT_ID).catch(() => []);
+      const sched = list.find(s => s.semester === term);
+      if (!sched) return;
+      term = { scheduleId: sched.id, code: sched.semester, status: sched.status, archivedAt: sched.archived_at || null };
+    }
     if (!term?.scheduleId) return;
     // NEW-FU-203: carry archived_at through so the banner renders
     // immediately on term switch, before listView refetches.
@@ -215,17 +230,15 @@ export default function SchedulerPage() {
     await loadReference(term.code);
   };
 
-  // NEW-FU-47b: skip loadView entirely when the view is teacher/venue but
-  // no filter has been selected yet. The backend now rejects these requests
-  // with a precise 400 (FU-47 stricter validation) — without this gate,
-  // every transient "I've switched view but not picked anyone yet" state
-  // would fire an error toast. Pre-FU-47 the backend silently returned all
-  // sections, which masked the bug. Now we explicitly do nothing until the
-  // user picks a filter — and the view label already says "select a {view}
-  // from the sidebar".
+  // NEW-FU-551 (Batch 17 Issue 3): ALWAYS call loadView on a view/term change —
+  // even for teacher/venue with no filter selected. loadView's own guard (FU-527)
+  // handles that case gracefully: it skips the sections fetch (no FU-47 400) but
+  // STILL refetches the term-global conflicts. The previous early-return here meant
+  // SET_VIEW cleared `conflicts:[]` and nothing refetched them, so Instructor/Venue
+  // view showed "No conflicts" while Course View showed the real count for the SAME
+  // term — a contradiction. Conflicts are a property of the TERM, not the view.
   useEffect(() => {
     if (!schedule) return;
-    if ((view === VIEWS.TEACHER || view === VIEWS.VENUE) && !filterId) return;
     loadView(schedule.id, view, filterId);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, filterId, schedule?.id]);
@@ -242,6 +255,35 @@ export default function SchedulerPage() {
     if (error) showToast(error, 'error');
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [error]);
+
+  // NEW-FU-549 (Batch 16): Undo / Redo handlers + global keyboard shortcuts.
+  async function handleUndo() {
+    const r = await undo();
+    if (r) showToast(`↶ Undone: ${r.label}`, 'info');
+  }
+  async function handleRedo() {
+    const r = await redo();
+    if (r) showToast(`↷ Redone: ${r.label}`, 'info');
+  }
+  useEffect(() => {
+    function onKey(e) {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const k = (e.key || '').toLowerCase();
+      if (k !== 'z' && k !== 'y') return;
+      // Don't hijack native text undo while typing, and don't act while any modal is
+      // open (its own edits/confirm own the keyboard).
+      const t = e.target;
+      const tag = t?.tagName;
+      if (t?.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (document.querySelector('.sm-overlay, .modal-overlay, .qf-overlay')) return;
+      if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); handleRedo(); }
+      else if (k === 'z') { e.preventDefault(); handleUndo(); }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [undo, redo]);
 
   // NEW-FU-283 (Phase 56): venue-name audit. Walks the loaded venues
   // list once whenever the term's reference data changes and flags any
@@ -359,7 +401,7 @@ export default function SchedulerPage() {
         if (day === sec.day && startTime === origStart.substring(0,5)) return;
 
         // NEW-FU-371 (Phase 98 item 2): a LAB is single-day by definition
-        // (sectionPattern.LAB_RULE = 50/75/165 min on exactly ONE day). The
+        // (sectionPattern.LAB_RULE = 50/75/160 min on exactly ONE day). The
         // day-GROUP machinery (MW / STT) exists only for multi-day LECTURE
         // groups; routing a lab through it expands the move to the target
         // group's 3 days, which the backend pattern validator then rejects
@@ -515,6 +557,7 @@ export default function SchedulerPage() {
         endTime:       newEndTime,
       });
       await deleteSection(sec.id);
+      recordMutation('move section');   // NEW-FU-549: one undo step for the restructure
       showToast(`✓ Section moved to ${GROUP_LABELS[newGroup] ?? newDay}.`, 'success');
       loadView(schedule.id, view, filterId);
     } catch(err) {
@@ -660,14 +703,28 @@ export default function SchedulerPage() {
     const courseCode = section.courseCode ?? section.course_code ?? '';
     const secNum     = section.sectionNumber ?? section.section_number ?? '';
     const day        = section.day ?? '';
-    const prompt = scope === 'row'
-      ? `Delete the ${day} meeting of ${courseCode} §${secNum}? Other meeting days of this section will remain.`
-      : `Delete ALL meeting days of ${courseCode} §${secNum}? This removes the entire section.`;
-    if (!window.confirm(prompt)) return;
+    // NEW-FU-547 (Batch 15 Issue 5): themed dialog (askDecision/DecisionModal) instead
+    // of the native window.confirm white panel — dark-mode compatible.
+    const ok = await askDecision({
+      icon: <Ico name="alert" />,
+      title: scope === 'row'
+        ? `Delete the ${day} meeting of ${courseCode} §${secNum}?`
+        : `Delete ALL meeting days of ${courseCode} §${secNum}?`,
+      lead: scope === 'row'
+        ? 'Other meeting days of this section will remain.'
+        : 'This removes the entire section.',
+      options: [
+        { label: 'Delete', value: true, tone: 'danger' },
+        { label: 'Cancel', value: false, tone: 'neutral' },
+      ],
+      dismissValue: false,
+    });
+    if (!ok) return;
     try {
       const { deleteSection, deleteSectionRow } = await import('../api/index.js');
       if (scope === 'row') await deleteSectionRow(section.id);
       else                 await deleteSection(section.id);
+      recordMutation(scope === 'row' ? 'delete meeting' : 'delete section');   // NEW-FU-549
       // NEW-FU-299/FU-300 (Phase 26): toast text explicitly names which
       // SCOPE happened. Prior text was ambiguous ("Removed Tuesday meeting"
       // vs "Removed SWE201 §01") and the user couldn't tell at a glance
@@ -968,6 +1025,7 @@ export default function SchedulerPage() {
         // `instructors`/`venues` — otherwise dummyInstrCount/dummyVenueCount stay 0
         // and the "X instructors / Y venues needed to go live" banner never shows.
         await loadReference(schedule.semester);
+        clearHistory?.();   // NEW-FU-549 (Batch 16): Suggest regenerates the schedule → reset undo history
         return r;
       });
       const hard   = (result.conflicts??[]).filter(c=>c.severity==='Hard').length;
@@ -1041,7 +1099,7 @@ export default function SchedulerPage() {
       onDragCancel={handleDragCancel}
     >
       <div className="scheduler-root">
-        <TopBar onSave={handleSave} onSuggest={handleSuggest} onExport={handleExport} onImport={handleImport} onSwitchTerm={handleSwitchTerm} onUnlock={handleUnlock} onLogout={handleLogout} />
+        <TopBar onSave={handleSave} onSuggest={handleSuggest} onExport={handleExport} onImport={handleImport} onSwitchTerm={handleSwitchTerm} onUnlock={handleUnlock} onLogout={handleLogout} onUndo={handleUndo} onRedo={handleRedo} />
 
         <div className="scheduler-body">
           <SidePanel showToast={showToast} onAddSection={handleOpenAdd} onEditSection={sec => sec && setSectionModal({ mode:'edit', initial:{ section: sec } })} onQuickFix={handleQuickFix} />
@@ -1266,6 +1324,7 @@ export default function SchedulerPage() {
             // instructors/venues — refresh the reference lists so the "needed to go
             // live" banner reflects them (parity with the Suggest apply path).
             await loadReference(schedule.semester);
+            recordMutation('Quick Fix');   // NEW-FU-549: whole grid fix = one undo step
           }}
         />
       )}
@@ -1299,7 +1358,10 @@ export default function SchedulerPage() {
       <DragOverlay>
         {activeSection && (
           <div style={{
-            background:'#e0f2fe', border:'2px solid #0284c7',
+            // NEW-FU-561 (audit P2-14): pin an explicit dark text color. Without it the
+            // chip inherited --text-primary (near-white in dark mode) on this pale-blue
+            // bg → ~1.02:1, invisible. Theme-independent, matches the course-overlay below.
+            background:'#e0f2fe', border:'2px solid #0284c7', color:'#0c4a6e',
             borderRadius:6, padding:'6px 10px',
             fontFamily:'var(--font-mono)', fontSize:'.78rem', fontWeight:600,
             boxShadow:'0 4px 16px rgba(0,0,0,.2)',

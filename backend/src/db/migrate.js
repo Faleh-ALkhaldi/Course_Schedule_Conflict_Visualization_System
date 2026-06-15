@@ -61,7 +61,11 @@ async function migrate(direction = 'up') {
           `migration(s) are no longer present on disk: ${missing.join(', ')}.`
         );
         console.error('Restore the missing files OR remove their rows from _migrations and re-apply downstream migrations as appropriate.');
-        process.exit(1);
+        // NEW-FU-561 (audit P3): set exitCode + return (NOT process.exit(1)) so the
+        // finally clause's `await pool.end()` drains the pool before Node exits — same
+        // pattern the catch block already uses (FU-88). The bare exit here preempted it.
+        process.exitCode = 1;
+        return;
       }
 
       const pending = files.filter(f => !applied.includes(f));

@@ -44,6 +44,7 @@
 //      an input sidesteps the platform-styling rabbit hole entirely.
 
 import React, { useState, useEffect, useMemo } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useApp } from '../../context/AppContext.jsx';
 import * as api from '../../api/index.js';
 import './SectionModal.css';
@@ -161,6 +162,7 @@ export function venueConflictError(newName, existingVenues) {
 // SidePanel doesn't pass it — the new entry just appears in the
 // sidebar list via the ADD_VENUE reducer action.
 export default function AddVenueModal({ onClose, showToast, onCreated }) {
+  useFocusTrap();
   const { addVenue, venues, schedule } = useApp();
   const termCode = schedule?.semester ?? null;
 
@@ -257,7 +259,7 @@ export default function AddVenueModal({ onClose, showToast, onCreated }) {
 
   return (
     <div className="sm-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="sm-card" style={{ maxWidth: 520 }}>
+      <div className="sm-card" role="dialog" aria-modal="true" aria-label="Add venue" style={{ maxWidth: 520 }}>
         <div className="sm-header">
           <h2 className="sm-title">+ Add Venue</h2>
           <button className="sm-close" onClick={onClose} aria-label="Close">×</button>

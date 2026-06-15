@@ -216,7 +216,7 @@
   margin: 4px 0 0; font-size: .72rem; line-height: 1.4; color: var(--slate-500);
 }
 .sm-hint .sm-ico { width: 13px; height: 13px; color: var(--slate-400); }
-.sm-hint strong { color: var(--slate-700); font-weight: 700; }
+.sm-hint strong { color: var(--text-secondary); font-weight: 700; }
 
 /* Label row with an inline "+ New" affordance. */
 .sm-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -236,15 +236,25 @@
 .sm-info-box .sm-ico { margin-top: 1px; }
 .sm-info-accent { background: rgba(13,148,136,.06); border: 1px solid rgba(13,148,136,.22); color: var(--slate-600); }
 .sm-info-accent .sm-ico { color: var(--teal-600, #0f766e); }
-.sm-info-warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; flex-direction: column; align-items: stretch; gap: 0; }
+.sm-info-warn { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; flex-direction: column; align-items: stretch; gap: 10px; }
+/* NEW-FU-545 (Batch 15 Issue 1): the override checkbox used to collide with its own
+   label (unstyled inline). Lay it out as a flex row with a gap and top spacing so the
+   "Schedule is tight" message, the checkbox, and its text never overlap. */
+.sm-override-check {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin: 2px 0 0; font-size: .8rem; line-height: 1.45; cursor: pointer;
+  color: var(--text-secondary);
+}
+.sm-override-check input { flex: 0 0 auto; margin-top: 2px; }
+.sm-override-check strong { color: var(--navy-800); }
 .sm-info-warn > strong { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; }
 .sm-info-warn .sm-ico { color: #b45309; }
 .sm-info-ok { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; font-size: .8rem; align-items: center; }
 .sm-info-ok .sm-ico { color: #16a34a; }
 
 /* Conflict list — severity chips + plain text. */
-.sm-conflict-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.sm-conflict-list li { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: .78rem; line-height: 1.4; color: var(--slate-700); }
+.sm-conflict-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.sm-conflict-list li { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: .78rem; line-height: 1.4; color: var(--text-secondary); }
 .sm-conflict-list strong { color: var(--navy-800); font-family: var(--font-mono); font-size: .74rem; }
 .sm-sev { flex: 0 0 auto; font-size: .62rem; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 999px; }
 .sm-sev-hard { background: #fee2e2; color: #b91c1c; }
@@ -405,3 +415,23 @@
   flex-basis: auto;
 }
 
+
+/* ── Move-only Quick Fix (NEW-FU-541, Batch 13 Issue 2) ─────────────────────── */
+.sm-autofix { margin-top: 8px; }
+.sm-autofix-actions {
+  display: flex; align-items: center; gap: 12px; margin-top: 6px;
+}
+.sm-linkbtn {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--teal-600, #0d9488); font-weight: 600; font-size: 12.5px;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.sm-linkbtn:hover:not(:disabled) { color: var(--teal-700, #0f766e); }
+.sm-linkbtn:disabled { opacity: .6; cursor: default; text-decoration: none; }
+.sm-btn-primary {
+  background: var(--navy-800); color: #fff; border: 1.5px solid transparent;
+  border-radius: 8px; font-weight: 600; cursor: pointer; transition: all .15s;
+}
+.sm-btn-primary:hover:not(:disabled) { background: var(--navy-700); }
+.sm-btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+.sm-btn-sm { padding: 6px 12px; font-size: 12.5px; }

@@ -1,10 +1,12 @@
 import React, { useEffect } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { ruleToPlain } from '../../utils/conflictText.js';
 // NEW-FU-503 (Phase 123): SVG icon replaces the ⚠️ emoji.
 import Ico from '../shared/Icons.jsx';
 import './SoftConflictModal.css';
 
 export default function SoftConflictModal({ conflicts, onConfirm, onCancel }) {
+  useFocusTrap();
   // M-6: Escape key closes the modal (dismiss = go back, same as onCancel)
   useEffect(() => {
     function onKeyDown(e) { if (e.key === 'Escape') onCancel(); }

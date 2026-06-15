@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { DAYS, useApp } from '../../context/AppContext.jsx';
 import * as api from '../../api/index.js';
 import './SectionModal.css'; // reuse same modal styles
@@ -14,11 +15,12 @@ function plusOneHourClamped(hhmm) {
 }
 
 export default function OfficeHourModal({ officeHour, instructorId, onClose, onSaved, showToast }) {
+  useFocusTrap();
   // NEW-FU-206: when active term is archived, the modal still opens (so the
   // admin can SEE the OH) but every form input and the Save / Delete buttons
   // are disabled. This is purely UX — OH is global per-instructor, so the
   // API can't 409 here; the UI lockdown is the only enforcement axis.
-  const { schedule } = useApp();
+  const { schedule, confirm } = useApp();
   const isArchived = Boolean(schedule?.archived_at);
   const lockedTitle = 'Term is archived — unarchive to change office hours.';
   // NEW-L14: Escape closes the modal (matches the dismiss-on-Escape pattern
@@ -81,7 +83,7 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
   }
 
   async function handleDelete() {
-    if (!window.confirm('Delete these office hours?')) return;
+    if (!await confirm({ title: 'Delete these office hours?', confirmLabel: 'Delete' })) return;
     setBusy(true);
     try {
       await api.deleteInstructorOfficeHour(instructorId, officeHour.id);
@@ -96,7 +98,7 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
 
   return (
     <div className="sm-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="sm-card" style={{ maxWidth: 400 }}>
+      <div className="sm-card" role="dialog" aria-modal="true" aria-label="Office hours" style={{ maxWidth: 400 }}>
         <div className="sm-header">
           <h2 className="sm-title">
             {isArchived ? 'Office Hours (read-only)' : 'Edit Office Hours'}

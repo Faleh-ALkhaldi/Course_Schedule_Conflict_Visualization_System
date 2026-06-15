@@ -21,6 +21,7 @@
 // truth, no more divergent inline forms.
 
 import React, { useState, useEffect, useMemo } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useApp } from '../../context/AppContext.jsx';
 import { getSuggestedOfficeHour } from '../../api/index.js';
 import './SectionModal.css';
@@ -83,6 +84,7 @@ function plusOneHourClamped(hhmm) {
 // SidePanel doesn't pass it — the new entry just appears in the
 // sidebar list via the ADD_INSTRUCTOR reducer action.
 export default function AddInstructorModal({ onClose, showToast, onCreated }) {
+  useFocusTrap();
   const { addInstructor } = useApp();
 
   // Escape closes — universal modal contract.
@@ -164,7 +166,20 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
   // already strips disallowed characters at the source, but this also blocks Save
   // if anything slips through (e.g. a value set programmatically).
   const nameCharsetOk = trimmedName.length === 0 || NAME_ALLOWED_RE.test(trimmedName);
-  const canSubmit = trimmedName.length > 0 && nameCharsetOk && emailLooksValid && ohValid && !busy;
+  // NEW-FU-544 (Batch 14 Issue 3): require a REAL full name — at least two parts
+  // separated by a space (first + last; more parts allowed), each part made of English
+  // letters only (hyphen/apostrophe allowed inside a part for names like "Al-Khaldi").
+  // A single token ("FALAH") or junk like "name + symbols/digits" is rejected at runtime.
+  const nameTokens = trimmedName.split(/\s+/).filter(Boolean);
+  const tokensAreLetters = nameTokens.length > 0 && nameTokens.every(t => /^[A-Za-z][A-Za-z'-]*$/.test(t));
+  const isFullName = nameTokens.length >= 2 && tokensAreLetters;
+  const nameError =
+    trimmedName.length === 0 ? ''
+    : !nameCharsetOk ? 'Use English letters only (spaces, hyphens and apostrophes allowed).'
+    : nameTokens.length < 2 ? 'Enter a full name — first and last name, separated by a space.'
+    : !tokensAreLetters ? 'Each name part must be English letters only.'
+    : '';
+  const canSubmit = isFullName && nameCharsetOk && emailLooksValid && ohValid && !busy;
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -193,7 +208,7 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
 
   return (
     <div className="sm-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="sm-card" style={{ maxWidth: 480 }}>
+      <div className="sm-card" role="dialog" aria-modal="true" aria-label="Add instructor" style={{ maxWidth: 480 }}>
         <div className="sm-header">
           <h2 className="sm-title">+ Add Instructor</h2>
           <button className="sm-close" onClick={onClose} aria-label="Close">×</button>
@@ -204,8 +219,10 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
             <label htmlFor="aim-name">Full name</label>
             <input id="aim-name" autoFocus required
               placeholder="e.g. Faleh Al-Khaldi"
+              aria-invalid={!!nameError}
               value={name}
               onChange={handleNameChange} />
+            {nameError && <p className="sm-inline-error" role="alert">{nameError}</p>}
           </div>
 
           <div className="sm-field">

@@ -7,7 +7,7 @@
 
 const {
   validateSectionPattern,
-  DUR_50, DUR_75, DUR_165,
+  DUR_50, DUR_75, DUR_160,
   legalPatternsForCourse, resolvePattern, PATTERN_DEFS,
 } = require('../../src/domain/sectionPattern');
 
@@ -153,12 +153,19 @@ describe('validateSectionPattern - lab rule', () => {
     }));
     expect(r).toEqual({ ok: true });
   });
-  test('Lab · 165 min (2h 45m) · single day → ok', () => {
+  test('Lab · 160 min (2h 40m) · single day → ok', () => {
     const r = validateSectionPattern(mk({
       credits: 4, hasLab: true, sectionType: 'Lab',
-      days: ['Tuesday'], duration: DUR_165,
+      days: ['Tuesday'], duration: DUR_160,
     }));
     expect(r).toEqual({ ok: true });
+  });
+  test('Lab · 165 min (former max, now illegal) → rejected', () => {
+    const r = validateSectionPattern(mk({
+      credits: 4, hasLab: true, sectionType: 'Lab',
+      days: ['Tuesday'], duration: 165,
+    }));
+    expect(r.ok).toBe(false);
   });
   test('Lab · 90 min (illegal duration) → rejected', () => {
     const r = validateSectionPattern(mk({
@@ -166,7 +173,7 @@ describe('validateSectionPattern - lab rule', () => {
       days: ['Monday'], duration: 90,
     }));
     expect(r.ok).toBe(false);
-    expect(r.error).toMatch(/Lab.*50.*75.*165/);
+    expect(r.error).toMatch(/Lab.*50.*75.*160/);
   });
   test('Lab · 50 min · two days → rejected (lab is single-day only)', () => {
     const r = validateSectionPattern(mk({

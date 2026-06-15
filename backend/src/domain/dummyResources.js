@@ -37,7 +37,7 @@ function hhmmss(min) {
 function dummyInstructorName(n) { return `NEW INSTRUCTOR ${n}`; }
 function dummyVenueName(n)      { return `22-${900 + n}`; }
 
-// Pick a valid OH block (Sun–Thu, 08:00–14:00, 60 min) that does NOT overlap any
+// Pick a valid OH block (Sun–Thu, 08:00–16:00, 60 min) that does NOT overlap any
 // of the dummy's own teaching slots. busySlots: [{ day, start, end }] (HH:MM[:SS]).
 function pickDummyOfficeHours(busySlots = []) {
   const busy = busySlots
@@ -51,7 +51,7 @@ function pickDummyOfficeHours(busySlots = []) {
       }
     }
   }
-  // Fallback (a placeholder can't realistically fill all 30 candidate blocks).
+  // Fallback (a placeholder can't realistically fill all 40 candidate blocks).
   return { day: 'Monday', startTime: '08:00:00', endTime: '09:00:00' };
 }
 

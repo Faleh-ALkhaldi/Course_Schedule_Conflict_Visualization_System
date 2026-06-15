@@ -509,7 +509,7 @@
   font-weight: 500;
   cursor: pointer;
   transition: background .12s, border-color .12s;
-  font-family: var(--font-sans);
+  font-family: var(--font-body);
 }
 
 /* NEW-FU-319 (Phase 29): Quick Fix launcher. Stronger visual weight
@@ -528,7 +528,7 @@
   font-weight: 600;
   cursor: pointer;
   transition: background .12s, transform .08s;
-  font-family: var(--font-sans);
+  font-family: var(--font-body);
   letter-spacing: .01em;
 }
 .sp-quick-fix-btn:hover:not(:disabled) {

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 // NEW-FU-503 (Phase 123): SVG default icon replaces the ⚠️ emoji default.
 import Ico from '../shared/Icons.jsx';
 import './SoftConflictModal.css';
@@ -28,6 +29,7 @@ export default function DecisionModal({
   onChoose,
   onDismiss,
 }) {
+  useFocusTrap();
   // NEW-FU-448 (Phase 107 M8): keyboard operability. The two-option Suggest
   // chooser is the central decision surface — it must be usable without a mouse.
   // Focus the primary action on open and bind Enter to it; Escape still cancels.

@@ -390,12 +390,16 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
   // R-13 check skips it (placeholders have no office hours yet); the venue op
   // carries the required type so R-11/R-12 stay clear. apply() turns these
   // into real is_dummy rows tagged with the owning term.
+  // NEW-FU-548 (Batch 15 Issue 4): tag placeholder ops with `dummy: true` so the
+  // planner can hold them back to a LATER tier — real move/reassign solutions are
+  // exhausted first; minting a dummy instructor/venue is a resort, not a first move.
   const dummyInstrOp = (sec) => ({
     type:      'add-dummy-instructor',
     sectionId: sec.id,
     dummyId:   `__dummy_instr_${sec.courseId}_${sec.sectionNumber}__`,
     dummyName: 'NEW INSTRUCTOR',
     priority:  SCORE.OP_DUMMY,
+    dummy:     true,
     label:     `Add a NEW placeholder instructor for ${sec.courseCode} §${sec.sectionNumber} (no existing instructor is free — staff it later)`,
   });
   const dummyVenueOp = (sec, wantType) => ({
@@ -405,6 +409,7 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
     dummyName: '22-900',
     venueType: wantType === 'Laboratory' ? 'Laboratory' : 'LectureHall',
     priority:  SCORE.OP_DUMMY,
+    dummy:     true,
     label:     `Add a NEW placeholder ${wantType === 'Laboratory' ? 'lab' : 'room'} for ${sec.courseCode} §${sec.sectionNumber} (no existing venue is free — assign it later)`,
   });
   const ops = [];
@@ -1641,9 +1646,17 @@ class QuickFixService {
 
     const ops = [];
     let opId = 0;
-    let progressMade = true;
 
-    while (ops.length < MAX_OPS && progressMade) {
+    // NEW-FU-548 (Batch 15 Issue 4): TIERED escalation so destructive/placeholder ops
+    // are TRUE last resorts. Tier 0 resolves everything it can using ONLY real
+    // move/reassign/add-day ops (no dummies); only when that's exhausted does Tier 1
+    // permit placeholder (dummy) instructors/venues. Last-resort DROPS are emitted
+    // after BOTH tiers (below). This guarantees the resolver never mints a dummy — or
+    // drops a course — while a real reschedule/reassign would have worked, and keeps
+    // the count of dummies/drops to the minimum the schedule actually forces.
+    for (const allowDummy of [false, true]) {
+      let progressMade = true;
+      while (ops.length < MAX_OPS && progressMade) {
       progressMade = false;
       // Process hard conflicts first, then soft.
       const sorted = [...conflicts].sort((a, b) =>
@@ -1657,7 +1670,9 @@ class QuickFixService {
         // simulation would cause summary.remaining* to assume drops
         // are applied, breaking the simulator/runtime parity contract
         // when the user leaves the drop checkbox off.
-        const cands = allCands.filter(op => !op.lastResort);
+        // NEW-FU-548 (Batch 15 Issue 4): in Tier 0, also hold back dummy ops so real
+        // reschedules/reassigns are exhausted before any placeholder is considered.
+        const cands = allCands.filter(op => !op.lastResort && (allowDummy || !op.dummy));
         if (cands.length === 0) continue;
 
         // Simulate each candidate; pick the one with the best score.
@@ -1715,7 +1730,8 @@ class QuickFixService {
           }
         }
       }
-    }
+      } // end while (this tier)
+    }   // end for (allowDummy tier)
 
     const final = countConflicts(conflicts);
     // NEW-FU-327 (Phase 30): expose the rule IDs of conflicts that

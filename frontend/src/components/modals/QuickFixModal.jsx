@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 // NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
 import Ico from '../shared/Icons.jsx';
 import * as api from '../../api/index.js';
@@ -49,6 +50,7 @@ const OP_TYPE_COLOR = {
 };
 
 export default function QuickFixModal({ scheduleId, onClose, onApplied, showToast }) {
+  useFocusTrap();
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState(null);
   const [plan,     setPlan]     = useState(null);
@@ -112,7 +114,7 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
 
   return (
     <div className="sm-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="sm-card" style={{maxWidth: 720, width: '95vw'}}>
+      <div className="sm-card" role="dialog" aria-modal="true" aria-label="Quick fix conflicts" style={{maxWidth: 720, width: '95vw'}}>
         <div className="sm-header">
           <h2 className="sm-title"><Ico name="sparkles" /> Quick Fix Conflicts</h2>
           <button className="sm-close" onClick={onClose}>×</button>
@@ -139,7 +141,7 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
 
         {plan && !loading && !error && (
           <>
-            <div style={{padding: '0 24px 12px', fontSize: '.82rem', color: 'var(--slate-700)'}}>
+            <div style={{padding: '0 24px 12px', fontSize: '.82rem', color: 'var(--text-secondary)'}}>
               <strong>Summary:</strong> {plan.summary.initialHard} hard + {plan.summary.initialSoft} soft
               {' → '}
               <strong style={{color: plan.summary.remainingHard + plan.summary.remainingSoft === 0 ? '#0f766e' : '#b45309'}}>
