@@ -405,7 +405,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     return [form.day];
   }
 
-  async function handleSubmitInfo(e) {
+  async function handleSubmitInfo(e, opts = {}) {
     e.preventDefault();
     // NEW-FU-411 (Phase 102 item 4): enforce the type-scoped section-number range
     // client-side (the backend also rejects, but a clear inline message beats a
@@ -468,8 +468,10 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
           gender:        form.gender,
           days,
           day:           days[0],
-          startTime:     form.startTime,
-          endTime:       computeEnd(),
+          // NEW-FU-573 (Batch 20): opts.startTime/endTime override the form for the
+          // one-click "move this section to a conflict-free slot" action (applyMoveSelf).
+          startTime:     opts.startTime ?? form.startTime,
+          endTime:       opts.endTime   ?? computeEnd(),
         });
         showToast(`✓ Section added (${days.length} day${days.length>1?'s':''}).`, 'success');
       } else {
@@ -493,7 +495,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     } finally { setBusy(false); }
   }
 
-  async function handleSubmitTime(e) {
+  async function handleSubmitTime(e, opts = {}) {
     e.preventDefault();
     if (!existing) return;
     if (scheduleLocked) { setError(lockedMsg); return; }
@@ -589,8 +591,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
         instructorId: form.instructorId || null,
         venueId:      form.venueId      || existing.venueId      || existing.venue_id,
         day:          effectiveDay,
-        startTime:    form.startTime,
-        endTime:      computeEnd(),
+        // NEW-FU-573 (Batch 20): opts override for the one-click self-move (applyMoveSelf).
+        startTime:    opts.startTime ?? form.startTime,
+        endTime:      opts.endTime   ?? computeEnd(),
       });
       // NEW-FU-550 (Batch 16 fix): ALWAYS refetch from server after the edit, exactly
       // like the drag path. moveSection returns null for a GROUP update (no optimistic
@@ -851,10 +854,10 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // the time window (R-06), etc., not just instructor/venue. Debounced; the client-side
   // conflictPreview gives instant feedback while the server round-trips. The endpoint also
   // reports whether ANY conflict-free start exists for the pattern → steer vs. override.
-  const [serverPreview, setServerPreview] = useState({ conflicts: [], conflictFreeStartExists: true, loaded: false, stale: false });
+  const [serverPreview, setServerPreview] = useState({ conflicts: [], conflictFreeStartExists: true, conflictFreeStart: null, conflictFreeEnd: null, loaded: false, stale: false });
   useEffect(() => {
     if (!schedule?.id || !form.courseId || courseIsExternal) {
-      setServerPreview({ conflicts: [], conflictFreeStartExists: true, loaded: true, stale: false });
+      setServerPreview({ conflicts: [], conflictFreeStartExists: true, conflictFreeStart: null, conflictFreeEnd: null, loaded: true, stale: false });
       return;
     }
     const days = (() => {
@@ -883,7 +886,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     };
     const t = setTimeout(() => {
       api.previewConflicts(schedule.id, change)
-        .then(data => setServerPreview({ conflicts: data.conflicts || [], conflictFreeStartExists: data.conflictFreeStartExists !== false, loaded: true, stale: false }))
+        .then(data => setServerPreview({ conflicts: data.conflicts || [], conflictFreeStartExists: data.conflictFreeStartExists !== false, conflictFreeStart: data.conflictFreeStart ?? null, conflictFreeEnd: data.conflictFreeEnd ?? null, loaded: true, stale: false }))
         .catch(() => setServerPreview(p => ({ ...p, stale: false, loaded: true })));
     }, 350);
     return () => clearTimeout(t);
@@ -895,14 +898,22 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   const effectiveConflicts = serverPreview.loaded ? serverPreview.conflicts : (conflictPreview || []);
   const hasAnyConflict  = effectiveConflicts.length > 0;
   const conflictFreeAlt = serverPreview.conflictFreeStartExists;
+  // NEW-FU-573 (Batch 20): a conflict has a CLEAN, one-click resolution iff either the
+  // move-only Quick Fix is ready (reschedule OTHER sections) OR a conflict-free slot
+  // exists for THIS section that we can actually move it to (the server now returns the
+  // slot, so the "move this section" steer is a working button, not dead-end advice).
+  const selfMoveAvailable  = conflictFreeAlt && !!serverPreview.conflictFreeStart;
+  const cleanFixActionable = autoFix.status === 'ready' || selfMoveAvailable;
 
-  // NEW-FU-534 (Batch 12): ANY conflict (hard OR soft) blocks Save. While the server
-  // re-check is pending Save is also blocked, so nothing slips through before the full
-  // engine confirms. When a conflict-free start exists the user is steered there; only
-  // when none exists (schedule tight) may they tick the explicit override.
+  // NEW-FU-534 (Batch 12): ANY conflict (hard OR soft) blocks Save, and while the server
+  // re-check is pending Save is blocked too so nothing slips through before the full
+  // engine confirms. NEW-FU-573 (Batch 20): only force a fix (block the dirty save) when a
+  // fix is ACTUALLY actionable; when no clean fix exists the user may tick the explicit
+  // "Save anyway" override — so Save is never blocked with no fix button offered (the old
+  // dead-end where `conflictFreeAlt` alone blocked save but nothing could apply it).
   const conflictBlocksSave =
     (serverPreview.stale && !!form.courseId && !courseIsExternal)
-    || (hasAnyConflict && (conflictFreeAlt || !overrideConflict));
+    || (hasAnyConflict && (cleanFixActionable || !overrideConflict));
 
   // NEW-FU-541 (Batch 13 Issue 2): constrained, move-only Quick Fix handlers.
   // Builds the same proposed-change payload the preview uses, asks the backend for a
@@ -971,6 +982,20 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       setAutoFix({ status: 'error', moves: autoFix.moves, error: e.response?.data?.error || 'Failed to reschedule the other sections.' });
     }
   }
+  // NEW-FU-573 (Batch 20): the counterpart to applyAutoFix — apply the "move THIS section
+  // to a conflict-free slot" resolution in ONE click. The server already verified
+  // `conflictFreeStart` is clash-free for this section's exact pattern, so we simply save
+  // the section at that start. Dispatches to the active form's save handler with the free
+  // slot as an explicit override (no setState race), exactly like applyAutoFix. For an edit
+  // this is always a same-pattern time move → handleSubmitTime; for add → handleSubmitInfo.
+  async function applyMoveSelf() {
+    const startTime = serverPreview.conflictFreeStart;
+    const endTime   = serverPreview.conflictFreeEnd;
+    if (!startTime || !endTime) return;
+    const noop = { preventDefault() {} };
+    if (mode === 'add') await handleSubmitInfo(noop, { startTime, endTime });
+    else                await handleSubmitTime(noop, { startTime, endTime });
+  }
   // Compact, de-duplicated summary of the planned moves for display.
   const autoFixMoveLines = React.useMemo(() => {
     const byUnit = new Map();
@@ -1030,13 +1055,31 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
           <div className="sm-autofix-actions">
             <button type="button" className="sm-btn-primary sm-btn-sm" onClick={applyAutoFix}>Reschedule &amp; save</button>
           </div>
-          {conflictFreeAlt && <p className="sm-inline-hint">…or move this section to a free slot instead.</p>}
+          {selfMoveAvailable && (
+            <p className="sm-inline-hint" style={{ marginTop: 6 }}>
+              …or{' '}
+              <button type="button" className="sm-linkbtn" onClick={applyMoveSelf}>
+                move this section to {fmtTimeForDisplay(serverPreview.conflictFreeStart)}
+              </button>{' '}instead.
+            </p>
+          )}
         </div>
       );
     }
-    // s === 'infeasible' — no move-only fix exists.
-    if (conflictFreeAlt) {
-      return <p className="sm-inline-hint">A conflict-free time exists — move this section to a free slot instead of creating a conflict.</p>;
+    // s === 'infeasible' — moving OTHER sections can't make room. But if a conflict-free
+    // slot exists for THIS section (the server returned it), offer a WORKING one-click move
+    // — no more dead-end "a free time exists" advisory with no button (Batch 20 / FU-573).
+    if (selfMoveAvailable) {
+      return (
+        <div className="sm-autofix">
+          <p className="sm-inline-hint">A conflict-free time exists for this section.</p>
+          <div className="sm-autofix-actions">
+            <button type="button" className="sm-btn-primary sm-btn-sm" onClick={applyMoveSelf}>
+              Move to {fmtTimeForDisplay(serverPreview.conflictFreeStart)} &amp; save
+            </button>
+          </div>
+        </div>
+      );
     }
     return (
       <>
@@ -1616,7 +1659,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               {/* External courses (SWE 399) need no section row — submit just closes. */}
               <button type="submit" className="sm-btn-save"
                 disabled={busy || scheduleLocked || courseMissing || sectionNumberMissing || !!sectionNumError || !!durationError || !!timeError || instructorMissing || venueMissing || venueTypeMismatch || conflictBlocksSave}
-                title={scheduleLocked ? lockedMsg : courseMissing ? 'Choose a course first' : sectionNumberMissing ? 'Enter a section number first' : durationError || timeError || (instructorMissing ? 'Choose an instructor first' : venueMissing ? 'Choose a venue first' : venueTypeMismatch ? 'Pick a venue that matches the section type first' : sectionNumError ? 'Fix the section number first' : conflictBlocksSave ? (conflictFreeAlt ? 'This would create a conflict — a clash-free time exists, move it there' : 'Schedule is tight — tick the box to save with a conflict') : undefined)}>
+                title={scheduleLocked ? lockedMsg : courseMissing ? 'Choose a course first' : sectionNumberMissing ? 'Enter a section number first' : durationError || timeError || (instructorMissing ? 'Choose an instructor first' : venueMissing ? 'Choose a venue first' : venueTypeMismatch ? 'Pick a venue that matches the section type first' : sectionNumError ? 'Fix the section number first' : conflictBlocksSave ? (cleanFixActionable ? 'Resolve the conflict with the suggested fix above' : 'Schedule is tight — tick the box to save with a conflict') : undefined)}>
                 {busy ? 'Saving…' : mode==='add'
                   ? (courseIsExternal ? 'OK, course noted' : 'Add section')
                   : 'Save'}
@@ -1742,7 +1785,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   the section number in edit mode also disables Save (parity with add). */}
               <button type="submit" className="sm-btn-save"
                 disabled={busy || scheduleLocked || sectionNumberMissing || !!timeError || !!durationError || conflictBlocksSave}
-                title={scheduleLocked ? lockedMsg : sectionNumberMissing ? 'Enter a section number first' : timeError || durationError || (conflictBlocksSave ? (conflictFreeAlt ? 'This would create a conflict — a clash-free time exists, move it there' : 'Schedule is tight — tick the box to save with a conflict') : undefined)}>
+                title={scheduleLocked ? lockedMsg : sectionNumberMissing ? 'Enter a section number first' : timeError || durationError || (conflictBlocksSave ? (cleanFixActionable ? 'Resolve the conflict with the suggested fix above' : 'Schedule is tight — tick the box to save with a conflict') : undefined)}>
                 {busy ? 'Saving…' : 'Save'}
               </button>
             </div>

@@ -744,17 +744,32 @@ const previewConflicts = ah(async (req, res) => {
   }).map(c => ({ ruleId: c.ruleId, severity: c.severity, description: c.description }));
 
   // If the exact change conflicts, scan the teaching window for a fully conflict-free
-  // start (same days/instructor/venue/pattern) so the modal can steer vs. override.
+  // start (same days/instructor/venue/pattern). NEW-FU-573 (Batch 20): capture the slot
+  // CLOSEST to the user's proposed start and RETURN it, so the modal can offer a working
+  // one-click "move this section here" instead of a dead-end "a free time exists" advisory
+  // with no button. (Was: break at the first free slot and return only a boolean.)
   let conflictFreeStartExists = conflicts.length === 0;
+  let conflictFreeStart = null, conflictFreeEnd = null;
   if (!conflictFreeStartExists) {
     const win = (course.category === 'GR' && !course.is_capstone)
       ? { start: 17 * 60 + 20, end: 22 * 60 } : { start: 7 * 60, end: 17 * 60 + 10 };
+    const want = hm(startTime);
+    let best = null;
     for (let st = win.start; st + durMin <= win.end; st += 30) {
-      if (evalAt(st).length === 0) { conflictFreeStartExists = true; break; }
+      if (st === want) continue;                       // the proposed slot itself is the one that conflicts
+      if (evalAt(st).length === 0) {
+        const dist = Math.abs(st - want);              // prefer the free slot nearest the user's preferred time
+        if (best === null || dist < best.dist) best = { st, dist };
+      }
+    }
+    if (best) {
+      conflictFreeStartExists = true;
+      conflictFreeStart = fromMin(best.st);
+      conflictFreeEnd   = fromMin(best.st + durMin);
     }
   }
 
-  res.json({ conflicts, conflictFreeStartExists });
+  res.json({ conflicts, conflictFreeStartExists, conflictFreeStart, conflictFreeEnd });
 });
 
 // NEW-FU-541 (Batch 13 Issue 2): constrained, move-only Quick Fix for the section
