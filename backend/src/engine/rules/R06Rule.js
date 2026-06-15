@@ -23,6 +23,16 @@ function evaluate(changed) {
   // Capstone remains VENUE-exempt (see R05Rule, which keeps its isCapstone
   // early-return). External courses have no section row, so R-06 never runs.
 
+  // NEW-FU-572 (audit-2 Phase-11 follow-up): Project/Thesis sections are
+  // TIME-flexible. They are already exempt from the rigid sectionPattern day/
+  // duration rules and are venue-optional (FU-567) because they meet wherever and
+  // whenever the instructor and students agree — so the fixed UG/GR time-of-day
+  // window does not apply to them either. (Lecture and Lab sections still do.)
+  // NOTE: inferred from the established Prj/Ths flexibility model; trivially
+  // reversible (delete this guard) if the registrar requires grad Prj/Ths to keep
+  // the GR evening window.
+  if (changed.sectionType === 'Prj' || changed.sectionType === 'Ths') return [];
+
   const window = TIME_WINDOWS[changed.category];
   if (!window) return [];
 

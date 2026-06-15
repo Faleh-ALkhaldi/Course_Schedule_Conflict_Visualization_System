@@ -329,6 +329,13 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                           const next = t.status === 'Finalized' ? 'Draft' : 'Finalized';
                           await api.setTermStatus(t.code, next);
                           await refresh();
+                          // NEW-FU-565 (audit-2 P2-4): locking/unlocking the term the user is
+                          // VIEWING must also refresh the app's state.schedule — every editing
+                          // surface (grid, SectionModal, SidePanel, OfficeHourModal) reads its
+                          // Finalized/editable lock from there, and the dropdown refresh alone
+                          // leaves it stale. Re-resolve the active schedule so the new status
+                          // takes effect immediately instead of after a manual reload.
+                          if (t.isActive) await onSwitchTerm(t.code);
                         } catch (err) {
                           setError(err.response?.data?.error || 'Status change failed.');
                         }
@@ -401,6 +408,10 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
                         try {
                           await api.unarchiveTerm(t.code);
                           await refresh();
+                          // NEW-FU-565 (audit-2 P2-4): unarchiving the term currently in view must
+                          // also clear state.schedule.archived_at, else the read-only "archived"
+                          // banner + lockdown linger until a manual reload.
+                          if (t.isActive) await onSwitchTerm(t.code);
                         } catch (err) {
                           setError(err.response?.data?.error || 'Unarchive failed.');
                         }

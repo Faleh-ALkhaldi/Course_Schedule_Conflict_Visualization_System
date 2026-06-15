@@ -27,10 +27,27 @@
 [data-theme="dark"] .toast-success { background: #0e2a1d; color: #6ee7b7; border-color: #1f5135; }
 [data-theme="dark"] .toast-info    { background: #16243d; color: #93c5fd; border-color: #2a3f63; }
 [data-theme="dark"] .toast-warn    { background: #2a2410; color: #fcd34d; border-color: #5a4a1e; }
+/* NEW-FU-562 (audit-2 P2-11): .toast-error was the only toast variant without a dark override
+   — it kept light red-on-dark-red (~3:1). */
+[data-theme="dark"] .toast-error   { background: #3a1a1a; color: #fca5a5; border-color: #5e2a2a; }
+
+/* NEW-FU-562 (audit-2 P2-10): the .active conflict badges re-set their background to a dark
+   tint but kept LIGHT text (the base .sp-badge dark override doesn't reach the .active
+   variants); the quick-fix hint/button sit on the same dark tints. Lift text to readable
+   dark-mode tones (matching the toast/sm-sev dark palette). */
+[data-theme="dark"] .sp-badge.hard.active { color: #fca5a5; }
+[data-theme="dark"] .sp-badge.soft.active { color: #fcd34d; }
+[data-theme="dark"] .sp-conflict-fix-hint,
+[data-theme="dark"] .sp-conflict-fix-btn  { color: #5eead4; border-color: rgba(94, 234, 212, .4); }
 
 /* Modal status surfaces (SectionModal / Suggest / Decision) */
 [data-theme="dark"] .sm-info-warn { background: #2a2410; border-color: #5a4a1e; color: #fcd34d; }
 [data-theme="dark"] .sm-info-ok   { background: #0e2a1d; border-color: #1f5135; color: #6ee7b7; }
+/* The status-box ICONS keep their own hardcoded hue (a child of the box); lift
+   them to the same AA palette as the box text so the amber/green glyphs aren't a
+   dark-on-dark smudge. */
+[data-theme="dark"] .sm-info-warn .sm-ico { color: #fcd34d; }
+[data-theme="dark"] .sm-info-ok   .sm-ico { color: #6ee7b7; }
 [data-theme="dark"] .sm-sev-hard  { background: #3a1a1a; color: #fca5a5; }
 [data-theme="dark"] .sm-sev-soft  { background: #2a2410; color: #fcd34d; }
 [data-theme="dark"] .sm-badge-error { background: #3a1a1a; color: #fca5a5; }
@@ -117,6 +134,11 @@
 [data-theme="dark"] .sp-dummy-advisory-text { color:#fcd34d; }
 /* SectionModal error banner / delete button / confirm icon (red) */
 [data-theme="dark"] .sm-error { background:#3a1a1a; color:#fca5a5; }
+/* NEW-FU-572 (audit-2 Phase-11 P3): login + sidebar-form error text was
+   --red-500 (#dc2626) on the dark --soft-red (#3c1d22) = 3.1:1 (fails AA). Lift
+   the text to the dark danger fg (7.9:1); the dark bg keeps the same hue. */
+[data-theme="dark"] .login-error,
+[data-theme="dark"] .sp-form-error { color: #fca5a5; }
 [data-theme="dark"] .sm-btn-delete { background:#3a1a1a; color:#fca5a5; border-color:#5e2a2a; }
 [data-theme="dark"] .sm-btn-delete:hover:not(:disabled) { background:#4a2020; }
 [data-theme="dark"] .sm-confirm-icon { background:#3a1a1a; color:#fca5a5; }
@@ -137,6 +159,7 @@
 
 [data-theme="dark"] .sm-end-preview strong,
 [data-theme="dark"] .sm-conflict-list strong,
+[data-theme="dark"] .sm-override-check strong,
 [data-theme="dark"] .sm-confirm-text strong,
 [data-theme="dark"] .sm-secnum-prefix,
 [data-theme="dark"] .exp-title,
@@ -186,3 +209,18 @@
 [data-theme="dark"] .oh-block:hover { border-color: var(--border-strong); }
 [data-theme="dark"] .oh-label { color: var(--text-secondary); }
 [data-theme="dark"] .oh-time  { color: var(--text-muted); }
+
+/* NEW-FU-562 (audit-2 P1-10): the three TermPicker modals (Add/Rename/Delete term) sit on
+   a .tp-modal card whose background flips to dark (--bg-surface), but every text/input class
+   hardcodes near-black light values with ZERO dark override — title/label/body/input were
+   invisible on the dark card. Re-tint to theme-aware values. */
+[data-theme="dark"] .tp-modal-title,
+[data-theme="dark"] .tp-modal-label { color: var(--text-primary); }
+[data-theme="dark"] .tp-modal-body  { color: var(--text-secondary); }
+[data-theme="dark"] .tp-modal-hint  { color: var(--text-muted); }
+[data-theme="dark"] .tp-modal-body code { background: var(--bg-elevated); color: var(--text-primary); }
+[data-theme="dark"] .tp-modal-input {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}

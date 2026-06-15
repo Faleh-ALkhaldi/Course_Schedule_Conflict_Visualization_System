@@ -124,7 +124,7 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
           The resolver analyzed your conflicts and proposed a sequence of fixes.
           Review the plan, opt out of any you don't want, then apply.
           {' '}
-          <strong style={{color: '#b91c1c'}}>Drops are unchecked by default — they're the last resort.</strong>
+          <strong style={{color: 'var(--danger-fg)'}}>Drops are unchecked by default — they're the last resort.</strong>
         </div>
 
         {loading && (
@@ -134,7 +134,7 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
         )}
 
         {error && (
-          <div style={{padding: '12px 24px', color: '#b91c1c'}}>
+          <div style={{padding: '12px 24px', color: 'var(--danger-fg)'}}>
             <Ico name="alert" /> {error}
           </div>
         )}
@@ -144,7 +144,7 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
             <div style={{padding: '0 24px 12px', fontSize: '.82rem', color: 'var(--text-secondary)'}}>
               <strong>Summary:</strong> {plan.summary.initialHard} hard + {plan.summary.initialSoft} soft
               {' → '}
-              <strong style={{color: plan.summary.remainingHard + plan.summary.remainingSoft === 0 ? '#0f766e' : '#b45309'}}>
+              <strong style={{color: plan.summary.remainingHard + plan.summary.remainingSoft === 0 ? 'var(--teal-600, #0f766e)' : 'var(--warn-fg)'}}>
                 {plan.summary.remainingHard} hard + {plan.summary.remainingSoft} soft remaining
               </strong>
               {' '}(if all ops applied)
@@ -162,7 +162,7 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
                   {plan.unresolvedRuleIds && plan.unresolvedRuleIds.length > 0 ? (
                     <>
                       No automatic fix for{' '}
-                      <strong style={{color: '#b91c1c'}}>{plan.unresolvedRuleIds.join(', ')}</strong>.
+                      <strong style={{color: 'var(--danger-fg)'}}>{plan.unresolvedRuleIds.join(', ')}</strong>.
                       Open the conflict to resolve manually.
                     </>
                   ) : (

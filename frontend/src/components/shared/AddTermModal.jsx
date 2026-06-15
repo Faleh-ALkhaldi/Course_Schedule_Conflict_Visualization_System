@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import * as api from '../../api';
 import './TermPicker.css';
 
@@ -114,6 +115,7 @@ function validateDateWindow(code, startISO, endISO) {
 }
 
 export function AddTermModal({ existingCodes, onClose, onCreated }) {
+  useFocusTrap();
   const [code, setCode]     = useState('');
   const [busy, setBusy]     = useState(false);
   const [error, setError]   = useState(null);
@@ -174,7 +176,7 @@ export function AddTermModal({ existingCodes, onClose, onCreated }) {
 
   return (
     <div className="tp-modal-overlay" onClick={onClose}>
-      <div className="tp-modal" onClick={e => e.stopPropagation()}>
+      <div className="tp-modal" role="dialog" aria-modal="true" aria-label="Add term" onClick={e => e.stopPropagation()}>
         <h2 className="tp-modal-title">Add new academic term</h2>
         <form onSubmit={handleCreate}>
           <label className="tp-modal-label">

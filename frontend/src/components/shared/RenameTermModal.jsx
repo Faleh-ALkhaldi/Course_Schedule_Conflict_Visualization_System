@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import * as api from '../../api';
 import './TermPicker.css';
 
@@ -23,6 +24,7 @@ function decodePreview(code) {
 }
 
 export function RenameTermModal({ term, activeCode, existingCodes, onClose, onRenamed }) {
+  useFocusTrap();
   const [newCode, setNewCode] = useState('');
   const [busy, setBusy]       = useState(false);
   const [error, setError]     = useState(null);
@@ -55,7 +57,7 @@ export function RenameTermModal({ term, activeCode, existingCodes, onClose, onRe
 
   return (
     <div className="tp-modal-overlay" onClick={onClose}>
-      <div className="tp-modal" onClick={e => e.stopPropagation()}>
+      <div className="tp-modal" role="dialog" aria-modal="true" aria-label="Rename term" onClick={e => e.stopPropagation()}>
         <h2 className="tp-modal-title">Rename Term {term.code}</h2>
         <p className="tp-modal-body">
           Renaming a term changes its code in the database. Sections, conflicts, and

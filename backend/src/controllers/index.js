@@ -677,7 +677,11 @@ const previewConflicts = ah(async (req, res) => {
     const own = all.find(s => s.id === sectionId);
     if (own) { selfCourse = own.courseId; selfNum = own.sectionNumber; selfGender = selfGender ?? own.gender; }
   }
-  const others = all.filter(s => !(s.courseId === selfCourse && s.sectionNumber === String(selfNum)));
+  // NEW-FU-562 (audit-2 P2-6): self-exclusion must be gender-scoped — else a same-course
+  // same-number OPPOSITE-gender sibling is wrongly treated as "self" and excluded, hiding a
+  // genuine cross-gender conflict from the panel preview / move plan.
+  const others = all.filter(s => !(s.courseId === selfCourse && s.sectionNumber === String(selfNum)
+    && (s.gender ?? 'M') === (selfGender || 'M')));
 
   // Course / venue / instructor metadata for the proposed section.
   const cRes = await query(
@@ -795,7 +799,9 @@ const autoFixAround = ah(async (req, res) => {
     const own = all.find(r => r.id === sectionId);
     if (own) { selfCourse = own.course_id; selfNum = own.section_number; selfGender = selfGender ?? own.gender; }
   }
-  const otherRows = all.filter(r => !(r.course_id === selfCourse && r.section_number === String(selfNum)));
+  // NEW-FU-562 (audit-2 P2-6): gender-scope the self-exclusion (see previewConflicts above).
+  const otherRows = all.filter(r => !(r.course_id === selfCourse && r.section_number === String(selfNum)
+    && (r.gender ?? 'M') === (selfGender || 'M')));
 
   // Proposed course / venue / instructor metadata.
   const cRes = await query(
@@ -845,7 +851,7 @@ const autoFixAround = ah(async (req, res) => {
   const groupMap = new Map();
   for (const r of otherRows) {
     if (!r.start_time || !r.end_time) continue;           // no fixed time → can't retime
-    const key = `${r.course_id}|${r.section_number}`;
+    const key = `${r.course_id}|${r.section_number}|${r.gender ?? 'M'}`;   // audit-2 P2-6: gender-scoped reschedule group
     if (!groupMap.has(key)) {
       groupMap.set(key, {
         key, rows: [], startMin: hm(r.start_time), durMin: hm(r.end_time) - hm(r.start_time),
@@ -882,40 +888,25 @@ const autoFixAroundApply = ah(async (req, res) => {
   if (!isUuid(scheduleId)) return badRequest(res, 'scheduleId must be a UUID.');
   if (!Array.isArray(moves) || moves.length === 0) return badRequest(res, 'moves must be a non-empty array.');
   const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+  // Validate + normalise the client plan. The server TRUSTS this only for which
+  // sections to shift and to what time — it independently re-validates the
+  // outcome (see ScheduleService.applyMovesRevalidated).
+  const norm = [];
   for (const m of moves) {
     if (!isUuid(m.sectionId)) return badRequest(res, 'each move.sectionId must be a UUID.');
     const st = String(m.startTime ?? m.toStart ?? '').slice(0, 5);
     const en = String(m.endTime ?? m.toEnd ?? '').slice(0, 5);
     if (!TIME_RE.test(st) || !TIME_RE.test(en)) return badRequest(res, 'each move needs valid HH:MM start/end times.');
-    m._st = st; m._en = en;
+    norm.push({ sectionId: m.sectionId, startTime: st, endTime: en });
   }
 
-  const { getClient } = require('../config/db');
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
-    // NEW-FU-561 (audit P1-2): take the SAME editability row-lock every other section
-    // writer takes (createSection/assignSection/extendSection all call this). Without
-    // it, a move-only Quick-Fix could mutate section times on a FINALIZED or archived
-    // schedule, bypassing the immutability contract. Throws err.status (409/423),
-    // propagated by the ah() wrapper to the global error handler.
-    await schedSvc.assertSchedulerEditableLocked(client, scheduleId);
-    let moved = 0;
-    for (const m of moves) {
-      const r = await client.query(
-        `UPDATE sections SET start_time = $1, end_time = $2
-           WHERE id = $3 AND schedule_id = $4`,
-        [m._st, m._en, m.sectionId, scheduleId]);
-      moved += r.rowCount;
-    }
-    await client.query('COMMIT');
-    res.json({ ok: true, moved });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+  // NEW-FU-563 (audit-2 P2-3): the service takes the editability row-lock (P1-2),
+  // applies the moves, re-runs the FULL conflict engine, and ROLLS BACK with 409
+  // if the plan raised the hard-conflict count — the apply no longer trusts the
+  // client's plan to be conflict-free. Throws err.status (409/423), propagated by
+  // the ah() wrapper to the global error handler.
+  const out = await schedSvc.applyMovesRevalidated(scheduleId, norm);
+  res.json({ ok: true, moved: out.moved });
 });
 
 // ── Save ──────────────────────────────────────────────────────────────────────
@@ -1397,6 +1388,20 @@ async function withInstructorLock(instructorId, fn) {
   }
 }
 
+// NEW-FU-571 (audit-2 Phase-11 P3): an instructor's office hours feed R-04 (a
+// section overlapping its instructor's OH), so adding/editing/deleting an OH
+// changes the conflict set of EVERY schedule that uses that instructor — across
+// all terms, including already-finalized ones. The OH endpoints serialized the
+// write (withInstructorLock) but, unlike deleteInstructor/deleteVenue, never
+// recomputed those schedules' persisted conflicts, leaving them stale until each
+// was next viewed. Revalidate each affected schedule best-effort after the write.
+async function revalidateSchedulesForInstructor(instructorId) {
+  const affected = await query(
+    `SELECT DISTINCT schedule_id FROM sections WHERE instructor_id = $1`, [instructorId]
+  );
+  for (const r of affected.rows) await schedSvc.revalidateSchedule(r.schedule_id).catch(() => {});
+}
+
 const addOfficeHour = ah(async (req, res) => {
   const { day, startTime, endTime } = req.body;
   if (!day || !startTime || !endTime)
@@ -1421,6 +1426,7 @@ const addOfficeHour = ah(async (req, res) => {
       }
       return instrRepo.addOfficeHour(req.params.instructorId, { day, startTime, endTime }, client);
     });
+    await revalidateSchedulesForInstructor(req.params.instructorId);  // NEW-FU-571
     res.status(201).json(oh);
   } catch (err) {
     if (err.status === 409) return res.status(409).json({ error: err.message });
@@ -1465,6 +1471,7 @@ const updateOfficeHour = ah(async (req, res) => {
       }
       return updated;
     });
+    await revalidateSchedulesForInstructor(req.params.instructorId);  // NEW-FU-571
     res.json(oh);
   } catch (err) {
     if (err.status === 409) return res.status(409).json({ error: err.message });
@@ -1475,6 +1482,7 @@ const updateOfficeHour = ah(async (req, res) => {
 
 const deleteOfficeHour = ah(async (req, res) => {
   await instrRepo.deleteOfficeHour(req.params.ohId);
+  await revalidateSchedulesForInstructor(req.params.instructorId);  // NEW-FU-571
   res.json({ deleted: true });
 });
 
@@ -1918,6 +1926,16 @@ const quickFixApply = ah(async (req, res) => {
   for (const op of ops) {
     const err = validateOp(op);
     if (err) return res.status(400).json({ error: err });
+  }
+  // NEW-FU-562 (audit-2 P1-9/P1-11): admin-gate the GLOBAL-resource ops. mark-venue-exempt /
+  // untag-has-lab UPDATE courses, reclassify-venue UPDATEs venues, assign-office-hours INSERTs
+  // office_hours — all admin-only via their direct routes. This endpoint is scheduler-
+  // accessible, so without this gate a non-admin could escalate via Quick Fix. Section-level
+  // ops stay open to schedulers. Recurse into compound sub-ops so a global op can't hide.
+  const GLOBAL_OPS = new Set([...COURSE_LEVEL_OPS, ...VENUE_LEVEL_OPS, ...INSTRUCTOR_LEVEL_OPS]);
+  const hasGlobalOp = (o) => GLOBAL_OPS.has(o.type) || (o.type === 'compound' && (o.subOps || []).some(hasGlobalOp));
+  if (ops.some(hasGlobalOp) && req.user?.role !== 'admin') {
+    return res.status(403).json({ error: 'These fixes change shared course/venue/instructor data and require an admin.' });
   }
   const result = await quickFixSvc.apply(req.params.scheduleId, ops);
   res.json(result);

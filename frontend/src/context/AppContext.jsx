@@ -494,11 +494,18 @@ export function AppProvider({ children }) {
         dispatch({ type:'REMOVE_SECTION', id });
       }
       recordMutation('delete section');   // NEW-FU-549
+      // NEW-FU-562 (audit-2 P1-2): refresh conflicts from server truth after the delete.
+      // REMOVE_SECTION only mutates the sections array — it never dispatched SET_CONFLICTS,
+      // so deleting a conflicting section left phantom conflict cards (pointing at the now-
+      // deleted id) and a STUCK saveBlocked (Save disabled until the user switched views).
+      // Peers (removeInstructor/removeVenue/removeCourse) already reloadCurrentView; this —
+      // the primary Course-View delete — did not.
+      reloadCurrentView();
     } catch(err) {
       console.error('Delete section failed:', err.response?.data?.error ?? err.message);
       throw err;
     }
-  }, [recordMutation]);
+  }, [recordMutation, reloadCurrentView]);
 
   const addInstructor = useCallback(async (data) => {
     // NEW-FU-434 (Phase 106 item 6): thread the active term so the backend can

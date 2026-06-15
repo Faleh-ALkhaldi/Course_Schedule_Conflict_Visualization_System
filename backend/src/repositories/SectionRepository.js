@@ -149,6 +149,13 @@ class SectionRepository {
     // NEW-FU-275 (Phase 52 #5): external courses are off-campus; no venue
     // is the correct state. Suppress R-10 in addition to the capstone path.
     if (section.isExternal) return null;
+    // NEW-FU-567 (audit-2 P2-16 follow-up): Project/Thesis sections are
+    // venue-optional BY TYPE — they meet online or in whatever room the
+    // instructor and students agree on (the registrar rule confirmed while
+    // resolving P2-16). The capstone exemption above only covers is_capstone
+    // COURSES; a Prj/Ths SECTION on a non-capstone course is still venue-optional,
+    // so suppress R-10 by section_type too. (Lectures and Labs still warn.)
+    if (section.sectionType === 'Prj' || section.sectionType === 'Ths') return null;
     if (!section.venueId) {
       return {
         severity: 'Soft',

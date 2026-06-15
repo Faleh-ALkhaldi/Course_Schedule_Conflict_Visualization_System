@@ -632,10 +632,15 @@ async function withTransaction(fn) {
     await client.query('COMMIT');
     return out;
   } catch (e) {
-    await client.query('ROLLBACK');
+    // NEW-FU-568 (audit-2 P3): guard the ROLLBACK so a rollback-throws (broken
+    // connection) can't mask the original error, and release(e) so a poisoned
+    // client is destroyed rather than returned to the pool. Mirrors the hardened
+    // idiom in ScheduleService.revalidateSchedule / ConflictRepository.replaceAll.
+    await client.query('ROLLBACK').catch(() => {});
+    try { client.release(e); } catch { /* ignore */ }
     throw e;
   } finally {
-    client.release();
+    try { client.release(); } catch { /* already released via catch path */ }
   }
 }
 
@@ -661,8 +666,15 @@ async function setTermStatus({ code, newStatus, departmentId = DEFAULT_DEPT }) {
     // changes on archived terms. Archived = frozen-in-time; Draft↔Finalized
     // mutations on an archived row violate the read-only semantic the UI
     // already enforces by hiding the lock button.
+    // NEW-FU-569 (audit-2 Phase-11 P1): lock the schedule row FOR UPDATE for the
+    // whole evaluate-then-finalize window. Without it, the FU-562 in-tx re-eval
+    // below is a TOCTOU — a concurrent section writer (which DOES take FOR UPDATE
+    // via assertSchedulerEditableLocked) could commit a fresh HARD conflict
+    // between our re-eval and the status UPDATE, finalizing a term with a hidden
+    // conflict. Brings setTermStatus in line with every other finalize-class
+    // writer (saveSchedule, SuggestService apply) that locks the row.
     const sched = await client.query(
-      `SELECT id, archived_at FROM schedules WHERE department_id = $1 AND semester = $2`,
+      `SELECT id, archived_at FROM schedules WHERE department_id = $1 AND semester = $2 FOR UPDATE`,
       [departmentId, code]
     );
     if (sched.rowCount === 0) {
@@ -681,11 +693,14 @@ async function setTermStatus({ code, newStatus, departmentId = DEFAULT_DEPT }) {
 
     // Guardrail: refuse Draft → Finalized when hard conflicts exist.
     if (newStatus === 'Finalized') {
-      const hard = await client.query(
-        `SELECT COUNT(*)::int AS n FROM conflicts WHERE schedule_id = $1 AND severity = 'Hard'`,
-        [scheduleId]
-      );
-      const hardCount = hard.rows[0].n;
+      // NEW-FU-562 (audit-2 P1-4/P1-8): RE-EVALUATE the engine NOW instead of trusting the
+      // persisted conflicts table. That table is only as fresh as the last revalidation, so a
+      // change that didn't revalidate THIS schedule (e.g. an office-hours edit on a shared
+      // instructor in another term) could leave a hidden HARD conflict and let the term
+      // finalize anyway. _evaluateSchedule reads via the SAME transaction client (no persist,
+      // no nested transaction), giving an authoritative count.
+      const fresh = await schedSvc()._evaluateSchedule(scheduleId, client);
+      const hardCount = (fresh.conflicts || []).filter(c => String(c.severity).toLowerCase() === 'hard').length;
       if (hardCount > 0) {
         const err = new Error(`Cannot finalize Term ${code}: ${hardCount} hard conflict${hardCount === 1 ? '' : 's'} must be resolved first.`);
         err.code = 'UNPROCESSABLE';

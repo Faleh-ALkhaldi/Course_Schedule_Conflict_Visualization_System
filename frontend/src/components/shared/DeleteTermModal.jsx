@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import * as api from '../../api';
 import './TermPicker.css';
 
@@ -7,6 +8,7 @@ import './TermPicker.css';
 // Stage 2: type-to-confirm — must type "DELETE <code>" exactly.
 
 export function DeleteTermModal({ term, activeCode, onClose, onDeleted }) {
+  useFocusTrap();
   const [stage, setStage] = useState(1);
   const [typed, setTyped] = useState('');
   const [busy, setBusy]   = useState(false);
@@ -36,7 +38,7 @@ export function DeleteTermModal({ term, activeCode, onClose, onDeleted }) {
 
   return (
     <div className="tp-modal-overlay" onClick={onClose}>
-      <div className="tp-modal" onClick={e => e.stopPropagation()}>
+      <div className="tp-modal" role="dialog" aria-modal="true" aria-label="Delete term" onClick={e => e.stopPropagation()}>
         {stage === 1 ? (
           <>
             <h2 className="tp-modal-title">Delete Term {term.code} ({term.label})?</h2>

@@ -1209,12 +1209,16 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
     // IS the lab), the cleanest resolution is to flip has_lab on the
     // course instead of dropping the section. Always offered for R-14;
     // the user can opt out in the modal if they really want the drop.
-    ops.push({
-      type:      'untag-has-lab',
-      courseId:  sectionA.courseId,
-      priority:  SCORE.OP_FLAG_FLIP,
-      label:     `Change ${sectionA.courseCode} to lectures only (remove its lab requirement — fixes this without removing the section)`,
-    });
+    // NEW-FU-562 (audit-2 P2-2): never offer "lectures only" for a 4-credit course — the
+    // 4-credit⇒has-lab invariant would then brick it (no section could be created/validated).
+    if (Number(sectionA.credits) !== 4) {
+      ops.push({
+        type:      'untag-has-lab',
+        courseId:  sectionA.courseId,
+        priority:  SCORE.OP_FLAG_FLIP,
+        label:     `Change ${sectionA.courseCode} to lectures only (remove its lab requirement — fixes this without removing the section)`,
+      });
+    }
     ops.push({
       type:       'drop',
       sectionId:  sectionA.id,
@@ -1877,43 +1881,46 @@ class QuickFixService {
     async function applyOneOp(op) {
       if (op.type === 'reassign-instructor' || op.type === 'reassign-venue') {
         const peek = await client.query(
-          `SELECT course_id, section_number FROM sections WHERE id = $1`,
+          `SELECT course_id, section_number, gender FROM sections WHERE id = $1`,
           [op.sectionId]
         );
         if (peek.rowCount === 0) return false;
-        const { course_id, section_number } = peek.rows[0];
+        // NEW-FU-562 (audit-2 P1-6): gender is part of section identity (UNIQUE includes
+        // gender), so every group-resolving WHERE must include it — else an op on one
+        // gender's §NN also rewrites/deletes the opposite gender's same-number sibling.
+        const { course_id, section_number, gender } = peek.rows[0];
         const field = op.type === 'reassign-instructor' ? 'instructor_id' : 'venue_id';
         const value = op.type === 'reassign-instructor' ? op.newInstructorId : op.newVenueId;
         await client.query(
           `UPDATE sections SET ${field} = $1
-           WHERE schedule_id = $2 AND course_id = $3 AND section_number = $4`,
-          [value, scheduleId, course_id, section_number]
+           WHERE schedule_id = $2 AND course_id = $3 AND section_number = $4 AND gender = $5`,
+          [value, scheduleId, course_id, section_number, gender]
         );
         return true;
       }
       if (op.type === 'drop') {
         const peek = await client.query(
-          `SELECT course_id, section_number FROM sections WHERE id = $1`,
+          `SELECT course_id, section_number, gender FROM sections WHERE id = $1`,
           [op.sectionId]
         );
         if (peek.rowCount === 0) return false;
-        await client.query(
-          `DELETE FROM sections WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3`,
-          [scheduleId, peek.rows[0].course_id, peek.rows[0].section_number]
+        await client.query(   // audit-2 P1-6: gender in WHERE — never drop the cross-gender sibling
+          `DELETE FROM sections WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3 AND gender = $4`,
+          [scheduleId, peek.rows[0].course_id, peek.rows[0].section_number, peek.rows[0].gender]
         );
         return true;
       }
       if (op.type === 'move') {
         const peek = await client.query(
-          `SELECT course_id, section_number FROM sections WHERE id = $1`,
+          `SELECT course_id, section_number, gender FROM sections WHERE id = $1`,
           [op.sectionId]
         );
         if (peek.rowCount === 0) return false;
-        const { course_id, section_number } = peek.rows[0];
-        await client.query(
+        const { course_id, section_number, gender } = peek.rows[0];
+        await client.query(   // audit-2 P1-6: gender in WHERE
           `UPDATE sections SET start_time = $1, end_time = $2
-           WHERE schedule_id = $3 AND course_id = $4 AND section_number = $5`,
-          [op.newStartTime, op.newEndTime, scheduleId, course_id, section_number]
+           WHERE schedule_id = $3 AND course_id = $4 AND section_number = $5 AND gender = $6`,
+          [op.newStartTime, op.newEndTime, scheduleId, course_id, section_number, gender]
         );
         return true;
       }
@@ -1921,27 +1928,31 @@ class QuickFixService {
         const peek = await client.query(
           `SELECT course_id, section_number, instructor_id, venue_id,
                   start_time::text AS start_time, end_time::text AS end_time,
-                  section_type
+                  section_type, gender
            FROM sections WHERE id = $1`,
           [op.sectionId]
         );
         if (peek.rowCount === 0) return false;
         const tmpl = peek.rows[0];
         for (const day of (op.addDays ?? [])) {
+          // NEW-FU-562 (audit-2 P1-3/P2-5): carry gender into the existence-check AND the
+          // INSERT, else added meeting-days of a female group are inserted as 'M' (DB
+          // default) — splitting it into F rows + a phantom male row, and a same-number
+          // opposite-gender sibling on that day wrongly suppresses the insert.
           const exists = await client.query(
             `SELECT 1 FROM sections
              WHERE schedule_id = $1 AND course_id = $2
-               AND section_number = $3 AND day = $4`,
-            [scheduleId, tmpl.course_id, tmpl.section_number, day]
+               AND section_number = $3 AND day = $4 AND gender = $5`,
+            [scheduleId, tmpl.course_id, tmpl.section_number, day, tmpl.gender]
           );
           if (exists.rowCount > 0) continue;
           await client.query(
             `INSERT INTO sections
                (schedule_id, course_id, instructor_id, venue_id,
-                section_number, day, start_time, end_time, section_type)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+                section_number, day, start_time, end_time, section_type, gender)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
             [scheduleId, tmpl.course_id, tmpl.instructor_id, tmpl.venue_id,
-             tmpl.section_number, day, tmpl.start_time, tmpl.end_time, tmpl.section_type]
+             tmpl.section_number, day, tmpl.start_time, tmpl.end_time, tmpl.section_type, tmpl.gender]
           );
         }
         return true;
@@ -1977,6 +1988,16 @@ class QuickFixService {
         return r.rowCount > 0;
       }
       if (op.type === 'untag-has-lab') {
+        // NEW-FU-562 (audit-2 P2-2): refuse for a 4-credit course (would brick it via the
+        // 4cr⇒has-lab invariant). Defensive — emission already skips 4cr, but a client could
+        // send the op directly; throwing rolls back the whole apply transaction.
+        const c = await client.query(`SELECT credits FROM courses WHERE id = $1`, [op.courseId]);
+        if (c.rowCount === 0) return false;
+        if (Number(c.rows[0].credits) === 4) {
+          const err = new Error('Cannot remove the lab requirement from a 4-credit course.');
+          err.status = 409;
+          throw err;
+        }
         const r = await client.query(
           `UPDATE courses SET has_lab = FALSE WHERE id = $1`,
           [op.courseId]
@@ -1998,11 +2019,11 @@ class QuickFixService {
       // agree on how placeholders are stored, isolated, and displayed.
       if (op.type === 'add-dummy-instructor') {
         const peek = await client.query(
-          `SELECT course_id, section_number FROM sections WHERE id = $1`,
+          `SELECT course_id, section_number, gender FROM sections WHERE id = $1`,
           [op.sectionId]
         );
         if (peek.rowCount === 0) return false;
-        const { course_id, section_number } = peek.rows[0];
+        const { course_id, section_number, gender } = peek.rows[0];   // audit-2 P1-6: gender-scoped
         const name = `NEW INSTRUCTOR ${++dummyInstrSeq}`;
         const ins = await client.query(
           `INSERT INTO instructors (name, email, is_dummy, owner_semester)
@@ -2012,16 +2033,16 @@ class QuickFixService {
         );
         await client.query(
           `UPDATE sections SET instructor_id = $1
-           WHERE schedule_id = $2 AND course_id = $3 AND section_number = $4`,
-          [ins.rows[0].id, scheduleId, course_id, section_number]
+           WHERE schedule_id = $2 AND course_id = $3 AND section_number = $4 AND gender = $5`,
+          [ins.rows[0].id, scheduleId, course_id, section_number, gender]
         );
         // NEW-FU-429 (Phase 106 item 4): give the placeholder a valid OH block
         // that avoids its own sections, so R-13 never fires against it (in any
         // evaluator) — superseding the need to rely only on the __dummy exemption.
         const slotRows = await client.query(
           `SELECT day, start_time::text AS s, end_time::text AS e
-           FROM sections WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3`,
-          [scheduleId, course_id, section_number]
+           FROM sections WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3 AND gender = $4`,
+          [scheduleId, course_id, section_number, gender]
         );
         const oh = pickDummyOfficeHours(slotRows.rows.map(r => ({ day: r.day, start: r.s, end: r.e })));
         await client.query(
@@ -2032,11 +2053,11 @@ class QuickFixService {
       }
       if (op.type === 'add-dummy-venue') {
         const peek = await client.query(
-          `SELECT course_id, section_number FROM sections WHERE id = $1`,
+          `SELECT course_id, section_number, gender FROM sections WHERE id = $1`,
           [op.sectionId]
         );
         if (peek.rowCount === 0) return false;
-        const { course_id, section_number } = peek.rows[0];
+        const { course_id, section_number, gender } = peek.rows[0];   // audit-2 P1-6: gender-scoped
         const vtype = op.venueType === 'Laboratory' ? 'Laboratory' : 'LectureHall';
         const name  = await nextDummyVenueName(client); // NEW-FU-431: globally-unique name
         const ins = await client.query(
@@ -2047,8 +2068,8 @@ class QuickFixService {
         );
         await client.query(
           `UPDATE sections SET venue_id = $1
-           WHERE schedule_id = $2 AND course_id = $3 AND section_number = $4`,
-          [ins.rows[0].id, scheduleId, course_id, section_number]
+           WHERE schedule_id = $2 AND course_id = $3 AND section_number = $4 AND gender = $5`,
+          [ins.rows[0].id, scheduleId, course_id, section_number, gender]
         );
         return true;
       }
@@ -2063,8 +2084,14 @@ class QuickFixService {
       // mutate a FINALIZED or archived term. Take the same FOR UPDATE row-lock +
       // refuse, inside this transaction, before any op runs. Lazy require avoids
       // any module cycle with ScheduleService.
-      const { assertSchedulerEditableLocked } = require('./ScheduleService');
-      await assertSchedulerEditableLocked(client, scheduleId);
+      const svc = require('./ScheduleService');
+      await svc.assertSchedulerEditableLocked(client, scheduleId);
+      // NEW-FU-569 (audit-2 Phase-11 P2): baseline HARD-conflict count BEFORE the
+      // plan runs. plan() computed the ops against an UNLOCKED snapshot, so a
+      // concurrent edit between plan() and apply() can make an op worse; we refuse
+      // the whole batch below if the hard count rises (mirrors the TOCTOU hardening
+      // ScheduleService.applyMovesRevalidated / FU-563 added to the move-only apply).
+      const baselineHard = (await svc._evaluateSchedule(scheduleId, client)).hardConflicts.length;
       // NEW-FU-426 (Phase 105): resolve the owning term once so any minted
       // placeholder is tagged term-local (and never leaks to other terms).
       const semRes = await client.query(
@@ -2075,6 +2102,20 @@ class QuickFixService {
       for (const op of opsToApply) {
         if (await applyOneOp(op)) applied++;
       }
+      // NEW-FU-569 (audit-2 Phase-11 P2): re-validate the OUTCOME under the lock and
+      // persist the refreshed conflict set, before COMMIT. (a) Refuse with 409 if the
+      // applied plan RAISED the hard-conflict count — a stale plan must never
+      // manufacture conflicts. (b) The quickFixApply controller does NOT revalidate
+      // after apply, so without this the conflicts table (and the term hard/soft
+      // badges) would describe the pre-fix world until the next GET /conflicts.
+      const after = await svc._evaluateSchedule(scheduleId, client);
+      if (after.hardConflicts.length > baselineHard) {
+        const err = new Error('This fix set would introduce new conflicts and was not applied. Refresh the conflicts and try again.');
+        err.status = 409;
+        throw err;
+      }
+      const { ConflictRepository } = require('../repositories/repositories');
+      await new ConflictRepository().replaceAll(scheduleId, after.conflicts, client);
       await client.query('COMMIT');
       return { applied };
     } catch (err) {

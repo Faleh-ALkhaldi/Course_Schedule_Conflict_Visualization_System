@@ -52,7 +52,7 @@ export default function GroupChangeModal({ sec, newDay, newStartTime, actualSibl
           <div style={{
             background:'var(--soft-yellow)', border:'1px solid #fcd34d',
             borderRadius:8, padding:'12px 14px', marginBottom:16,
-            fontSize:'.88rem', lineHeight:1.6, color:'var(--navy-900)'
+            fontSize:'.88rem', lineHeight:1.6, color:'var(--warn-fg)'
           }}>
             <strong>{courseCode} {secLbl}</strong> is currently a{' '}
             <strong>{origInfo ? `${origInfo.label} group (${realOrigDays} day${realOrigDays>1?'s':''} × ${origInfo.duration} min)` : 'single-day'}</strong> section.

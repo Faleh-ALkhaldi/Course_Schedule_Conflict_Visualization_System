@@ -21,8 +21,14 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
   // are disabled. This is purely UX — OH is global per-instructor, so the
   // API can't 409 here; the UI lockdown is the only enforcement axis.
   const { schedule, confirm } = useApp();
-  const isArchived = Boolean(schedule?.archived_at);
-  const lockedTitle = 'Term is archived — unarchive to change office hours.';
+  // NEW-FU-562 (audit-2 P2-8): finalized terms are read-only too, but this only checked
+  // archived_at — so office hours could be edited/deleted on a Finalized term, bypassing the
+  // read-only contract every other surface enforces. The UI lockdown is OH's only enforcement
+  // axis (OH is global per-instructor, no API 409), so it MUST cover finalized.
+  const isArchived = Boolean(schedule?.archived_at) || schedule?.status === 'Finalized';
+  const lockedTitle = schedule?.status === 'Finalized'
+    ? 'Term is finalized — office hours are read-only.'
+    : 'Term is archived — unarchive to change office hours.';
   // NEW-L14: Escape closes the modal (matches the dismiss-on-Escape pattern
   // used in the other modals).
   useEffect(() => {

@@ -348,14 +348,20 @@ class CourseRepository {
       // subquery instead of joining `sections`. Returns one row per affected
       // schedule with its current (locked) status.
       const lockedSchedules = await client.query(`
-        SELECT id, status FROM schedules
+        SELECT id, status, archived_at FROM schedules
         WHERE id IN (SELECT schedule_id FROM sections WHERE course_id = $1)
         FOR UPDATE
       `, [id]);
-      const finalizedHit = lockedSchedules.rows.find(r => r.status === SCHEDULE_STATUS.FINALIZED);
-      if (finalizedHit) {
+      // NEW-FU-562 (audit-2 P1-5/P1-7): refuse if any affected schedule is Finalized OR
+      // ARCHIVED. This guard checked only Finalized, so deleting a course silently wiped
+      // sections from an ARCHIVED (immutable) term — data loss on a protected term.
+      // Mirrors deleteInstructor/deleteVenue. (conflicts.section_*_id is ON DELETE CASCADE,
+      // so the editable-schedule case stays conflict-consistent automatically.)
+      const lockedHit = lockedSchedules.rows.find(
+        r => r.status === SCHEDULE_STATUS.FINALIZED || r.archived_at !== null);
+      if (lockedHit) {
         await client.query('ROLLBACK').catch(() => {});
-        const err = new Error('Cannot delete: course is referenced by a finalized schedule.');
+        const err = new Error('Cannot delete: course is referenced by a finalized or archived schedule.');
         err.status = 409;
         throw err;
       }

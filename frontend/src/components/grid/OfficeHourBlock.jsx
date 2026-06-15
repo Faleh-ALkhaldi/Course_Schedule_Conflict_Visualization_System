@@ -27,7 +27,10 @@ export default function OfficeHourBlock({ officeHour, height, onClick, draggable
   const style = {
     transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined,
     opacity:   isDragging ? 0.4 : 1,
-    cursor:    isArchived ? 'pointer' : 'grab',
+    // NEW-FU-568 (audit-2 P3): the cursor/title must track isLocked (archived OR
+    // Finalized), not just isArchived — otherwise a Finalized term shows a "grab"
+    // cursor + "drag to move" tooltip while the drag is actually disabled.
+    cursor:    isLocked ? 'pointer' : 'grab',
     height:    height ? `${height}px` : '100%',
   };
 
@@ -38,6 +41,8 @@ export default function OfficeHourBlock({ officeHour, height, onClick, draggable
       style={style}
       title={isArchived
         ? `Office Hours: ${start}–${end}  —  click to view (term is archived)`
+        : isLocked
+        ? `Office Hours: ${start}–${end}  —  click to view (term is finalized)`
         : `Office Hours: ${start}–${end}  —  click to edit, drag to move`}
       onClick={e => { e.stopPropagation(); onClick && onClick(); }}
       aria-label={`Office Hours ${start} to ${end}`}

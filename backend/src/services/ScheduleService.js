@@ -1113,6 +1113,13 @@ class ScheduleService {
     const client = await getClient();
     try {
       await client.query('BEGIN');
+      // NEW-FU-571 (audit-2 Phase-11 P3): lock the schedule row so concurrent
+      // revalidations of the SAME schedule serialize. replaceAll is a blind
+      // DELETE-all + re-INSERT, so without this two racing revalidations (each
+      // fired by a different just-committed section edit) could interleave and the
+      // earlier-reading one overwrite the conflicts table with a superseded section
+      // snapshot. The lock makes the last writer reflect the final state.
+      await client.query('SELECT id FROM schedules WHERE id = $1 FOR UPDATE', [scheduleId]);
       const result = await this._evaluateSchedule(scheduleId, client);
       await conflictRepo.replaceAll(scheduleId, result.conflicts, client);
       await client.query('COMMIT');
@@ -1136,6 +1143,64 @@ class ScheduleService {
     const conflictResult = await this.revalidateSchedule(scheduleId);
     if (section) return { section, conflictResult };
     return conflictResult;
+  }
+
+  /**
+   * NEW-FU-563 (audit-2 P2-3): apply a move-only Quick-Fix plan with SERVER-SIDE
+   * re-validation. The client-supplied `moves` are trusted ONLY for *which*
+   * sections to shift and to *what* time — the server independently re-runs the
+   * FULL conflict engine after applying them (under the same lock + transaction)
+   * and ROLLS BACK if the plan introduced any NEW hard conflict (post-hard count
+   * exceeds the pre-move baseline). Without this the apply blindly committed the
+   * client's UPDATEs, so a stale or hand-crafted plan could shift a section onto
+   * another and persist fresh hard conflicts unconditionally — the move-only fix
+   * is supposed to *reduce* conflicts, never manufacture them. Also refreshes the
+   * persisted conflict set so the table isn't left stale if the caller never
+   * follows up with a save.
+   *
+   * @param scheduleId  target schedule (UUID)
+   * @param moves       pre-validated [{ sectionId, startTime:'HH:MM', endTime:'HH:MM' }]
+   * @returns { ok:true, moved:Number, conflictResult } — or throws err.status 409/423.
+   */
+  async applyMovesRevalidated(scheduleId, moves) {
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+      // Same editability row-lock every section writer takes (createSection/
+      // assignSection/extendSection). Refuses FINALIZED / archived schedules.
+      await assertSchedulerEditableLocked(client, scheduleId);
+      // Baseline hard-conflict count BEFORE the moves (the schedule may already
+      // carry pre-existing hards; the invariant is "don't make it worse").
+      const before = await this._evaluateSchedule(scheduleId, client);
+      const beforeHard = before.hardConflicts.length;
+      let moved = 0;
+      for (const m of moves) {
+        const r = await client.query(
+          `UPDATE sections SET start_time = $1, end_time = $2
+             WHERE id = $3 AND schedule_id = $4`,
+          [m.startTime, m.endTime, m.sectionId, scheduleId]);
+        moved += r.rowCount;
+      }
+      // Re-evaluate AFTER the moves; refuse the whole plan if it raised the
+      // hard-conflict count. The catch below performs the ROLLBACK.
+      const after = await this._evaluateSchedule(scheduleId, client);
+      if (after.hardConflicts.length > beforeHard) {
+        const err = new Error('This fix would introduce new conflicts and was not applied. Refresh and try again.');
+        err.status = 409;
+        throw err;
+      }
+      // Persist the refreshed conflict set so a move that is NOT followed by a
+      // save doesn't leave the conflicts table describing the pre-move world.
+      await conflictRepo.replaceAll(scheduleId, after.conflicts, client);
+      await client.query('COMMIT');
+      return { ok: true, moved, conflictResult: after };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      try { client.release(err); } catch { /* ignore */ }
+      throw err;
+    } finally {
+      try { client.release(); } catch { /* already released via catch path */ }
+    }
   }
 
   /**
@@ -1261,11 +1326,17 @@ class ScheduleService {
               [scheduleId, idsToConfirm]
             );
           }
+          // NEW-FU-562 (audit-2 P2-1): mirror the DB UPDATE onto the IN-MEMORY result objects.
+          // The returned conflictResult serializes from these, so without this the just-
+          // authorised softs come back confirmed=false and the UI re-prompts for them.
+          const confirmSet = new Set(idsToConfirm);
+          for (const c of (result.softConflicts || [])) if (confirmSet.has(c.id)) c.confirmed = true;
         } else {
           await client.query(
             `UPDATE conflicts SET confirmed = true WHERE schedule_id = $1 AND severity = 'Soft'`,
             [scheduleId]
           );
+          for (const c of (result.softConflicts || [])) c.confirmed = true;   // audit-2 P2-1: mirror in-memory
         }
       }
       // NEW-FU-42: capture the refreshed schedule row in RETURNING so the

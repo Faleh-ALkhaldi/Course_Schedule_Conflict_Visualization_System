@@ -419,6 +419,28 @@ async function commitRows(rowData, scheduleId) {
       throw err;
     }
 
+    // NEW-FU-570 (audit-2 Phase-11 P2): validate every row through the SAME domain
+    // stack createSection enforces, BEFORE the destructive DELETE below. Derives
+    // has_lab from the imported Lab sections (the file carries no flag) so a
+    // 4-credit course is never persisted unschedulable, and rejects out-of-range /
+    // illegal-pattern sections up front (a clean 400) instead of silently
+    // corrupting or aborting the section loop mid-transaction.
+    const { validateImportRows } = require('../domain/importValidation');
+    const { errors: rowErrors, hasLabByCourse } = validateImportRows(rowData);
+    if (rowErrors.length) {
+      const err = new Error(`Import canceled — ${rowErrors.length} row(s) are invalid, so nothing was changed:\n• ${rowErrors.slice(0, 12).join('\n• ')}`);
+      err.status = 400;
+      throw err;
+    }
+
+    // NEW-FU-570: resolve the schedule's term so newly-created instructors/venues
+    // are stamped term-local (owner_semester) instead of leaking into the global
+    // catalog, and so existing-resource lookups can't bind another term's private
+    // resource (the cross-term contamination the Batch-6 guard blocks for manual
+    // writes — import was the one write path that bypassed it).
+    const ownerRes = await client.query('SELECT semester FROM schedules WHERE id = $1', [scheduleId]);
+    const ownerSemester = ownerRes.rows[0]?.semester ?? null;
+
     for (const row of rowData) {
       const key = row.courseCode.toLowerCase();
       if (!courseByCode.has(key)) {
@@ -427,12 +449,15 @@ async function commitRows(rowData, scheduleId) {
           ['Freshman','Sophomore','Junior','Senior'].find(
             l => l.toLowerCase() === row.academicLevel?.toLowerCase()
           ) ?? 'Freshman';
+        // NEW-FU-570 (audit-2 Phase-11 P2): persist the derived has_lab so a
+        // 4-credit course imports schedulable (it was defaulting FALSE, which the
+        // app treats as impossible → every later add-section failed pattern validation).
         const res = await client.query(`
-          INSERT INTO courses (course_code, name, credits, academic_level, category, num_sections)
-          VALUES ($1,$2,$3,$4,$5,$6)
+          INSERT INTO courses (course_code, name, credits, academic_level, category, num_sections, has_lab)
+          VALUES ($1,$2,$3,$4,$5,$6,$7)
           ON CONFLICT (course_code) DO UPDATE SET name=EXCLUDED.name
           RETURNING id, course_code, name, academic_level, category, num_sections
-        `, [row.courseCode, row.courseName, row.credits, level, isGR?'GR':'UG', 1]);
+        `, [row.courseCode, row.courseName, row.credits, level, isGR?'GR':'UG', 1, hasLabByCourse.get(key) || false]);
         courseByCode.set(key, res.rows[0]);
       }
     }
@@ -441,7 +466,12 @@ async function commitRows(rowData, scheduleId) {
     const importedInstrNames = [...new Set(
       rowData.map(r => r.instructorName?.trim()).filter(Boolean).map(n => n.toLowerCase())
     )];
-    const existingInstrsRes = await client.query(`SELECT id, name FROM instructors`);
+    // NEW-FU-570 (audit-2 Phase-11 P2): scope to GLOBAL (owner_semester IS NULL) or
+    // THIS term's resources so import never binds another term's private instructor.
+    const existingInstrsRes = await client.query(
+      `SELECT id, name FROM instructors WHERE owner_semester IS NULL OR owner_semester = $1`,
+      [ownerSemester]
+    );
     const instrByName = new Map(existingInstrsRes.rows.map(i => [i.name?.toLowerCase(), i]));
 
     for (const name of importedInstrNames) {
@@ -449,14 +479,21 @@ async function commitRows(rowData, scheduleId) {
         const displayName = rowData.find(r => r.instructorName?.toLowerCase() === name)?.instructorName ?? name;
         const slug  = displayName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '').toLowerCase() || 'instructor';
         let   email = `${slug}@dept.edu`;
+        // Email is unique PER SCOPE post-migration-021: avoid colliding with a
+        // global OR a this-term instructor of the same email.
         for (let i = 2; i < 100; i++) {
-          const probe = await client.query(`SELECT 1 FROM instructors WHERE email = $1`, [email]);
+          const probe = await client.query(
+            `SELECT 1 FROM instructors WHERE email = $1 AND (owner_semester = $2 OR owner_semester IS NULL)`,
+            [email, ownerSemester]
+          );
           if (!probe.rowCount) break;
           email = `${slug}_${i}@dept.edu`;
         }
+        // NEW-FU-570 (audit-2 Phase-11 P2): stamp owner_semester so the imported
+        // instructor is term-local, not a global-catalog leak.
         const res = await client.query(
-          `INSERT INTO instructors (name, email) VALUES ($1, $2) RETURNING id, name`,
-          [displayName, email]
+          `INSERT INTO instructors (name, email, owner_semester) VALUES ($1, $2, $3) RETURNING id, name`,
+          [displayName, email, ownerSemester]
         );
         instrByName.set(name, res.rows[0]);
       }
@@ -466,18 +503,27 @@ async function commitRows(rowData, scheduleId) {
     const importedVenueNames = [...new Set(
       rowData.map(r => r.venueName?.trim()).filter(Boolean).map(n => n.toLowerCase())
     )];
-    const existingVenuesRes = await client.query(`SELECT id, name FROM venues`);
+    // NEW-FU-570 (audit-2 Phase-11 P2): scope to GLOBAL or THIS term (see instructors).
+    const existingVenuesRes = await client.query(
+      `SELECT id, name FROM venues WHERE owner_semester IS NULL OR owner_semester = $1`,
+      [ownerSemester]
+    );
     const venueByName = new Map(existingVenuesRes.rows.map(v => [v.name?.toLowerCase(), v]));
 
     for (const name of importedVenueNames) {
       if (!venueByName.has(name)) {
         const displayName = rowData.find(r => r.venueName?.toLowerCase() === name)?.venueName ?? name;
+        // NEW-FU-570 (audit-2 Phase-11 P2): migration 021 dropped the global
+        // UNIQUE(name) for partial per-scope indexes, so the old `ON CONFLICT (name)`
+        // had NO matching constraint and threw — importing ANY new venue was broken.
+        // The scoped lookup above already reused an existing global/this-term venue,
+        // so a name reaching here is genuinely new for this scope: plain INSERT,
+        // stamped term-local.
         const res = await client.query(
-          `INSERT INTO venues (name, type, capacity)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+          `INSERT INTO venues (name, type, capacity, owner_semester)
+           VALUES ($1, $2, $3, $4)
            RETURNING id, name`,
-          [displayName, 'LectureHall', 30]
+          [displayName, 'LectureHall', 30, ownerSemester]
         );
         venueByName.set(name, res.rows[0]);
       }

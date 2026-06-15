@@ -551,6 +551,12 @@ export default function SchedulerPage() {
         // SectionModal already sends; the backend now also derives type from
         // the number as a second line of defence.
         sectionType:   sec.sectionType   ?? sec.section_type,
+        // NEW-FU-562 (audit-2 P1-1): forward GENDER through this drag-triggered
+        // delete+recreate restructure. Without it the recreate defaulted to 'M' and
+        // silently flipped a female lecture section to male (identity = course+number+
+        // gender) — the same corruption fixed in the SectionModal path (P1-5), but this
+        // second restructure path (cross-day-group drag) was missed.
+        gender:        sec.gender        ?? sec.section_gender ?? 'M',
         days:          newDays,
         day:           newDays[0],
         startTime:     newStartTime,

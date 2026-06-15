@@ -72,7 +72,11 @@ services:
       - key: VITE_DEPT_ID
         value: SWE-DEPT
       - key: VITE_SEMESTER
-        value: Fall-2025
+        # NEW-FU-562 (audit-2 P2-14): migration 011 renames the legacy "Fall-2025" seed
+        # label in-place to canonical code "251"; the code default, seed, and
+        # .env.production.example all use "251". A stale "Fall-2025" here made a fresh prod
+        # load boot a phantom empty term instead of the seeded 251. Quoted so YAML keeps it a string.
+        value: "251"
     routes:
       - type: rewrite
         source: /*

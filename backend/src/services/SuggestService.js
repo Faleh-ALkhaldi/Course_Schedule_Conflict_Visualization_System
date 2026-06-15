@@ -429,6 +429,10 @@ function scoreCombo(task, slot, instructorId, working, ohMap) {
           // Adjacent-level only.
           const otherLevel = ACADEMIC_LEVEL_NUM[(s.academicLevel ?? '').toUpperCase()];
           if (otherLevel === undefined) continue;
+          // NEW-FU-562 (audit-2 P2-15): mirror R02Rule's Grad↔Grad exemption (FU-275) — a
+          // same-tier Graduate overlap is an elective choice, not an R-02. The engine skips
+          // it but this greedy scorer didn't, over-penalizing multi-section Graduate placements.
+          if (task.academicLevel === 'Graduate' && s.academicLevel === 'Graduate') continue;
           // NEW-FU-359 (Phase 35): R-02 fires for diff <= 1 (same-level
           // AND adjacent-level), not just adjacent. The Phase 34 check
           // `!== 1` excluded same-level (diff=0) — that's why Graduate↔

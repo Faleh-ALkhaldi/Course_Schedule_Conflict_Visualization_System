@@ -31,10 +31,10 @@ router.param('venueId',      validateUuid('venueId'));
 router.param('sectionId',    validateUuid('sectionId'));
 router.param('ohId',         validateUuid('ohId'));
 
-// NEW-H5: in-process token-bucket rate limiter for /auth/login. A real
-// production deployment behind multiple workers should use a shared store
-// (Redis), but this dramatically slows brute-force from a single IP and
-// is acceptable for the current single-instance topology.
+// NEW-H5: in-process token-bucket rate limiter. A real production deployment
+// behind multiple workers should use a shared store (Redis), but this
+// dramatically slows abuse from a single IP and is acceptable for the current
+// single-instance topology.
 //
 // NEW-FU-37 made req.ip reliable on Render (trust proxy = 1). NEW-FU-53
 // further hardens the bucket-key resolution:
@@ -45,33 +45,24 @@ router.param('ohId',         validateUuid('ohId'));
 //   3. 'unknown'                — last-resort; gets a TIGHTER limit so a
 //                                 flood of header-less requests can only
 //                                 lock out itself, not legitimate clients.
-const LOGIN_WINDOW_MS    = 60_000;
-const LOGIN_MAX          = 8;
-const LOGIN_MAX_UNKNOWN  = 3;   // NEW-FU-53: stricter limit for unidentifiable clients
-const loginAttempts      = new Map();
-function rateLimitLogin(req, res, next) {
-  const ip   = req.ip || req.socket?.remoteAddress || null;
-  const key  = ip || 'unknown';
-  const max  = ip ? LOGIN_MAX : LOGIN_MAX_UNKNOWN;
-  const now  = Date.now();
-  let rec    = loginAttempts.get(key);
-  if (!rec || now > rec.resetAt) {
-    rec = { count: 0, resetAt: now + LOGIN_WINDOW_MS };
-    loginAttempts.set(key, rec);
-  }
-  rec.count++;
-  if (rec.count > max) {
-    const retrySec = Math.max(1, Math.ceil((rec.resetAt - now) / 1000));
-    res.setHeader('Retry-After', retrySec);
-    return res.status(429).json({ error: `Too many login attempts. Try again in ${retrySec}s.` });
-  }
-  next();
-}
-// Sweep stale buckets every 5 min so the Map can't grow unbounded.
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of loginAttempts) if (now > v.resetAt) loginAttempts.delete(k);
-}, 5 * 60_000).unref();
+//
+// NEW-FU-564 (audit-2 P2-13): the limiter implementation was generalised into a
+// factory and extracted to middleware/rateLimit.js (so it can be unit-tested and
+// reused). The expensive *solver* endpoints (preview / auto-fix / quick-fix /
+// suggest) each run the FULL conflict engine over the whole schedule; an
+// unthrottled client (or a runaway client loop) could pin CPU — so they now get
+// their own generous-but-bounded bucket alongside the original login limiter.
+const { makeRateLimiter } = require('../middleware/rateLimit');
+const rateLimitLogin  = makeRateLimiter({ windowMs: 60_000, max: 8,  maxUnknown: 3,  message: 'Too many login attempts.' });
+// Two solver budgets (NEW-FU-569, audit-2 Phase-11 P3): the INTERACTIVE dry-runs
+// (conflicts/preview, suggest-recommend) fire on a ~300–350 ms debounce as the
+// user edits, so they get a high ceiling a single editing session can never reach
+// (the debounce already caps real use near ~170/min) while still bounding a
+// scripted flood. The heavier/mutating ops (suggest, auto-fix, quick-fix + their
+// applies) are user-triggered a handful of times per minute, so they keep a tight
+// bucket.
+const rateLimitInteractive = makeRateLimiter({ windowMs: 60_000, max: 200, maxUnknown: 60, message: 'Too many preview requests.' });
+const rateLimitSolver      = makeRateLimiter({ windowMs: 60_000, max: 60,  maxUnknown: 20, message: 'Too many schedule-solver requests.' });
 
 // Public
 router.get ('/health',     (req, res) => res.json({ status: 'ok' }));
@@ -145,12 +136,12 @@ router.post('/schedules',                           ctrl.createSchedule);
 router.get   ('/schedules/:scheduleId/sections', ctrl.getSections);
 router.post  ('/schedules/:scheduleId/sections', ctrl.createSection);
 // NEW-FU-534 (Batch 12): dry-run the FULL conflict engine for a proposed change.
-router.post  ('/schedules/:scheduleId/conflicts/preview', ctrl.previewConflicts);
+router.post  ('/schedules/:scheduleId/conflicts/preview', rateLimitInteractive, ctrl.previewConflicts);
 // NEW-FU-541 (Batch 13 Issue 2): constrained, move-only Quick Fix for the edit/add
 // panels — plan reschedules OTHER groups so the proposed change fits; apply commits
 // only those time moves (never drops sections, never assigns dummies).
-router.post  ('/schedules/:scheduleId/conflicts/auto-fix',       ctrl.autoFixAround);
-router.post  ('/schedules/:scheduleId/conflicts/auto-fix/apply', refuseIfActiveTermArchived, ctrl.autoFixAroundApply);
+router.post  ('/schedules/:scheduleId/conflicts/auto-fix',       rateLimitSolver, ctrl.autoFixAround);
+router.post  ('/schedules/:scheduleId/conflicts/auto-fix/apply', rateLimitSolver, refuseIfActiveTermArchived, ctrl.autoFixAroundApply);
 router.put   ('/sections/:sectionId',            ctrl.updateSection);
 router.delete('/sections/:sectionId',            ctrl.deleteSection);
 // NEW-FU-277: extend a section group with additional meeting days. The
@@ -165,17 +156,17 @@ router.get   ('/schedules/:scheduleId/courses/:courseId/next-section-number',
 // ── Conflict & Save ───────────────────────────────────────────────────────────
 router.get ('/schedules/:scheduleId/conflicts', ctrl.getConflicts);
 // Suggest regenerates the draft — non-destructive, scheduler-accessible.
-router.post('/schedules/:scheduleId/suggest',   ctrl.suggestSchedule);
+router.post('/schedules/:scheduleId/suggest',   rateLimitSolver, ctrl.suggestSchedule);
 // NEW-FU-261: read-only recommendation endpoint. Synthesizes a default
 // per-course config and runs the suggester's greedy in dry-run mode;
 // returns the recommended placements + capacity warnings without
 // touching the DB. Drives the Suggest modal's pre-fill on open.
-router.get ('/schedules/:scheduleId/suggest-recommend', ctrl.suggestRecommend);
+router.get ('/schedules/:scheduleId/suggest-recommend', rateLimitInteractive, ctrl.suggestRecommend);
 // NEW-FU-318 (Phase 29): Quick Fix resolver — generates a plan of
 // minimally-destructive ops that resolve conflicts, then applies
 // the user's selected subset atomically.
-router.post('/schedules/:scheduleId/quick-fix',       ctrl.quickFixPlan);
-router.post('/schedules/:scheduleId/quick-fix/apply', refuseIfActiveTermArchived, ctrl.quickFixApply);
+router.post('/schedules/:scheduleId/quick-fix',       rateLimitSolver, ctrl.quickFixPlan);
+router.post('/schedules/:scheduleId/quick-fix/apply', rateLimitSolver, refuseIfActiveTermArchived, ctrl.quickFixApply);
 // NEW-M5: finalizing a schedule is destructive (it locks state); admin only.
 router.post('/schedules/:scheduleId/save',      requireRole('admin'), ctrl.saveSchedule);
 

@@ -124,7 +124,15 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
   const [ohList,    setOhList]    = useState([]);
   const [ohLoading, setOhLoading] = useState(false);
 
-  // Load office hours when an instructor is selected
+  // Load office hours when an instructor is selected, AND re-sync whenever the
+  // grid's office-hour data changes. NEW-FU-566 (audit-2 P2-7): the sidebar list
+  // kept its OWN fetch keyed only on [filterId, view], so an OH edited or deleted
+  // through OfficeHourModal (opened from a grid block) refreshed the grid via
+  // loadView but left this list stale until the instructor was re-selected.
+  // Depending on `officeHours` (the context value loadView refreshes on every OH
+  // mutation) re-runs this fetch so the authoritative list stays in sync. The
+  // fetch only WRITES local ohList — it never dispatches officeHours — so there's
+  // no feedback loop.
   React.useEffect(() => {
     if (view === VIEWS.TEACHER && filterId) {
       setOhLoading(true);
@@ -135,7 +143,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
     } else {
       setOhList([]);
     }
-  }, [filterId, view]);
+  }, [filterId, view, officeHours]);
 
   // NEW-FU-496 (Phase 120): office hours are 08:00–16:00. clampOH keeps the
   // inputs inside the window (runtime prevention); handleAddOH checks the window
@@ -584,7 +592,10 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                 </form>
               )}
 
-              {ohLoading && <p className="sp-empty">Loading…</p>}
+              {/* NEW-FU-566 (audit-2 P2-7): only show the spinner on the FIRST
+                  load (empty list). Silent re-syncs of an already-populated list
+                  keep the rows visible instead of flashing "Loading…". */}
+              {ohLoading && ohList.length === 0 && <p className="sp-empty">Loading…</p>}
               {!ohLoading && ohList.length === 0 && (
                 <p className="sp-empty">No office hours set</p>
               )}
