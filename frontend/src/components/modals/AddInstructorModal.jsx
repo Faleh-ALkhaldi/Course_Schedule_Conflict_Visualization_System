@@ -85,7 +85,7 @@ function plusOneHourClamped(hhmm) {
 // sidebar list via the ADD_INSTRUCTOR reducer action.
 export default function AddInstructorModal({ onClose, showToast, onCreated }) {
   useFocusTrap();
-  const { addInstructor } = useApp();
+  const { addInstructor, instructors } = useApp();
 
   // Escape closes — universal modal contract.
   useEffect(() => {
@@ -179,7 +179,22 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
     : nameTokens.length < 2 ? 'Enter a full name — first and last name, separated by a space.'
     : !tokensAreLetters ? 'Each name part must be English letters only.'
     : '';
-  const canSubmit = isFullName && nameCharsetOk && emailLooksValid && ohValid && !busy;
+  // NEW-FU-575 (Batch 22): RUNTIME duplicate detection. The backend enforces per-term
+  // uniqueness on the email (and a same name derives the same email), but it only
+  // rejected a duplicate AFTER submit. Detect it AS THE USER TYPES — compare the name
+  // and email case-insensitively against the current term's instructor list (the same
+  // scope the backend checks) — so the warning shows immediately and the Add button is
+  // disabled. This is the same component the sidebar and the Add-Section "+ New" both
+  // open, so both now behave identically (the in-panel one is no longer a divergent copy).
+  const existingInstructors = instructors || [];
+  const dupEmail = emailLooksValid && existingInstructors.some(i => (i.email || '').trim().toLowerCase() === trimmedEmail.toLowerCase());
+  const dupName  = isFullName     && existingInstructors.some(i => (i.name  || '').trim().toLowerCase() === trimmedName.toLowerCase());
+  const duplicateError = dupEmail
+    ? 'An instructor with this email already exists in this term.'
+    : dupName
+    ? 'An instructor with this name already exists in this term.'
+    : '';
+  const canSubmit = isFullName && nameCharsetOk && emailLooksValid && ohValid && !duplicateError && !busy;
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -265,7 +280,10 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
               : <p className="sm-hint">Pre-filled from the usual pattern — adjust if you like (8:00 AM–4:00 PM). You can add more later.</p>}
           </div>
 
-          {error && <div className="sm-error">{error}</div>}
+          {/* NEW-FU-575 (Batch 22): show the RUNTIME duplicate warning here (before
+              submit) in the same place the backend error would appear; the backend
+              remains the authoritative backstop. */}
+          {(duplicateError || error) && <div className="sm-error" role="alert">{duplicateError || error}</div>}
 
           <div className="sm-actions">
             <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>

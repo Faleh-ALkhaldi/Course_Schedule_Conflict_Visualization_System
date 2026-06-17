@@ -9,17 +9,18 @@ import './SectionModal.css';
 // Per-format presentation metadata. The button label, file picker accept
 // list, and validation messaging all key off this table so adding a new
 // format only requires adding one entry.
+// NEW-FU-574 (Batch 21): dropped the emoji glyphs for a clean, formal look.
 const EXPORT_FORMATS = [
-  { id: 'xlsx', label: 'Excel',  icon: '📊', ext: '.xlsx', desc: 'Round-trips with import. Best for editing.' },
-  { id: 'pdf',  label: 'PDF',    icon: '📕', ext: '.pdf',  desc: 'Printable, fixed layout.' },
-  { id: 'docx', label: 'Word',   icon: '📝', ext: '.docx', desc: 'Editable document with tables.' },
-  { id: 'png',  label: 'Image',  icon: '🖼️', ext: '.png',  desc: 'Snapshot of the current view (rendered in browser).' },
+  { id: 'xlsx', label: 'Excel',  ext: '.xlsx', desc: 'Round-trips with import. Best for editing.' },
+  { id: 'pdf',  label: 'PDF',    ext: '.pdf',  desc: 'Printable, fixed layout.' },
+  { id: 'docx', label: 'Word',   ext: '.docx', desc: 'Editable document with tables.' },
+  { id: 'png',  label: 'Image',  ext: '.png',  desc: 'Snapshot of the current view (rendered in browser).' },
 ];
 
 const IMPORT_FORMATS = [
-  { id: 'xlsx', label: 'Excel', icon: '📊', accept: '.xlsx' },
-  { id: 'docx', label: 'Word',  icon: '📝', accept: '.docx' },
-  { id: 'pdf',  label: 'PDF',   icon: '📕', accept: '.pdf' },
+  { id: 'xlsx', label: 'Excel', accept: '.xlsx' },
+  { id: 'docx', label: 'Word',  accept: '.docx' },
+  { id: 'pdf',  label: 'PDF',   accept: '.pdf' },
 ];
 const IMPORT_ACCEPT = IMPORT_FORMATS.map(f => f.accept).join(',');
 
@@ -46,9 +47,11 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
 
   const { view, filterId, instructors, venues, schedule, loadView, loadReference, dispatch, clearHistory } = useApp();
 
-  // NEW-FU-228 (Phase 97): open on the caller's tab so the top-bar "Import"
-  // button lands directly on Import instead of burying it behind Export.
-  const [tab,      setTab]      = useState(initialTab); // 'export' | 'import'
+  // NEW-FU-574 (Batch 21): the modal is single-purpose — it opens straight from the
+  // toolbar's Export OR Import button (initialTab), and the Export/Import tab switcher
+  // was removed (Export was redundantly exposing an Import entry point that already has
+  // its own dedicated button). `tab` is therefore fixed to whichever button opened it.
+  const tab = initialTab; // 'export' | 'import'
   const [choice,   setChoice]   = useState('full');
   const [format,   setFormat]   = useState('xlsx');
   const [instrId,  setInstrId]  = useState(filterId ?? '');
@@ -176,16 +179,12 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
 
   return (
     <div className="sm-overlay" onClick={e => e.target===e.currentTarget && onClose()}>
-      <div className="sm-card" role="dialog" aria-modal="true" aria-label="Export schedule" style={{ width:560, maxWidth:'95vw' }}>
+      <div className="sm-card" role="dialog" aria-modal="true" aria-label={tab==='import' ? 'Import schedule' : 'Export schedule'} style={{ width:560, maxWidth:'95vw' }}>
         <div className="sm-header">
-          <h2 className="sm-title">📊 Schedule Data</h2>
+          {/* NEW-FU-574 (Batch 21): single-purpose title, no emoji; the Export/Import
+              tab switcher was removed (Import has its own dedicated toolbar button). */}
+          <h2 className="sm-title">{tab==='import' ? 'Import Schedule' : 'Export Schedule'}</h2>
           <button className="sm-close" onClick={onClose}>×</button>
-        </div>
-
-        {/* Tabs */}
-        <div className="sm-tabs">
-          <button className={tab==='export'?'active':''} onClick={()=>setTab('export')}>↓ Export</button>
-          <button className={tab==='import'?'active':''} onClick={()=>setTab('import')}>↑ Import</button>
         </div>
 
         <div className="sm-form" style={{ padding:'16px 24px 24px' }}>
@@ -322,8 +321,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                           transition:'background .15s, border-color .15s',
                         }}
                       >
-                        <span style={{ fontSize:'1.4rem', lineHeight:1 }}>{f.icon}</span>
-                        <span>{f.label}</span>
+                        <span style={{ fontWeight:700, fontSize:'.92rem' }}>{f.label}</span>
                         <span style={{ fontSize:'.65rem', color:'var(--slate-500)' }}>{f.ext}</span>
                       </button>
                     );
@@ -358,7 +356,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                 color:'var(--text-secondary)', lineHeight:1.6, marginBottom:12
               }}>
                 <strong>Supported formats:</strong>{' '}
-                {IMPORT_FORMATS.map(f => `${f.icon} ${f.label} (${f.accept})`).join(' · ')}
+                {IMPORT_FORMATS.map(f => `${f.label} (${f.accept})`).join(' · ')}
                 <br/>
                 Each file must contain a table with columns:<br/>
                 <code style={{fontSize:'.75rem',background:'var(--slate-100)',
@@ -411,7 +409,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
 
               {importing && (
                 <div style={{textAlign:'center',color:'var(--teal-500)',padding:'8px',fontSize:'.85rem'}}>
-                  ⏳ Importing…
+                  Importing…
                 </div>
               )}
 
@@ -442,7 +440,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                     ? { background:'var(--slate-200)', borderColor:'var(--slate-200)', color:'var(--slate-500)' }
                     : undefined}
                 >
-                  {importing ? '⏳ Importing…' : 'Import →'}
+                  {importing ? 'Importing…' : 'Import →'}
                 </button>
               </div>
             </>

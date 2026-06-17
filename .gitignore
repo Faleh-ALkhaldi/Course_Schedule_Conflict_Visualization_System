@@ -32,3 +32,5 @@ Thumbs.db
 
 # local tooling state
 .checkpoints/
+graphify-out/cost.json
+graphify-out/cache/

@@ -2,8 +2,10 @@
 // SINGLE SOURCE OF TRUTH shared by the API (create/update) and the cleanup; the
 // frontend mirrors the same regex for live validation.
 
-// Code: exactly "SWE " + a 3-digit number in 101..599. The department is always
+// Code: exactly "SWE " + a 3-digit number in 101..699. The department is always
 // SWE (this is a Software Engineering scheduler), so no other prefix is allowed.
+// NEW-FU-576 (Batch 22): upper bound raised 599 → 699 — graduate courses run 500–699
+// (e.g. SWE 610 Thesis exists in the catalog), which the old 599 cap wrongly rejected.
 const COURSE_CODE_RE = /^SWE (\d{3})$/;
 
 function courseCodeError(code) {
@@ -11,10 +13,33 @@ function courseCodeError(code) {
   const m = COURSE_CODE_RE.exec(c);
   if (!m) return 'Course code must be "SWE" + space + a 3-digit number, e.g. "SWE 206".';
   const n = parseInt(m[1], 10);
-  if (n < 101 || n > 599) return `Course number must be 101–599 (got ${m[1]}).`;
+  if (n < 101 || n > 699) return `Course number must be 101–699 (got ${m[1]}).`;
   return null;
 }
 function isValidCourseCode(code) { return courseCodeError(code) === null; }
+
+// NEW-FU-576 (Batch 22): the course NUMBER fixes the academic level/category —
+// 100–199 Freshman, 200–299 Sophomore, 300–399 Junior, 400–499 Senior, 500–699 Graduate.
+function levelForCourseNumber(n) {
+  if (n >= 100 && n <= 199) return { category: 'UG', level: 'Freshman' };
+  if (n >= 200 && n <= 299) return { category: 'UG', level: 'Sophomore' };
+  if (n >= 300 && n <= 399) return { category: 'UG', level: 'Junior' };
+  if (n >= 400 && n <= 499) return { category: 'UG', level: 'Senior' };
+  if (n >= 500 && n <= 699) return { category: 'GR', level: 'Graduate' };
+  return null;
+}
+// Backstop for the frontend's live check: the chosen academic level/category must agree
+// with what the course number implies. Returns null when the code is malformed
+// (courseCodeError owns that) or when level + number already agree.
+function courseCodeLevelError(code, academicLevel, category) {
+  const m = COURSE_CODE_RE.exec(String(code ?? '').trim());
+  if (!m) return null;
+  const expected = levelForCourseNumber(parseInt(m[1], 10));
+  if (!expected) return null;
+  if (category === expected.category && academicLevel === expected.level) return null;
+  const want = expected.category === 'GR' ? 'Graduate' : `Undergraduate ${expected.level}`;
+  return `SWE ${m[1]} is a ${expected.level} course — its academic level must be ${want} to match the number.`;
+}
 
 // Name: a real, multi-word title in ENGLISH only — start with a letter, only
 // English letters / digits / spaces / basic title punctuation (incl. apostrophe).
@@ -69,4 +94,5 @@ module.exports = {
   isValidCourseCode, courseCodeError,
   isValidCourseName, courseNameError,
   courseFlagError, creditsFlagError,
+  levelForCourseNumber, courseCodeLevelError,
 };

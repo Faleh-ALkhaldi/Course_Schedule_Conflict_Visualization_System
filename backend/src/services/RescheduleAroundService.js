@@ -148,7 +148,18 @@ function planRescheduleAround(ctx) {
       const movable = sides.map(k => byKey.get(k)).filter(g => g && g.movable);
       if (movable.length === 0) return false;          // unfixable conflict → dead branch
       const free = movable.filter(g => !frozen.has(g.key));
-      if (free.length === 0) continue;                 // all its movers already placed; try another
+      // NEW-FU-577 (Batch 23): a NEW conflict whose only movable participants are all
+      // FROZEN can never be cleared on THIS path — a frozen group won't relocate again
+      // until we backtrack, and moving any group NOT party to this conflict cannot
+      // separate the two overlapping sections. So this branch is dead → prune it.
+      // The old `continue` (skip this conflict, work another) kept the branch alive: it
+      // chased unrelated cascades until the NODE_BUDGET was exhausted, then reported
+      // `feasible:false` for schedules that DO have a clean reschedule — the panel's
+      // false "Schedule is tight". Pruning here lets the responsible (shallower) group
+      // try its remaining slots instead of burning the budget on a doomed subtree.
+      // Strictly safe: the `continue` path could never reach 0 new conflicts while this
+      // conflict stood, so no feasible plan is lost — only wasted search.
+      if (free.length === 0) return false;             // only mover(s) frozen → doomed branch, prune
       if (!pick || free.length < pick.length) pick = free;
       if (pick.length === 1) break;
     }

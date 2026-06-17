@@ -1084,7 +1084,15 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     return (
       <>
         <p className="sm-inline-error" role="alert">
-          <Ico name="alert" /> <span>Schedule is tight — changing this section's meeting time will cause conflicts.</span>
+          <Ico name="alert" /> <span>Schedule is tight — no retiming of this or other sections clears the conflict.</span>
+        </p>
+        {/* NEW-FU-574 (Batch 21): the panel Quick Fix is RETIME-ONLY (a cascading
+            move search — already exhausted here). For broader resolutions the panel
+            intentionally doesn't attempt — reassigning instructors/venues or dropping a
+            section — point the user at the grid resolver so "tight" is a path, not a
+            dead end. */}
+        <p className="sm-inline-hint">
+          Try a different time or day-pattern — or save and use <strong>Quick&nbsp;Fix&nbsp;conflicts</strong> (in the Conflicts panel), which can also reassign instructors and venues.
         </p>
         <label className="sm-override-check">
           <input type="checkbox" checked={overrideConflict} onChange={e=>setOverrideConflict(e.target.checked)} />
@@ -1560,10 +1568,17 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               </div>
             )}
 
-            {/* NEW-FU-277 (Phase 53 #4): add-mode conflict preview. */}
+            {/* NEW-FU-277 (Phase 53 #4): conflict preview. NEW-FU-574 (Batch 21): this is
+                now the SINGLE conflict box for this form (add AND edit-Details). The header
+                is mode-aware — "Submitting would create…" while adding (the section doesn't
+                exist yet), "This section is in…" while editing — and the verbatim edit-only
+                second box that used to render lower down was removed (it showed the same
+                array: liveConflicts === effectiveConflicts in edit mode). */}
             {effectiveConflicts.length > 0 && (
               <div className="sm-info-box sm-info-warn">
-                <strong><Ico name="alert" /> Submitting would create {effectiveConflicts.length} conflict{effectiveConflicts.length !== 1 ? 's' : ''}:</strong>
+                <strong><Ico name="alert" /> {mode === 'edit'
+                  ? `This section is in ${effectiveConflicts.length} conflict${effectiveConflicts.length !== 1 ? 's' : ''}:`
+                  : `Submitting would create ${effectiveConflicts.length} conflict${effectiveConflicts.length !== 1 ? 's' : ''}:`}</strong>
                 <ul className="sm-conflict-list">
                   {effectiveConflicts.map((f, i) => (
                     <li key={i}>
@@ -1580,7 +1595,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               </div>
             )}
             {effectiveConflicts.length === 0 && !serverPreview.stale && form.courseId && !courseIsExternal && !durationError && !timeError && (
-              <div className="sm-info-box sm-info-ok"><Ico name="check" /> <span>No conflicts would be created.</span></div>
+              <div className="sm-info-box sm-info-ok"><Ico name="check" /> <span>{mode === 'edit' ? 'No conflicts for this section.' : 'No conflicts would be created.'}</span></div>
             )}
 
             {mode==='edit' && (
@@ -1629,24 +1644,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               </>
             )}
 
-            {/* NEW-FU-510 (Batch 1): EDIT-mode LIVE conflict panel — recomputes
-                from the current form, excludes this section's own group. */}
-            {mode==='edit' && liveConflicts.length > 0 && (
-              <div className="sm-info-box sm-info-warn">
-                <strong><Ico name="alert" /> This section is in {liveConflicts.length} conflict{liveConflicts.length!==1?'s':''}:</strong>
-                <ul className="sm-conflict-list">
-                  {liveConflicts.map((f, i) => (
-                    <li key={i}>
-                      <span className={`sm-sev sm-sev-${(f.severity||'').toLowerCase()}`}>{f.severity}</span>
-                      {/* NEW-FU-472: plain message only — no raw rule code */}{f.msg ?? f.description}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {mode==='edit' && liveConflicts.length === 0 && (
-              <div className="sm-info-box sm-info-ok"><Ico name="check" /> <span>No conflicts for this section.</span></div>
-            )}
+            {/* NEW-FU-574 (Batch 21): removed the duplicate edit-only conflict box that
+                used to render here ("This section is in N conflicts"). In edit mode
+                liveConflicts === effectiveConflicts (see its definition), so the
+                mode-aware box above already shows exactly these conflicts — this was a
+                verbatim second copy that produced the doubled box in the Details tab. */}
 
             {error && <div className="sm-error" role="alert"><Ico name="alert" /> <span>{error}</span></div>}
             <div className="sm-actions">

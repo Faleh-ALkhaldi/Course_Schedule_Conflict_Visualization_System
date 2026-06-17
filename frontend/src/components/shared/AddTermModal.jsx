@@ -234,7 +234,7 @@ export function AddTermModal({ existingCodes, onClose, onCreated }) {
                     term in the SAME season family (Fall ← Fall,
                     Spring ← Spring, Summer ← Summer). Summer no
                     longer starts blank by default. */}
-                📋 Will copy from the nearest existing {preview.season} term
+                Will copy from the nearest existing {preview.season} term
                 (or start blank if no {preview.season} term exists yet).
               </div>
             </div>

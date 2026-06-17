@@ -369,7 +369,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
         if (dV) parts.push(`${dV} venue${dV > 1 ? 's' : ''}`);
         return (
           <div className="sp-dummy-advisory" role="status">
-            <span className="sp-dummy-advisory-icon" aria-hidden="true">🧩</span>
+            <span className="sp-dummy-advisory-icon" aria-hidden="true"><Ico name="info" /></span>
             <div className="sp-dummy-advisory-text">
               <strong>To implement this schedule for real, add {parts.join(' and ')}.</strong>
               <span> These swap out the “dummy” placeholders Suggest added — creating a real instructor or venue replaces one automatically.</span>
@@ -737,7 +737,12 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
               ...Object.keys(grouped).filter(l => !LEVEL_ORDER.includes(l)),
             ];
             return orderedLevels.map(level => {
-              const cs = grouped[level];
+              // NEW-FU-577 (Batch 22): sort each tier's courses by course NUMBER so a
+              // newly added course slots into numeric order (e.g. SWE 564 between 555 and
+              // 587) instead of appending to the bottom of its tier in insertion order.
+              const cs = [...grouped[level]].sort((a, b) =>
+                (a.course_code || a.courseCode || '').localeCompare(
+                  b.course_code || b.courseCode || '', undefined, { numeric: true }));
               return (
             <div key={level} className="sp-level-group">
               <div className="sp-level-header" style={{color: LEVEL_COLORS[level]?.text, borderColor: LEVEL_COLORS[level]?.border}}>

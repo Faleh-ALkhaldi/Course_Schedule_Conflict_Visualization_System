@@ -2091,7 +2091,15 @@ class QuickFixService {
       // concurrent edit between plan() and apply() can make an op worse; we refuse
       // the whole batch below if the hard count rises (mirrors the TOCTOU hardening
       // ScheduleService.applyMovesRevalidated / FU-563 added to the move-only apply).
-      const baselineHard = (await svc._evaluateSchedule(scheduleId, client)).hardConflicts.length;
+      // NEW-FU-574 (Batch 21): also baseline the WEIGHTED conflict cost (the same
+      // metric plan() optimizes). The old gate checked only hard COUNT, so an applied
+      // (subset of a) plan could still RAISE the soft-conflict count and "succeed" — the
+      // user saw the grid Quick Fix add conflicts. Gating on weighted cost too makes the
+      // apply a guaranteed net improvement (or neutral): it can never leave the schedule
+      // worse by the planner's own cost function.
+      const before = await svc._evaluateSchedule(scheduleId, client);
+      const baselineHard = before.hardConflicts.length;
+      const baselineWeighted = weightedCost(before.conflicts);
       // NEW-FU-426 (Phase 105): resolve the owning term once so any minted
       // placeholder is tagged term-local (and never leaks to other terms).
       const semRes = await client.query(
@@ -2109,8 +2117,8 @@ class QuickFixService {
       // after apply, so without this the conflicts table (and the term hard/soft
       // badges) would describe the pre-fix world until the next GET /conflicts.
       const after = await svc._evaluateSchedule(scheduleId, client);
-      if (after.hardConflicts.length > baselineHard) {
-        const err = new Error('This fix set would introduce new conflicts and was not applied. Refresh the conflicts and try again.');
+      if (after.hardConflicts.length > baselineHard || weightedCost(after.conflicts) > baselineWeighted) {
+        const err = new Error('This fix set would not reduce the conflicts (it would add or worsen some), so it was not applied. Refresh the conflicts and try again.');
         err.status = 409;
         throw err;
       }

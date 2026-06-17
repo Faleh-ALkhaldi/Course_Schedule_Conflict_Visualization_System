@@ -17,7 +17,7 @@ const suggestSvc = require('../services/SuggestService');
 // to filter candidates before greedy assignment.
 const sectionPattern = require('../domain/sectionPattern');
 const { filterCoursesForTerm, isCourseAllowedInTerm, disallowReason } = require('../domain/courseTermValidity');
-const { courseCodeError, courseNameError, courseFlagError, creditsFlagError } = require('../domain/courseFormat');
+const { courseCodeError, courseNameError, courseFlagError, creditsFlagError, courseCodeLevelError } = require('../domain/courseFormat');
 const { R06_TIME_EXEMPT_COURSES, TIME_WINDOWS } = require('../config/constants'); // NEW-FU-497 (Phase 121)
 const { ScheduleRepository, VenueRepository, CourseRepository } = require('../repositories/repositories');
 const InstructorRepository = require('../repositories/InstructorRepository');
@@ -1050,6 +1050,10 @@ const createCourse = ah(async (req, res) => {
   // NEW-FU-422 (Phase 104 items 3+4): strict code (SWE 101–599) + real name +
   // single-flag (at most one of has_lab / capstone / external).
   { const e = courseCodeError(courseCode); if (e) return badRequest(res, e); }
+  // NEW-FU-576 (Batch 22): backstop the frontend's live check — the number must match the
+  // academic level (100s Freshman … 500–699 Graduate). The frontend disables Save on a
+  // mismatch; this is the authoritative gate for any direct API call.
+  { const e = courseCodeLevelError(courseCode, academicLevel, category); if (e) return badRequest(res, e); }
   { const e = courseNameError(name);       if (e) return badRequest(res, e); }
   { const e = courseFlagError({ hasLab, isCapstone, isExternal }); if (e) return badRequest(res, e); }
   { const e = creditsFlagError({ credits, hasLab }); if (e) return badRequest(res, e); }   // audit P2-8: 4cr ⇒ has-lab
@@ -1097,6 +1101,11 @@ const updateCourse = ah(async (req, res) => {
   if (name       != null && !isBoundedString(name,      120))  return badLength(res, 'name',      120);
   // NEW-FU-422 (Phase 104 item 4): same strict code/name format on edit.
   if (courseCode != null) { const e = courseCodeError(courseCode); if (e) return badRequest(res, e); }
+  // NEW-FU-576 (Batch 22): if a full update supplies code + level + category, they must
+  // agree (number ↔ academic level). Guarded on all three so a partial edit isn't blocked.
+  if (courseCode != null && academicLevel && category) {
+    const e = courseCodeLevelError(courseCode, academicLevel, category); if (e) return badRequest(res, e);
+  }
   if (name       != null) { const e = courseNameError(name);       if (e) return badRequest(res, e); }
   // NEW-FU-15: validate numeric fields on update too (create-time validation
   // exists; update was leaking bad values through to pg as opaque errors).

@@ -72,15 +72,34 @@ export default function AddCourseModal({ onClose, showToast }) {
   const externalAllowed = form.category === 'UG' && form.academicLevel === 'Junior';
 
   // NEW-FU-422 (Phase 104 item 4): LIVE code/name validation mirroring the API
-  // rule — flagged as the user types, not on Save. Code = "SWE " + 101–599.
+  // rule — flagged as the user types, not on Save. Code = "SWE " + 101–699.
   const codeError = (() => {
     const c = (form.courseCode || '').trim();
     if (!c) return null;                         // emptiness → handled by Save guard
     const m = /^SWE (\d{3})$/.exec(c);
     if (!m) return 'Enter the 3-digit course number after SWE (e.g. 206).';
     const n = parseInt(m[1], 10);
-    if (n < 101 || n > 599) return `Course number must be 101–599 (got ${m[1]}).`;
+    if (n < 101 || n > 699) return `Course number must be 101–699 (got ${m[1]}).`;
     return null;
+  })();
+  // NEW-FU-576 (Batch 22): the course-code NUMBER fixes the academic level/category —
+  // 100–199 Freshman, 200–299 Sophomore, 300–399 Junior, 400–499 Senior, 500–699 Graduate.
+  // If the chosen category/level doesn't match the number, flag it AS THE USER TYPES and
+  // block Save until they correct the level (or the number) so the two always agree.
+  const levelForCourseNumber = (n) =>
+      n >= 100 && n <= 199 ? { category: 'UG', level: 'Freshman' }
+    : n >= 200 && n <= 299 ? { category: 'UG', level: 'Sophomore' }
+    : n >= 300 && n <= 399 ? { category: 'UG', level: 'Junior' }
+    : n >= 400 && n <= 499 ? { category: 'UG', level: 'Senior' }
+    : n >= 500 && n <= 699 ? { category: 'GR', level: 'Graduate' }
+    : null;
+  const levelError = (() => {
+    const m = /^SWE (\d{3})$/.exec((form.courseCode || '').trim());
+    if (!m || codeError) return null;                 // empty/invalid code handled by codeError
+    const expected = levelForCourseNumber(parseInt(m[1], 10));
+    if (!expected || (form.category === expected.category && form.academicLevel === expected.level)) return null;
+    const want = expected.category === 'GR' ? 'Graduate' : `Undergraduate → ${expected.level}`;
+    return `SWE ${m[1]} is a ${expected.level} course — set the level to ${want} to match the number (or change the number).`;
   })();
   const nameError = (() => {
     const nm = (form.name || '').trim();
@@ -108,7 +127,7 @@ export default function AddCourseModal({ onClose, showToast }) {
     return courses.some(co => (co.name || '').trim().toLowerCase() === nm.toLowerCase())
       ? `A course named "${nm}" already exists.` : null;
   })();
-  const formInvalid = !!codeError || !!nameError || !!dupCodeError || !!dupNameError
+  const formInvalid = !!codeError || !!levelError || !!nameError || !!dupCodeError || !!dupNameError
     || !(form.courseCode || '').trim() || !(form.name || '').trim();
 
   // NEW-FU-484 (Phase 118 item 3): auto-uncheck gated flags when the user
@@ -175,17 +194,19 @@ export default function AddCourseModal({ onClose, showToast }) {
           <div className="sm-field">
             <label>Course code</label>
             {/* NEW-FU-479 (Phase 115): the "SWE" prefix is fixed by the system — the user
-                types only the 3-digit number (101–599); the stored code is "SWE " + digits. */}
+                types only the 3-digit number (101–699); the stored code is "SWE " + digits. */}
             <div style={{ display: 'flex', alignItems: 'stretch', gap: 8 }}>
               <span style={{ display: 'inline-flex', alignItems: 'center', padding: '0 12px', borderRadius: 8, background: 'var(--bg-app)', color: 'var(--fg-dim)', fontWeight: 700, letterSpacing: '.5px' }}>SWE</span>
               <input style={{ flex: 1 }} inputMode="numeric" maxLength={3} placeholder="206"
-                aria-label="Course number (101–599)"
+                aria-label="Course number (101–699)"
                 aria-invalid={!!codeError || !!dupCodeError}
                 value={(form.courseCode || '').replace(/^SWE\s*/i, '').replace(/\D/g, '').slice(0, 3)}
                 onChange={e => { const d = e.target.value.replace(/\D/g, '').slice(0, 3); setForm(f => ({ ...f, courseCode: d ? `SWE ${d}` : '' })); }} />
             </div>
             {codeError && <p className="sm-inline-error" role="alert"><span>{codeError}</span></p>}
             {!codeError && dupCodeError && <p className="sm-inline-error" role="alert"><span>{dupCodeError}</span></p>}
+            {/* NEW-FU-576 (Batch 22): the number must match the selected academic level. */}
+            {!codeError && !dupCodeError && levelError && <p className="sm-inline-error" role="alert"><span>{levelError}</span></p>}
           </div>
 
           <div className="sm-field">
@@ -244,14 +265,15 @@ export default function AddCourseModal({ onClose, showToast }) {
             </div>
           </div>
 
-          <div className="sm-field">
-            <label>
-              Number of sections
-              <span className="sm-optional"> &nbsp;parallel sections per term</span>
-            </label>
-            <input type="number" min="1" max="20" value={form.numSections}
-              onChange={e => setForm(f => ({ ...f, numSections: e.target.value }))} />
-          </div>
+          {/* NEW-FU-578 (Batch 23): the "Number of sections · parallel sections per term"
+              control was removed. It only WROTE courses.num_sections — it never created
+              any sections — so setting N>1 produced zero sections while misleadingly
+              implying the course had N parallel offerings. The conflict engine counts the
+              REAL section rows (not this field), so the decoupled number had no effect on
+              conflict detection beyond confusing the user. A new course is now created with
+              num_sections = 1 (form default below); you add sections individually in the
+              section panel, or use Suggest — which has its own per-course section-count
+              input — to auto-place several at once. */}
 
           {/* Course flags — each on its own row with the description on the
               same line as the bold label. The scoped .acm-flag-row class
@@ -284,7 +306,7 @@ export default function AddCourseModal({ onClose, showToast }) {
                 disabled={!capstoneAllowed}
                 onChange={() => pickFlag('isCapstone')} />
               <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
-                <strong>◇ Capstone</strong>{' '}
+                <strong>Capstone</strong>{' '}
                 <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
                   — graduation project. A capstone has no fixed room or class time, so the
                   room and meeting-time checks are skipped; it's still checked for instructor
@@ -308,7 +330,7 @@ export default function AddCourseModal({ onClose, showToast }) {
                 disabled={!externalAllowed}
                 onChange={() => pickFlag('isExternal')} />
               <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
-                <strong>✈ External</strong>{' '}
+                <strong>External</strong>{' '}
                 <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
                   — off-campus internship (e.g., SWE 399 Summer Training); it isn't held on
                   campus, so no scheduling-conflict checks apply.
@@ -327,7 +349,7 @@ export default function AddCourseModal({ onClose, showToast }) {
           <div className="sm-actions">
             <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>
             <button type="submit" className="sm-btn-save" disabled={busy || formInvalid}
-              title={formInvalid ? 'Enter a valid course code (SWE 101–599) and name first' : undefined}>
+              title={formInvalid ? 'Enter a valid course code (SWE 101–699) and name first' : undefined}>
               {busy ? '…' : 'Add Course'}
             </button>
           </div>
