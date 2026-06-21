@@ -47,6 +47,18 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
   });
   const [busy,  setBusy]  = useState(false);
   const [error, setError] = useState('');
+  // NEW-FU-583 (Batch 24): the instructor's OTHER office hours, fetched on open so an overlap
+  // can be flagged in RUNTIME. The backend (findOverlappingOH) rejects an overlap on Save with
+  // a 409; surfacing it inline + disabling Save matches the system-wide "warn in runtime, never
+  // let the user submit a prohibited value" rule (Batch 24 Issue 4).
+  const [ohList, setOhList] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    api.getInstructorOfficeHours(instructorId)
+      .then(list => { if (!cancelled) setOhList(Array.isArray(list) ? list : (list?.officeHours || [])); })
+      .catch(() => { /* non-fatal — the backend still backstops the overlap on Save */ });
+    return () => { cancelled = true; };
+  }, [instructorId]);
 
   // NEW-FU-466 (Phase 112): office hours may only be 08:00–16:00 (8 AM–4 PM).
   // Validate as the user types — flag immediately and block Save, never wait for
@@ -65,12 +77,26 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
   const orderBad  = form.startTime && form.endTime && form.endTime <= form.startTime;
   const validationMsg = windowBad ? 'Office hours can only be between 8:00 AM and 4:00 PM.'
     : orderBad ? 'End time must be after the start time (office hours are 8:00 AM–4:00 PM).' : '';
+  // NEW-FU-583 (Batch 24): runtime OVERLAP guard — mirrors the backend findOverlappingOH
+  // (same instructor + day, half-open time overlap: existingStart < newEnd AND existingEnd >
+  // newStart), excluding the OH being edited. Window/order errors take precedence (more specific).
+  const overlapError = (() => {
+    if (validationMsg || !form.startTime || !form.endTime) return null;
+    const clash = ohList.some(oh =>
+      oh.id !== officeHour.id &&
+      oh.day === form.day &&
+      String(oh.start_time ?? oh.startTime ?? '').substring(0, 5) < form.endTime &&
+      String(oh.end_time   ?? oh.endTime   ?? '').substring(0, 5) > form.startTime
+    );
+    return clash ? 'This office hour overlaps an existing one for this instructor on that day. Pick a different time or day.' : null;
+  })();
+  const blockMsg = validationMsg || overlapError || '';
 
   async function handleSave(e) {
     e.preventDefault();
     // H-9 + NEW-FU-466: block any out-of-window / out-of-order value at the source.
     // The user already sees `validationMsg` inline; this also stops the submit.
-    if (validationMsg) { setError(validationMsg); return; }
+    if (blockMsg) { setError(blockMsg); return; }
     setBusy(true); setError('');
     try {
       // NEW-FU-41: one atomic PUT instead of the prior C-5 add-then-delete
@@ -149,9 +175,9 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
 
           {/* NEW-FU-466 (Phase 112): live window/order flag (takes precedence),
               else the plain-language rule so the secretary knows it up front. */}
-          {(validationMsg || error)
-            ? <div className="sm-error">{validationMsg || error}</div>
-            : <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+          {(blockMsg || error)
+            ? <div className="sm-error" role="alert">{blockMsg || error}</div>
+            : <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
                 Office hours can be set between 8:00 AM and 4:00 PM.
               </div>}
 
@@ -164,8 +190,8 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
             </button>
             <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>
             <button type="submit" className="sm-btn-save"
-              disabled={busy || isArchived || !!validationMsg}
-              title={isArchived ? lockedTitle : (validationMsg || undefined)}>
+              disabled={busy || isArchived || !!blockMsg}
+              title={isArchived ? lockedTitle : (blockMsg || undefined)}>
               {busy ? '…' : 'Save'}
             </button>
           </div>

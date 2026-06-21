@@ -18,11 +18,46 @@ import './SidePanel.css';
 
 const LEVEL_ORDER = ['Freshman','Sophomore','Junior','Senior','Graduate'];
 
+// NEW-FU-608 (Batch 30 item 1): compact, professional status flag for the Instructor/Venue
+// sidebars — a distinct color + icon + tooltip per state so the user can triage at a glance:
+//   'empty'   — instructor with NO classes AND NO office hours (rose + alert)
+//   'oh-only' — instructor with office hours but NO classes        (amber + clock)
+//   'venue'   — venue with NO classes assigned                      (rose + alert)
+// NEW-FU-617 (Batch 32): tooltips now DIRECT the user to the fix — selecting the instructor
+// opens the Office Hours editor (scrolled into view) where "+" adds an office hour.
+// NEW-FU-630 (audit): drive the pill from theme TONES rather than hardcoded hex. The old
+// #f87171 / #fbbf24 used as TEXT over a 13%-alpha tint read fine on the dark sidebar but only
+// ~2.8:1 on the light sidebar (#F4F5F6) — under WCAG AA for this 0.62rem label. --danger-* /
+// --warn-* are defined per-theme (light #b91c1c-on-#fee2e2, dark #fca5a5-on-#3a1a1a), so the
+// label stays accessible in BOTH modes.
+const STATUS_FLAG_CFG = {
+  empty:     { tone: 'danger', icon: 'alert', label: 'no data',  title: 'No classes or office hours yet — click this instructor, then "+ Office Hours" below to add office hours.' },
+  'oh-only': { tone: 'warn',   icon: 'clock', label: 'no class', title: 'Has office hours but no classes — drag a course onto the grid to assign a class.' },
+  venue:     { tone: 'danger', icon: 'alert', label: 'no class', title: 'No classes assigned to this venue.' },
+};
+const STATUS_FLAG_TONE = {
+  danger: { fg: 'var(--danger-fg)', bg: 'var(--danger-bg)' },
+  warn:   { fg: 'var(--warn-fg)',   bg: 'var(--warn-bg)' },
+};
+function StatusFlag({ type }) {
+  const cfg = type && STATUS_FLAG_CFG[type];
+  if (!cfg) return null;
+  const tone = STATUS_FLAG_TONE[cfg.tone];
+  return (
+    <span className="sp-status-flag" title={cfg.title}
+      style={{ display:'inline-flex', alignItems:'center', gap:3, marginLeft:6, padding:'1px 6px',
+        borderRadius:6, fontSize:'0.62rem', fontWeight:700, letterSpacing:'0.02em', whiteSpace:'nowrap',
+        color:tone.fg, background:tone.bg, border:`1px solid ${tone.fg}`, flexShrink:0 }}>
+      <Ico name={cfg.icon} /> {cfg.label}
+    </span>
+  );
+}
+
 export default function SidePanel({ showToast, onAddSection, onEditSection, onQuickFix }) {
   const {
     view, filterId, schedule,
     courses, instructors, venues,
-    sections, officeHours, conflicts,
+    sections, officeHours, conflicts, coverage,
     switchView, loadView,
     removeSection,
     // NEW-FU-280 (Phase 56): addInstructor / addVenue / addCourse are no
@@ -48,8 +83,21 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
   const isFinalized = schedule?.status === 'Finalized';
   const isArchived  = Boolean(schedule?.archived_at) || isFinalized;
   const lockedTitle = isFinalized
-    ? 'Term is finalized — unlock it first (Save button → Unlock) to make changes.'
+    ? 'Term is finalized — click the Locked button in the top bar to unlock it first.'
     : 'Term is archived — unarchive to make changes.';
+
+  // NEW-FU-608 (Batch 30 item 1): side-panel status flags. `coverage` (refreshed by loadView)
+  // tells us, for THIS term, which instructors have ≥1 class, which venues have ≥1 class, and
+  // which instructors have any office hours — so the user can triage the list WITHOUT opening
+  // each one. instructorFlag(): 'empty' (no classes AND no office hours) | 'oh-only' (office
+  // hours but no classes) | null (has classes). venueFlag(): 'empty' (no classes) | null.
+  const instrWithClasses = React.useMemo(() => new Set(coverage?.instructorIdsWithClasses ?? []), [coverage]);
+  const instrWithOH      = React.useMemo(() => new Set(coverage?.instructorIdsWithOfficeHours ?? []), [coverage]);
+  const venueWithClasses = React.useMemo(() => new Set(coverage?.venueIdsWithClasses ?? []), [coverage]);
+  // No flags until coverage has loaded (avoids a first-paint flash of "all empty").
+  const instructorFlag = (id) =>
+    !coverage ? null : (instrWithClasses.has(id) ? null : (instrWithOH.has(id) ? 'oh-only' : 'empty'));
+  const venueFlag = (id) => (!coverage ? null : (venueWithClasses.has(id) ? null : 'venue'));
 
   const [collapsed, setCollapsed] = useState(false);
   const [openForm, setOpenForm] = useState(null); // 'section'|'instructor'|'venue'|'course'
@@ -144,6 +192,17 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
       setOhList([]);
     }
   }, [filterId, view, officeHours]);
+
+  // NEW-FU-617 (Batch 32): when an instructor is selected in Teacher view, scroll the Office
+  // Hours editor INTO VIEW. It renders below the (long, scrollable) instructor list, so on a
+  // click near the top it sat off-screen and users thought they couldn't add office hours at
+  // all. Bringing it into view makes the next step obvious. Only fires on a real selection.
+  const ohSectionRef = React.useRef(null);
+  React.useEffect(() => {
+    if (view === VIEWS.TEACHER && filterId && ohSectionRef.current) {
+      ohSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [filterId, view]);
 
   // NEW-FU-496 (Phase 120): office hours are 08:00–16:00. clampOH keeps the
   // inputs inside the window (runtime prevention); handleAddOH checks the window
@@ -386,7 +445,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
             <button className="sp-add-btn"
               onClick={() => onAddSection && onAddSection()}
               disabled={isArchived}
-              title={isArchived ? lockedTitle : 'Add section'}>+</button>
+              title={isArchived ? lockedTitle : 'Add section'}><Ico name="plus" /></button>
           </div>
 
           {/* Section list — grouped by course, ordered by academic level */}
@@ -419,6 +478,15 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                         <div className="sp-sec-course-label"
                           style={{background:colors.bg, borderLeft:`3px solid ${colors.border}`}}>
                           {courseCode}
+                          {/* NEW-FU-604 (Batch 29 item 1): show the course's credits in the
+                              Sections sidebar (read-only) — the same number that drives each
+                              section's legal pattern/duration in the edit panel. */}
+                          {(() => {
+                            const cr = courses.find(c => (c.course_code ?? c.courseCode) === courseCode)?.credits;
+                            return cr != null
+                              ? <span style={{ opacity: 0.65, fontWeight: 400 }}> · {cr} cr</span>
+                              : null;
+                          })()}
                         </div>
                         <ul className="sp-list" style={{marginTop:2}}>
                           {courseGrps.sort((a,b) => a.sectionNumber.localeCompare(b.sectionNumber, undefined, {numeric:true})).map(grp => {
@@ -497,7 +565,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
             <button className="sp-add-btn"
               onClick={()=>setOpenForm(openForm==='instructor'?null:'instructor')}
               disabled={isArchived}
-              title={isArchived ? lockedTitle : 'Add instructor'}>+</button>
+              title={isArchived ? lockedTitle : 'Add instructor'}><Ico name="plus" /></button>
           </div>
 
           {/* NEW-FU-280 (Phase 56): the + button now opens AddInstructorModal
@@ -537,6 +605,8 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   <FilterName>{instr.name}</FilterName>
                   {/* NEW-FU-425 (Phase 104 item 2): clearly label placeholder instructors. */}
                   {instr.is_dummy && <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real instructor to replace it">dummy</span>}
+                  {/* NEW-FU-608 (Batch 30 item 1): triage flag — no classes (±office hours). */}
+                  <StatusFlag type={instructorFlag(instr.id)} />
                   {filterId===instr.id && <span className="sp-check"><Ico name="check" /></span>}
                 </button>
                 <button className="sp-del-btn"
@@ -562,15 +632,19 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
             ))}
           </ul>
 
-          {/* Office Hours for selected instructor */}
+          {/* Office Hours for selected instructor. NEW-FU-617 (Batch 32): ref so a selection
+              scrolls it into view; heading names WHOSE office hours these are (since the view
+              may have scrolled away from the instructor row). */}
           {filterId && (
-            <div className="sp-oh-section">
+            <div className="sp-oh-section" ref={ohSectionRef}>
               <div className="sp-heading-row" style={{marginTop:10}}>
-                <span className="sp-heading">Office Hours</span>
+                <span className="sp-heading">
+                  Office Hours{(() => { const n = instructors.find(i => i.id === filterId)?.name; return n ? ` — ${n}` : ''; })()}
+                </span>
                 <button className="sp-add-btn"
                   onClick={()=>setOpenForm(openForm==='oh'?null:'oh')}
                   disabled={isArchived}
-                  title={isArchived ? lockedTitle : 'Add office hour'}>+</button>
+                  title={isArchived ? lockedTitle : 'Add office hour'}><Ico name="plus" /></button>
               </div>
 
               {openForm === 'oh' && (
@@ -596,8 +670,20 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   load (empty list). Silent re-syncs of an already-populated list
                   keep the rows visible instead of flashing "Loading…". */}
               {ohLoading && ohList.length === 0 && <p className="sp-empty">Loading…</p>}
-              {!ohLoading && ohList.length === 0 && (
-                <p className="sp-empty">No office hours set</p>
+              {/* NEW-FU-617 (Batch 32): empty state is a clear, clickable call-to-action that
+                  opens the add-office-hour form — so a user who selected an instructor with no
+                  office hours knows exactly what to do next (and can act in one click). */}
+              {!ohLoading && ohList.length === 0 && openForm !== 'oh' && (
+                <button type="button" className="sp-oh-empty-cta"
+                  onClick={() => !isArchived && setOpenForm('oh')}
+                  disabled={isArchived}
+                  title={isArchived ? lockedTitle : 'Add the first office hour for this instructor'}
+                  style={{ display:'flex', alignItems:'center', gap:6, width:'100%', marginTop:4,
+                    padding:'8px 10px', borderRadius:8, border:'1px dashed var(--teal-500, #14b8a6)',
+                    background:'transparent', color:'var(--teal-500, #14b8a6)', cursor: isArchived ? 'default':'pointer',
+                    fontSize:'0.78rem', textAlign:'left', opacity: isArchived ? 0.5 : 1 }}>
+                  <Ico name="plus" /> No office hours yet — click to add one
+                </button>
               )}
               <ul className="sp-list">
                 {ohList.map(oh => (
@@ -626,7 +712,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
             <button className="sp-add-btn"
               onClick={()=>setOpenForm(openForm==='venue'?null:'venue')}
               disabled={isArchived}
-              title={isArchived ? lockedTitle : 'Add venue'}>+</button>
+              title={isArchived ? lockedTitle : 'Add venue'}><Ico name="plus" /></button>
           </div>
           {/* NEW-FU-287 (Phase 57): copy updated — the venue category list
               now includes Multipurpose alongside Lecture Hall and Laboratory. */}
@@ -674,6 +760,8 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   {v.is_dummy
                     ? <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real venue to replace it">dummy</span>
                     : <span className="sp-venue-cap">cap.{v.capacity}</span>}
+                  {/* NEW-FU-608 (Batch 30 item 1): triage flag — venue with no classes. */}
+                  <StatusFlag type={venueFlag(v.id)} />
                   {filterId===v.id && <span className="sp-check"><Ico name="check" /></span>}
                 </button>
                 <button className="sp-del-btn"
@@ -713,7 +801,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
           <button className="sp-add-btn"
             onClick={()=>setOpenForm(openForm==='course'?null:'course')}
             disabled={isArchived}
-            title={isArchived ? lockedTitle : 'Add course'}>+</button>
+            title={isArchived ? lockedTitle : 'Add course'}><Ico name="plus" /></button>
         </div>
 
         {openForm === 'course' && (
@@ -831,7 +919,11 @@ function DraggableCourse({ course, level, onRemove, showToast, isArchived = fals
         ? lockedTitle
         : `${course.course_code} — ${course.name}\nDrag onto the grid to add a section`}
     >
-      <span className="sp-course-code" style={{ color: colors.text }}>{course.course_code}</span>
+      <span className="sp-course-code" style={{ color: colors.text }}>
+        {course.course_code}
+        {/* NEW-FU-604 (Batch 29 item 1): credits shown on the course card (read-only). */}
+        {course.credits != null && <span style={{ opacity: 0.6, fontWeight: 400 }}> · {course.credits} cr</span>}
+      </span>
       <span className="sp-course-name" ref={nameRef} style={{ color: colors.text }}>{course.name}</span>
       <button
         className="sp-del-btn"

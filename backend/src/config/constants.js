@@ -41,6 +41,26 @@ const TIME_WINDOWS = {
 // on the grid). All other capstones (SWE 413/414) stay bound to 07:00–17:10.
 const R06_TIME_EXEMPT_COURSES = new Set(['SWE 412']);
 
+// NEW-FU-621 (audit #2): the ONE teaching-window resolver shared by every scheduling
+// tool — previewConflicts' free-slot scan, autoFixAround / RescheduleAroundService's
+// move search, and QuickFixService's candidate enumerator. Those had drifted into five
+// hand-rolled copies of the same `(category === 'GR' && !isCapstone) ? GR : UG` ternary,
+// and NONE of them consulted R06_TIME_EXEMPT_COURSES. So when SWE 412 (the one
+// R-06-time-exempt course) was the section being moved/rescheduled, every tool clamped it
+// to the 07:00–17:10 UG day and could declare "no free slot / infeasible" even though a
+// perfectly legal evening slot existed — one the conflict engine (which never time-checks
+// SWE 412) would have accepted. An exempt course therefore scans the FULL teaching day
+// (07:00–22:00); every other course keeps its strict R-06 window. Single source of truth
+// here = no more drift between the five sites.
+function teachingWindowFor({ category, isCapstone = false, courseCode = null }) {
+  if (courseCode && R06_TIME_EXEMPT_COURSES.has(courseCode)) {
+    return { start: TIME_WINDOWS.UG.start, end: TIME_WINDOWS.GR.end };   // 07:00–22:00, R-06-exempt
+  }
+  return (category === 'GR' && !isCapstone)
+    ? { start: TIME_WINDOWS.GR.start, end: TIME_WINDOWS.GR.end }         // 17:20–22:00
+    : { start: TIME_WINDOWS.UG.start, end: TIME_WINDOWS.UG.end };        // 07:00–17:10
+}
+
 // ── Office-hours allowed window ──────────────────────────────────────────────
 // NEW-FU-466 (Phase 112): office hours may ONLY be held 08:00–16:00 (8 AM–4 PM).
 // Enforced at EVERY input (Add-Instructor panel, Edit-Office-Hours modal, Import)
@@ -166,6 +186,7 @@ module.exports = {
   COURSE_CATEGORY,
   TIME_WINDOWS,
   R06_TIME_EXEMPT_COURSES, // NEW-FU-497 (Phase 121)
+  teachingWindowFor,       // NEW-FU-621 (audit #2) — shared R-06-aware window resolver
   OFFICE_HOURS_WINDOW,    // NEW-FU-466 (Phase 112)
   SEVERITY,
   RULE_IDS,

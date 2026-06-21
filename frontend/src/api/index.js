@@ -129,6 +129,13 @@ export const listTerms   = (activeCode, includeArchived = false) =>
       ? { activeCode, includeArchived: 'true' }
       : { activeCode },
   }).then(r => r.data);
+// NEW-FU-582 (Batch 24): content search — returns the codes of terms whose course /
+// instructor / venue / section content matches `q`. The picker unions these with its
+// instant client-side code/label/season match.
+export const searchTerms = (q, includeArchived = false) =>
+  api.get('/terms/search', {
+    params: includeArchived ? { q, includeArchived: 'true' } : { q },
+  }).then(r => (r.data && r.data.codes) || []);
 // NEW-FU-232: createTerm now accepts optional admin-supplied dates
 // for codes without a published override. Pass undefined to keep
 // the backend silent on the date columns (backend will store NULL).
@@ -176,13 +183,10 @@ export const updateSection = (sectionId, data) =>
 
 export const deleteSection = (id) =>
   api.delete(`/sections/${id}`).then(r => r.data);
-
-// NEW-FU-272: per-row delete (one meeting day, leaves the rest of the
-// section group intact). Used by the grid-block ✕ quick-delete. The
-// backend's `?scope=row` short-circuit skips the findSiblings expansion
-// that the default endpoint runs.
-export const deleteSectionRow = (id) =>
-  api.delete(`/sections/${id}?scope=row`).then(r => r.data);
+// NEW-FU-629 (audit): removed the unused `deleteSectionRow` helper. Since FU-609 the grid ✕
+// always deletes the whole group (a section has one identity across its meeting days), so no
+// client ever called the per-row `?scope=row` path. The backend still accepts that query param
+// as a self-coercing API backstop (multi-day rows are coerced to a group delete there).
 
 // NEW-FU-280: extend a section group with additional meeting days.
 // Drives the R-15 quick-fix flow (Phase 23). The user clicks a fix
@@ -203,6 +207,11 @@ export const quickFixApply = (scheduleId, ops) =>
 // ── Conflicts & Save ──────────────────────────────────────────────────────────
 export const getConflicts = (scheduleId) =>
   api.get(`/schedules/${scheduleId}/conflicts`).then(r => r.data);
+
+// NEW-FU-608 (Batch 30): per-term coverage summary for the Instructor/Venue sidebar flags
+// — { instructorIdsWithClasses, venueIdsWithClasses, instructorIdsWithOfficeHours }.
+export const getCoverage = (scheduleId) =>
+  api.get(`/schedules/${scheduleId}/coverage`).then(r => r.data);
 
 // NEW-FU-534 (Batch 12): dry-run the full conflict engine for a proposed section
 // change. Returns { conflicts: [{ruleId,severity,description}], conflictFreeStartExists }.

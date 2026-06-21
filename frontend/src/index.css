@@ -105,6 +105,7 @@
      values equal the original literals, so light mode is byte-identical. */
   --warn-bg:#fef3c7; --warn-fg:#92400e;
   --danger-bg:#fee2e2; --danger-fg:#b91c1c;
+  --success-bg:#dcfce7; --success-fg:#166534; /* NEW-FU-631 (audit): success tone for the import-result box */
 }
 
 /* ── Dark theme ──────────────────────────────────────────────────────────────
@@ -180,6 +181,7 @@
   --conflict-soft-bg:#33280a; --conflict-hard-bg:#3a1a1a;
   --warn-bg:#2a2410; --warn-fg:#fcd34d;
   --danger-bg:#3a1a1a; --danger-fg:#fca5a5;
+  --success-bg:#16301f; --success-fg:#86efac; /* NEW-FU-631 (audit): dark success tone (mirrors --danger dark) */
 }
 
 /* ── Reset ───────────────────────────────────────────────────────────────────── */

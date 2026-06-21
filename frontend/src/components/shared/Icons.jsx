@@ -31,6 +31,10 @@ const ICONS = {
   // NEW-FU-549 (Batch 16): undo / redo (Lucide undo-2 / redo-2 — two subpaths in one d).
   undo:      'M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11',
   redo:      'm15 14 5-5-5-5M20 9H9.5A5.5 5.5 0 0 0 4 14.5 5.5 5.5 0 0 0 9.5 20H13',
+  // NEW-FU-615 (Batch 31 item 2): a perfectly symmetric plus, centered in the 24×24 viewBox.
+  // Replaces the text "+" glyph in the circular add-buttons (a text "+" sits slightly off-centre
+  // because of its font metrics; an SVG path is centred by construction on both axes).
+  plus:      'M12 5v14M5 12h14',
 };
 
 export default function Ico({ name, className }) {

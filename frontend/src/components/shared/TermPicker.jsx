@@ -42,6 +42,10 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
   // server omits them and the query rides the partial index
   // idx_schedules_active. Defaults OFF so the hot path stays cheap.
   const [showArchived, setShowArchived] = useState(false);
+  // NEW-FU-582 (Batch 24): codes of terms whose CONTENT (course / instructor / venue /
+  // section) matches the filter, fetched from the backend (debounced) and unioned with the
+  // instant client-side code/label/season match below.
+  const [contentCodes, setContentCodes] = useState(() => new Set());
   const filterRef             = useRef(null);
   const popRef                = useRef(null);
   const btnRef                = useRef(null);
@@ -91,9 +95,25 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
     return terms.filter(t =>
       t.code.toLowerCase().includes(q) ||
       (t.label || '').toLowerCase().includes(q) ||
-      (t.season || '').toLowerCase().includes(q)
+      (t.season || '').toLowerCase().includes(q) ||
+      contentCodes.has(t.code)               // NEW-FU-582: backend content match
     );
-  }, [terms, filter]);
+  }, [terms, filter, contentCodes]);
+
+  // NEW-FU-582 (Batch 24): debounced backend CONTENT search. Surfaces terms that contain the
+  // typed course code/name, instructor, venue, or section number — not just season + code.
+  useEffect(() => {
+    const q = filter.trim();
+    if (!q) { setContentCodes(new Set()); return; }
+    let cancelled = false;
+    const h = setTimeout(async () => {
+      try {
+        const codes = await api.searchTerms(q, showArchived);
+        if (!cancelled) setContentCodes(new Set(codes));
+      } catch { /* basic client match still works; ignore transient search errors */ }
+    }, 220);
+    return () => { cancelled = true; clearTimeout(h); };
+  }, [filter, showArchived]);
 
   // Close on outside click + Esc.
   useEffect(() => {
@@ -213,7 +233,7 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
               ref={filterRef}
               type="text"
               className="tp-filter-input"
-              placeholder="Search by code or label (e.g. 252, Spring, Summer)"
+              placeholder="Search terms, courses, instructors, venues (e.g. SWE 412, Yusuf, 24-137)"
               value={filter}
               onChange={e => setFilter(e.target.value)}
               onKeyDown={e => {
@@ -470,13 +490,19 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
       {delTarget && (
         <DeleteTermModal
           term={delTarget}
-          activeCode={delTarget.isActive ? altCode(delTarget) : activeCode}
+          /* NEW-FU-590 (Batch 25): deleting the active term in place is now allowed
+             (backend guard removed), so pass the real activeCode — the old alt-code
+             dodge is no longer needed (and was defeated anyway by the controller
+             preferring the X-Active-Term header). onDeleted lands on another term. */
+          activeCode={activeCode}
           onClose={() => setDelTarget(null)}
           onDeleted={async () => {
             const wasActive = delTarget.isActive, alt = altCode(delTarget);
             setDelTarget(null);
+            // Land on another term BEFORE refreshing the list so the main view never
+            // re-fetches the just-deleted schedule.
+            if (wasActive && alt) await onSwitchTerm(alt);
             await refresh();
-            if (wasActive && alt) onSwitchTerm(alt); // land on another term
           }}
         />
       )}
@@ -484,7 +510,10 @@ export function TermPicker({ activeCode, isAdmin, onSwitchTerm, liveHardCount, l
       {renameTarget && (
         <RenameTermModal
           term={renameTarget}
-          activeCode={renameTarget.isActive ? altCode(renameTarget) : activeCode}
+          /* NEW-FU-584 (Batch 25): renaming the active term is now allowed in place —
+             pass the real activeCode (the old alt-code dodge for the removed backend
+             guard is no longer needed). onRenamed follows to the new code below. */
+          activeCode={activeCode}
           existingCodes={terms.map(t => t.code)}
           onClose={() => setRenameTarget(null)}
           onRenamed={async (newCode) => {

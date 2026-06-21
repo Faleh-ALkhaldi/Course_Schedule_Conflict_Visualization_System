@@ -144,15 +144,14 @@ async function listTerms({ departmentId = DEFAULT_DEPT, activeCode, includeArchi
 /**
  * NEW-FU-193: archive / unarchive a term. Archiving hides it from the
  * default picker view (`includeArchived=false`) without losing data.
- * Refuses to archive the active term — the user must switch first to
- * avoid mid-edit confusion. Unarchive simply nulls archived_at.
+ * NEW-FU-590 (Batch 25): the ACTIVE term CAN now be archived in place — the
+ * client switches the app to another non-archived term first (TermPicker archive
+ * handler), so there's no mid-edit confusion. Unarchive simply nulls archived_at.
  */
 async function archiveTerm({ code, activeCode, departmentId = DEFAULT_DEPT }) {
-  if (code === activeCode) {
-    const err = new Error(`Cannot archive the active term ${code}. Switch to another term first.`);
-    err.code = 'CONFLICT';
-    throw err;
-  }
+  // NEW-FU-590: the old `code === activeCode` 409 guard forced a manual switch-away
+  // first; it's gone. activeCode is still accepted for API compatibility.
+  void activeCode;
   return _setArchive({ code, departmentId, archive: true });
 }
 
@@ -470,8 +469,9 @@ async function createTerm({ code, createdBy, departmentId = DEFAULT_DEPT, starts
 /**
  * Delete a term and cascade orphaned shared resources.
  *
- * Refuses to delete the currently-active term (passed by the controller)
- * — the user must switch to another term first. Returns 409.
+ * NEW-FU-590 (Batch 25): the currently-active term CAN be deleted in place —
+ * the client auto-switches to another term the moment delete returns. The old
+ * "switch away first" 409 guard is gone.
  *
  * After the schedule row is removed (its sections/conflicts/OH cascade
  * via FK), any course/instructor/venue that's no longer referenced by
@@ -486,18 +486,20 @@ async function createTerm({ code, createdBy, departmentId = DEFAULT_DEPT, starts
 /**
  * NEW-FU-185: rename a term's code. Validates the new code via decodeTerm
  * (throws on invalid format). Refuses to rename if the new code collides
- * with an existing term (409). Refuses to rename the active term — the
- * caller must switch away first to avoid a mid-edit UX where the URL
- * still references the old code.
+ * with an existing term (409). The ACTIVE term CAN be renamed in place
+ * (NEW-FU-584, Batch 25): rename changes only the code, not the schedule id,
+ * and the client follows to the new code.
  *
  * Returns the renamed term with refreshed stats.
  */
 async function renameTerm({ code, newCode, activeCode, departmentId = DEFAULT_DEPT }) {
-  if (code === activeCode) {
-    const err = new Error(`Cannot rename the active term ${code}. Switch to another term first.`);
-    err.code = 'CONFLICT';
-    throw err;
-  }
+  // NEW-FU-584 (Batch 25): renaming the ACTIVE term is now allowed. A rename only
+  // changes the schedule's `semester` code — the schedule id is unchanged, so sections,
+  // conflicts, and office hours (all keyed by schedule id) are untouched. The client
+  // follows the rename to the new code (onRenamed → onSwitchTerm), so there is no
+  // dangling-URL hazard. The old "switch away first" guard was pure friction. `activeCode`
+  // is retained in the signature for backward-compat but is no longer used to block.
+  void activeCode;
   // newCode must pass the YYT regex via decodeTerm (throws on invalid).
   decodeTerm(newCode);
   // NEW-FU-217: rename to an out-of-range code is blocked for the same
@@ -535,11 +537,12 @@ async function renameTerm({ code, newCode, activeCode, departmentId = DEFAULT_DE
 }
 
 async function deleteTerm({ code, activeCode, departmentId = DEFAULT_DEPT }) {
-  if (code === activeCode) {
-    const err = new Error(`Cannot delete the active term ${code}. Switch to another term first.`);
-    err.code = 'CONFLICT';
-    throw err;
-  }
+  // NEW-FU-590 (Batch 25): the ACTIVE term can now be deleted in place. Terms are
+  // keyed by schedule id, so removing the schedule the user is viewing is safe — the
+  // client auto-switches to another term (TermPicker onDeleted → onSwitchTerm) the
+  // moment the delete returns. The old `code === activeCode` 409 guard forced a manual
+  // switch-away first; it's gone. activeCode is still accepted for API compatibility.
+  void activeCode;
 
   return withTransaction(async (client) => {
     const sched = await client.query(
@@ -717,4 +720,34 @@ async function setTermStatus({ code, newStatus, departmentId = DEFAULT_DEPT }) {
   });
 }
 
-module.exports = { listTerms, createTerm, deleteTerm, renameTerm, setTermStatus, archiveTerm, unarchiveTerm };
+// NEW-FU-582 (Batch 24): content search for the term picker. Returns the set of term
+// codes (semesters) whose REGISTERED CONTENT matches `q` — course code/name, instructor
+// name, venue name, or section number — so the picker can surface "every term that has
+// SWE 412 / Omar Hammad / 24-137 registered". ONE indexed query (no N+1); the picker keeps
+// the instant client-side code/label/season match and unions these content matches in.
+async function searchTermCodes({ departmentId = DEFAULT_DEPT, q, includeArchived = false } = {}) {
+  const needle = String(q ?? '').trim();
+  if (!needle) return [];
+  const like = `%${needle}%`;
+  const res = await query(`
+    SELECT DISTINCT s.semester AS code
+    FROM schedules s
+    JOIN sections sec   ON sec.schedule_id = s.id
+    JOIN courses co     ON co.id = sec.course_id
+    LEFT JOIN instructors i ON i.id = sec.instructor_id
+    LEFT JOIN venues      v ON v.id = sec.venue_id
+    WHERE s.department_id = $1
+      ${includeArchived ? '' : 'AND s.archived_at IS NULL'}
+      AND (
+        co.course_code ILIKE $2 OR
+        co.name        ILIKE $2 OR
+        i.name         ILIKE $2 OR
+        v.name         ILIKE $2 OR
+        sec.section_number ILIKE $2 OR
+        (co.course_code || ' ' || co.name) ILIKE $2
+      )
+  `, [departmentId, like]);
+  return res.rows.map(r => r.code);
+}
+
+module.exports = { listTerms, searchTermCodes, createTerm, deleteTerm, renameTerm, setTermStatus, archiveTerm, unarchiveTerm };

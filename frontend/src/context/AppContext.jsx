@@ -24,6 +24,23 @@ export function venueOrder(a, b) {
   return ab - bb || ar - br ||
     String((a && a.name) || '').localeCompare(String((b && b.name) || ''), undefined, { numeric: true });
 }
+// NEW-FU-586 (Batch 25): instructors sort alphabetically by name. Applied at the reducer
+// SOURCE (like venueOrder) so EVERY consumer — the Export instructor picker, the Section
+// panel's instructor select, Suggest, etc. — renders the same order, whether the instructor
+// came from the seed or was added later (which used to append at the bottom).
+export function instructorOrder(a, b) {
+  return String((a && a.name) || '').localeCompare(String((b && b.name) || ''), undefined, { sensitivity: 'base' });
+}
+// NEW-FU-594 (Batch 27): order courses by course CODE numerically (SWE 101 < SWE 353 <
+// SWE 387), applied at the reducer SOURCE — like venueOrder / instructorOrder — so EVERY
+// consumer (the Add-Section course picker, the SidePanel COURSES/Sections tabs, the grid)
+// renders the same code order, whether the course came from the seed or was just added
+// (which used to APPEND to the bottom of its level). Within a level group the consumer
+// filters by level, so a global code sort yields the right per-level order.
+export function courseOrder(a, b) {
+  const code = c => String((c && (c.course_code ?? c.courseCode)) || '');
+  return code(a).localeCompare(code(b), undefined, { numeric: true, sensitivity: 'base' });
+}
 export const DAYS  = ['Sunday','Monday','Tuesday','Wednesday','Thursday'];
 
 // Sun/Tue/Thu = 50 min, Mon/Wed = 75 min
@@ -118,6 +135,9 @@ export const PX_PER_MIN = 2.2;
 const initialState = {
   user:null, token:localStorage.getItem('token')||null,
   schedule:null, sections:[], officeHours:[], conflicts:[],
+  // NEW-FU-608 (Batch 30): per-term coverage for the Instructor/Venue sidebar flags. null until
+  // the first fetch so the sidebar shows NO flags rather than flashing "all empty" on first paint.
+  coverage:null,
   courses:[], instructors:[], venues:[],
   view:VIEWS.COURSE, filterId:null,
   loading:false, saveBlocked:false, softPending:[], error:null,
@@ -140,12 +160,17 @@ function reducer(state, action) {
       return { ...state, loading:action.value, error:null };
     case 'SET_ERROR':      return { ...state, error:action.error, loading:false };
     case 'SET_REFERENCE':  return { ...state,
-      courses:     action.courses     ?? state.courses,
-      instructors: action.instructors ?? state.instructors,
+      courses:     action.courses ? [...action.courses].sort(courseOrder) : state.courses,
+      instructors: action.instructors ? [...action.instructors].sort(instructorOrder) : state.instructors,
       venues:      action.venues ? [...action.venues].sort(venueOrder) : state.venues,
     };
-    case 'SET_SCHEDULE':   return { ...state, schedule:action.schedule };
+    // NEW-FU-619 (audit P3): reset coverage when the SCHEDULE (term) actually changes, so the
+    // Instructor/Venue status flags don't flash the PREVIOUS term's coverage before the new
+    // term's GET /coverage resolves. A same-id status update (finalize/unfinalize) keeps it.
+    case 'SET_SCHEDULE':   return { ...state, schedule:action.schedule,
+      coverage: action.schedule?.id !== state.schedule?.id ? null : state.coverage };
     case 'SET_VIEW_DATA':  return { ...state, sections:action.sections, officeHours:action.officeHours??[], loading:false };
+    case 'SET_COVERAGE':   return { ...state, coverage:action.coverage };
     case 'SET_CONFLICTS':  return { ...state,
       conflicts:   action.conflicts,
       saveBlocked: action.conflicts.some(c => c.severity === 'Hard' && !c.confirmed),
@@ -164,11 +189,11 @@ function reducer(state, action) {
     // C-6: Clears only sections (to trigger reload) without wiping officeHours.
     // SET_VIEW_DATA(sections:[]) was incorrectly used for this and blanked Teacher View.
     case 'CLEAR_SECTIONS':     return { ...state, sections: [], loading: false };
-    case 'ADD_INSTRUCTOR':     return { ...state, instructors: [...state.instructors, action.instructor] };
+    case 'ADD_INSTRUCTOR':     return { ...state, instructors: [...state.instructors, action.instructor].sort(instructorOrder) };
     case 'REMOVE_INSTRUCTOR':  return { ...state, instructors: state.instructors.filter(i=>i.id!==action.id) };
     case 'ADD_VENUE':          return { ...state, venues:      [...state.venues, action.venue].sort(venueOrder) };
     case 'REMOVE_VENUE':       return { ...state, venues:      state.venues.filter(v=>v.id!==action.id) };
-    case 'ADD_COURSE':         return { ...state, courses:     [...state.courses, action.course] };
+    case 'ADD_COURSE':         return { ...state, courses:     [...state.courses, action.course].sort(courseOrder) };
     case 'REMOVE_COURSE':      return { ...state, courses:     state.courses.filter(c=>c.id!==action.id) };
     default: return state;
   }
@@ -252,6 +277,17 @@ export function AppProvider({ children }) {
   const loadView = useCallback(async (scheduleId, view, filterId) => {
     const mySeq = ++loadViewSeq.current;
     dispatch({ type:'SET_LOADING', value:true });
+    // NEW-FU-608 (Batch 30): refresh the per-term coverage that drives the Instructor/Venue
+    // sidebar status flags. loadView is the single refresh hub (it runs after every section
+    // and office-hours mutation, and on view/filter change), so the flags stay live. Only the
+    // Instructor/Venue sidebars consume it. Independent of the sections fetch below — it must
+    // run even on the no-filter early-return path (where the full list is shown with no
+    // sections loaded). Fire-and-forget; a transient failure just leaves the prior flags.
+    if (view === VIEWS.TEACHER || view === VIEWS.VENUE) {
+      api.getCoverage(scheduleId)
+        .then(cov => { if (mySeq === loadViewSeq.current) dispatch({ type:'SET_COVERAGE', coverage: cov }); })
+        .catch(() => { /* advisory — keep prior flags */ });
+    }
     // NEW-FU-527 (Batch 8 Issue 4): Venue/Instructor view needs a selected resource.
     // Without one (booting into a persisted Venue View, or before a venue is picked)
     // the sections fetch would 400 with a raw internal "venueId is required for

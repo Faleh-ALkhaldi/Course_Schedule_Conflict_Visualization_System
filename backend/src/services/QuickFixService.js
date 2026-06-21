@@ -32,6 +32,7 @@ const Section = require('../domain/Section');
 const sectionPattern = require('../domain/sectionPattern');
 const { query, getClient } = require('../config/db');
 const { pickDummyOfficeHours, nextDummyVenueName } = require('../domain/dummyResources'); // NEW-FU-429/431 (Phase 106)
+const { teachingWindowFor } = require('../config/constants'); // NEW-FU-621 (audit #2): shared R-06-aware window
 
 const engine = new ConflictEngine();
 const instrRepo = new InstructorRepository();
@@ -322,10 +323,11 @@ function moveCandidatesFor(sectionA, sections) {
   // TIME_WINDOWS so every emitted candidate is R-06-viable.
   // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00. Capstone is now
   // bound to the UG window (venue-exempt but NOT time-exempt) — no longer full day.
-  const isGraduate = sectionA.category === 'GR';
-  const isCapstone = sectionA.isCapstone === true;
-  const WINDOW_START = isCapstone ? 7 * 60 : (isGraduate ? 17 * 60 + 20 : 7 * 60);
-  const WINDOW_END   = isCapstone ? 17 * 60 + 10 : (isGraduate ? 22 * 60 : 17 * 60 + 10);
+  // NEW-FU-621 (audit #2): via the shared R-06-aware resolver, so an exempt course
+  // (SWE 412) gets full-day candidates instead of being clamped to the UG day.
+  const { start: WINDOW_START, end: WINDOW_END } = teachingWindowFor({
+    category: sectionA.category, isCapstone: sectionA.isCapstone, courseCode: sectionA.courseCode,
+  });
   const STEP = 30;               // half-hour granularity
   // Compute the instructor + venue + group keys we need to keep clear.
   const groupKey = `${sectionA.courseId}|${sectionA.sectionNumber}`;
@@ -494,10 +496,10 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
       );
       // NEW-FU-441 (Phase 107 M2): align with R-06 TIME_WINDOWS (see moveCandidatesFor).
       // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00; capstone = UG window.
-      const isGraduate   = sectionA.category === 'GR';
-      const isCapstoneB  = sectionA.isCapstone === true;
-      const WINDOW_START = isCapstoneB ? 7 * 60 : (isGraduate ? 17 * 60 + 20 : 7 * 60);
-      const WINDOW_END   = isCapstoneB ? 17 * 60 + 10 : (isGraduate ? 22 * 60 : 17 * 60 + 10);
+      // NEW-FU-621 (audit #2): shared R-06-aware resolver (SWE 412 → full day).
+      const { start: WINDOW_START, end: WINDOW_END } = teachingWindowFor({
+        category: sectionA.category, isCapstone: sectionA.isCapstone, courseCode: sectionA.courseCode,
+      });
       const STEP         = 30;
       const durMin       = Section.toMinutes(sectionA.endTime) - Section.toMinutes(sectionA.startTime);
       const currentMin   = Section.toMinutes(sectionA.startTime);

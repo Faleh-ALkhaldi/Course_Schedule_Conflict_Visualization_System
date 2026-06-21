@@ -133,6 +133,8 @@ router.post('/schedules',                           ctrl.createSchedule);
 
 // ── Sections ──────────────────────────────────────────────────────────────────
 // Section CRUD is the scheduler's core workflow — open to scheduler role.
+// NEW-FU-608 (Batch 30): per-term coverage summary feeding the Instructor/Venue sidebar flags.
+router.get   ('/schedules/:scheduleId/coverage', ctrl.getScheduleCoverage);
 router.get   ('/schedules/:scheduleId/sections', ctrl.getSections);
 router.post  ('/schedules/:scheduleId/sections', ctrl.createSection);
 // NEW-FU-534 (Batch 12): dry-run the FULL conflict engine for a proposed change.
@@ -178,6 +180,9 @@ router.post('/schedules/:scheduleId/import', requireRole('admin'), ctrl.upload.s
 // GET open to any authenticated user; create/delete admin-only because they
 // shape global term inventory.
 router.get   ('/terms',                  ctrl.listTerms);
+// NEW-FU-582 (Batch 24): term-picker content search. Registered before /terms/:code so the
+// literal path wins (it wouldn't collide anyway — that route is PATCH/DELETE — but explicit).
+router.get   ('/terms/search',           ctrl.searchTerms);
 router.post  ('/terms',                  requireRole('admin'), ctrl.createTerm);
 router.patch ('/terms/:code',            requireRole('admin'), ctrl.renameTerm);
 router.patch ('/terms/:code/status',     requireRole('admin'), ctrl.setTermStatus);

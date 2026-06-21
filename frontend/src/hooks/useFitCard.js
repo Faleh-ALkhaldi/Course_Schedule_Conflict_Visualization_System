@@ -82,16 +82,21 @@ const NAT_CODE_PX = 13; // must match .sblock-fit .sblock-code font-size in CSS
 // imperceptible — while real changes (resize, mode switch) exceed it and apply.
 const SCALE_EPS = 0.02;
 // anti-BILLBOARD displayed-code ceilings.
-//   • MAX_CODE_PX — the general ceiling. 22px ≈ 1.7×13 sits just under the hard
-//     MAX_S cap, so the roomy morning UG cards in a sparse term read large
-//     (the user's "~1.6× larger text on roomy cards", Phase 119) without
-//     shouting. Dense-term cards are fit-bound (rawScale < 1) and never reach it.
-//   • ROOMY_CODE_PX — a tighter ceiling applied ONLY to roomy buckets (rawScale
-//     > 1: the content is SMALLER than the box, sparse term). Equal to 22 today,
-//     kept as a distinct knob so a roomy ceiling can be tuned without touching
-//     the dense path. Pure one-way upper clamp ⇒ no feedback, no pulse.
-const MAX_CODE_PX = 22;
-const ROOMY_CODE_PX = 22;
+//   • MAX_CODE_PX — the general ceiling. NEW-FU-596 (Batch 27): lowered 22 → 18.
+//     22px (≈1.7×13) on the big sparse-term cards read as a "billboard" — the course
+//     code shouted across the whole block while short cards stayed small, so the grid
+//     looked inconsistent. 18px (≈1.38×13) keeps a roomy card's text comfortably larger
+//     than the dense default yet clearly NOT a billboard. Dense-term cards are
+//     fit-bound (rawScale < 1) and never reach this ceiling, so they are unaffected.
+//   • ROOMY_CODE_PX — a tighter ceiling applied ONLY to roomy buckets (rawScale > 1:
+//     the content is SMALLER than the box, sparse term — exactly the billboard case).
+//     NEW-FU-596 (Batch 27): lowered 22 → 16 so the roomiest blocks settle to a
+//     readable, in-proportion size instead of ballooning to fill empty vertical space.
+//     A distinct knob from MAX_CODE_PX so the roomy path tunes without touching dense.
+//     Pure one-way upper clamp ⇒ no feedback, no pulse, and same-size cards still share
+//     one bucket scale (uniformity preserved).
+const MAX_CODE_PX = 18;
+const ROOMY_CODE_PX = 16;
 
 // Box quantization (px) for bucketing. Cards within QUANT px of each other in
 // BOTH width and height share a size bucket — absorbs sub-pixel grid/flex

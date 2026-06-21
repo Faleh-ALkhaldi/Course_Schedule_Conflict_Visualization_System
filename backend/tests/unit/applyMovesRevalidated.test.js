@@ -70,6 +70,38 @@ describe('ScheduleService.applyMovesRevalidated (audit-2 P2-3)', () => {
     evalSpy.mockRestore();
   });
 
+  // NEW-FU-625 (audit): the gate now also refuses a SOFT-only increase. The move-only panel
+  // Quick Fix promises zero NEW conflict of ANY severity, so a stale plan that keeps the hard
+  // count flat but adds a soft conflict must still roll back (the old hard-only gate committed it).
+  test('rejects with 409 and ROLLS BACK when the plan raises the SOFT (total) count, hard unchanged', async () => {
+    const evalSpy = jest.spyOn(schedSvc, '_evaluateSchedule')
+      .mockResolvedValueOnce({ hardConflicts: [], conflicts: [{ id: 's1' }] })                // before: 0 hard / 1 total
+      .mockResolvedValueOnce({ hardConflicts: [], conflicts: [{ id: 's1' }, { id: 's2' }] }); // after:  0 hard / 2 total
+
+    await expect(
+      schedSvc.applyMovesRevalidated(SID, [{ sectionId: SID, startTime: '10:00', endTime: '10:50' }]),
+    ).rejects.toMatchObject({ status: 409 });
+
+    const calls = sqlCalls();
+    expect(calls.some((s) => /ROLLBACK/i.test(s))).toBe(true);
+    expect(calls.some((s) => /COMMIT/i.test(s))).toBe(false);
+    evalSpy.mockRestore();
+  });
+
+  // Guard against a false-refusal: a plan that LOWERS the total (a real fix) still commits.
+  // (after = [] keeps replaceAll a no-op against the mocked pg layer — the gate, not the
+  // persistence, is what we're asserting here.)
+  test('commits when the plan lowers the total conflict count (a real fix)', async () => {
+    const evalSpy = jest.spyOn(schedSvc, '_evaluateSchedule')
+      .mockResolvedValueOnce({ hardConflicts: [], conflicts: [{ id: 's1' }, { id: 's2' }] }) // before: 2 total
+      .mockResolvedValueOnce({ hardConflicts: [], conflicts: [] });                          // after:  0 total
+
+    const out = await schedSvc.applyMovesRevalidated(SID, [{ sectionId: SID, startTime: '10:00', endTime: '10:50' }]);
+    expect(out).toMatchObject({ ok: true, moved: 1 });
+    expect(sqlCalls().some((s) => /COMMIT/i.test(s))).toBe(true);
+    evalSpy.mockRestore();
+  });
+
   test('refuses an archived schedule (editability lock) before any move', async () => {
     mockClient.query.mockImplementation(async (sql) => {
       if (/FOR UPDATE/i.test(sql)) return { rowCount: 1, rows: [{ status: 'Draft', archived_at: '2025-01-01' }] };

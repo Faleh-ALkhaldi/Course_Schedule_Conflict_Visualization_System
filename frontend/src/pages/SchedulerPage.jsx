@@ -11,6 +11,45 @@ const DAY_GROUPS = {
 };
 const GROUP_DAYS = { STT:['Sunday','Tuesday','Thursday'], MW:['Monday','Wednesday'] };
 const GROUP_LABELS = { STT:'Sun / Tue / Thu (3 days, 50 min)', MW:'Mon / Wed (2 days, 75 min)', single:'Single day' };
+
+// NEW-FU-610 (Batch 30 item 3): credit-aware day-pattern re-derivation for a cross-day-group
+// drag. A move to a day outside the section's pattern must restructure the WHOLE section to the
+// legal pattern (for the course's credits/flags) that contains the target day, AND set the
+// duration that pattern requires — e.g. a 3-credit Sun/Tue/Thu @ 50 dragged to Monday becomes
+// Mon/Wed @ 75. legalDayTemplatesFE MIRRORS backend sectionPattern.legalDayTemplatesForCourse
+// (and SectionModal's copy) — keep all three in lock-step.
+const PATTERN_DAYS = {
+  STT: ['Sunday','Tuesday','Thursday'], MW: ['Monday','Wednesday'],
+  ST:  ['Sunday','Tuesday'],            TT: ['Tuesday','Thursday'],
+};
+function legalDayTemplatesFE({ credits, hasLab, duration }) {
+  const c = Number(credits), d = Number(duration);
+  if (d === 75) return (c === 3 || c === 4) ? ['MW','ST','TT'] : [];
+  if (c === 0 || c === 1) return ['single'];
+  if (c === 2) return ['ST','MW','TT'];
+  if (c === 3) return hasLab ? ['ST','MW','TT'] : ['STT'];
+  if (c === 4) return ['STT'];
+  return [];
+}
+// Pick the legal { pattern, days, duration } for `credits` whose day-set CONTAINS targetDay.
+// Prefers the section's CURRENT duration when still legal; else the pattern's required one.
+// Candidates per day are ordered 3-day → 2-day so a 3-/4-credit course keeps its 3-day shape
+// where legal, and falls to a single-day for 0/1-credit.
+function targetPatternForDrag(targetDay, credits, hasLab, currentDuration) {
+  const candidates = {
+    Sunday: ['STT','ST'], Monday: ['MW'], Tuesday: ['STT','ST','TT'],
+    Wednesday: ['MW'],    Thursday: ['STT','TT'],
+  }[targetDay] || [];
+  const durs = [Number(currentDuration), 50, 75].filter((v, i, a) => Number.isFinite(v) && a.indexOf(v) === i);
+  for (const pat of candidates) {
+    for (const dur of durs) {
+      if (legalDayTemplatesFE({ credits, hasLab, duration: dur }).includes(pat)) {
+        return { pattern: pat, days: PATTERN_DAYS[pat], duration: dur };
+      }
+    }
+  }
+  return { pattern: 'single', days: [targetDay], duration: 50 };  // 0/1-credit (or no legal multi-day)
+}
 import * as api from '../api/index.js';
 import TopBar            from '../components/shared/TopBar.jsx';
 import SidePanel         from '../components/panels/SidePanel.jsx';
@@ -368,6 +407,33 @@ export default function SchedulerPage() {
     }
   }
 
+  // NEW-FU-613 (Batch 30 follow-up): preview a proposed move/restructure and, if it would create
+  // ANY conflict, ask the user to confirm BEFORE it is applied. Returns true to PROCEED, false to
+  // ABORT. Shared by BOTH the same-group time drag AND the cross-group day-change restructure so
+  // they warn identically (same wording, same first-few-conflicts list, Move anyway / Cancel) and
+  // neither can silently create a conflict. `change` is the previewConflicts payload (sectionId +
+  // the proposed days/startTime/endTime). Advisory: if the preview itself fails, returns true
+  // (proceed — the backend + the grid still surface conflicts afterward).
+  async function confirmIfConflicts(change) {
+    try {
+      const { previewConflicts } = await import('../api/index.js');
+      const prev = await previewConflicts(schedule.id, change);
+      const clashes = prev?.conflicts ?? [];
+      if (!clashes.length) return true;
+      return await askDecision({
+        icon: <Ico name="alert" />,
+        title: `This move creates ${clashes.length} conflict${clashes.length !== 1 ? 's' : ''}`,
+        lead: clashes.slice(0, 3).map(c => c.description).join('  •  ')
+              + (clashes.length > 3 ? `  •  +${clashes.length - 3} more` : ''),
+        options: [
+          { label: 'Move anyway', value: true, tone: 'danger' },
+          { label: 'Cancel',      value: false, tone: 'neutral' },
+        ],
+        dismissValue: false,
+      });
+    } catch { return true; }
+  }
+
   async function handleDragEnd(e) {
     const prev = activeDrag;
     setActiveDrag(null);
@@ -412,21 +478,24 @@ export default function SchedulerPage() {
         // day, which is exactly what "move the lab to Sunday" should do.
         // Lecture group moves are unaffected.
         const draggedType = sec.sectionType ?? sec.section_type;
-        const origGroup = draggedType === 'Lab' ? 'single' : (DAY_GROUPS[sec.day] ?? 'single');
-        const newGroup  = DAY_GROUPS[day]     ?? 'single';
+        // NEW-FU-619 (audit P2): trigger the cross-pattern restructure when the target day is
+        // OUTSIDE the section's CURRENT day-set — not via the coarse STT/MW DAY_GROUPS table,
+        // which is blind to 2-day ST/TT patterns. A 2-credit Sun/Tue section dragged to Thursday
+        // used to read origGroup==newGroup=='STT' → no restructure → it fell through to a
+        // time-only move that assignSection then coerced back to Sunday → a SILENT no-op with no
+        // feedback. Now any multi-day lecture dropped onto a day not in its pattern restructures
+        // to the legal pattern containing that day (confirmGroupChange → targetPatternForDrag).
+        // Labs are single-day, so they skip this and move freely below.
+        const sectionDays = sections.filter(s =>
+          (s.courseId      ?? s.course_id)      === (sec.courseId      ?? sec.course_id) &&
+          (s.sectionNumber ?? s.section_number) === (sec.sectionNumber ?? sec.section_number) &&
+          (s.gender ?? 'M') === (sec.gender ?? 'M')   // gender-scoped, matching the section identity
+        ).map(s => s.day);
+        const isMultiDayLec = draggedType !== 'Lab' && sectionDays.length > 1;
 
-        // If dropped onto a different day group → show confirmation first
-        if (origGroup !== newGroup && origGroup !== 'single') {
-          // NEW-FU-73: compute the actual sibling count from current state
-          // so the modal's "delete all N day-sections" copy reflects reality
-          // rather than the group constant (3 for STT, 2 for MW).
-          const courseId = sec.courseId ?? sec.course_id;
-          const secNumber = sec.sectionNumber ?? sec.section_number;
-          const actualSiblingCount = sections.filter(s =>
-            (s.courseId ?? s.course_id) === courseId &&
-            (s.sectionNumber ?? s.section_number) === secNumber
-          ).length;
-          setGroupChangeModal({ sec, newDay: day, newStartTime: startTime, duration, actualSiblingCount });
+        // If dropped onto a day OUTSIDE this multi-day section's pattern → confirm a restructure.
+        if (isMultiDayLec && !sectionDays.includes(day)) {
+          setGroupChangeModal({ sec, newDay: day, newStartTime: startTime, duration, actualSiblingCount: sectionDays.length });
           return;
         }
 
@@ -479,12 +548,38 @@ export default function SchedulerPage() {
           }
         }
 
+        // NEW-FU-611 (Batch 30 item 3a): warn-and-confirm BEFORE a drag creates a conflict.
+        // Preview the move (the whole group's days at the new time); if it would clash, ask the
+        // user to confirm. Cancel → return WITHOUT moving, so the card snaps back to its original
+        // slot (state is untouched, so React re-renders it where it was). Confirm → apply and let
+        // the conflict surface in the panel. No drag silently creates a conflict. Advisory: if the
+        // preview itself fails, fall through to the move (the grid still shows conflicts after).
+        const endTime = fromMinutes(timeToMin(startTime) + duration);
+        const sameGroup = (s) =>
+          (s.courseId ?? s.course_id) === (sec.courseId ?? sec.course_id) &&
+          (s.sectionNumber ?? s.section_number) === (sec.sectionNumber ?? sec.section_number) &&
+          (s.gender ?? 'M') === (sec.gender ?? 'M');
+        const groupDays = sections.filter(sameGroup).map(s => s.day);
+        // Shared pre-apply conflict confirmation (NEW-FU-613). Cancel → return, card snaps back.
+        const ok = await confirmIfConflicts({
+          sectionId:     sec.id,
+          courseId:      sec.courseId      ?? sec.course_id,
+          instructorId:  sec.instructorId  ?? sec.instructor_id ?? null,
+          venueId:       sec.venueId       ?? sec.venue_id      ?? null,
+          sectionNumber: sec.sectionNumber ?? sec.section_number,
+          sectionType:   sec.sectionType   ?? sec.section_type  ?? 'Lec',
+          gender:        sec.gender ?? 'M',
+          days:          groupDays.length ? groupDays : [effectiveDay],
+          startTime, endTime,
+        });
+        if (!ok) return;   // revert — card returns to its original day/time
+
         await moveSection(sec.id, {
           instructorId: sec.instructorId ?? sec.instructor_id,
           venueId:      sec.venueId      ?? sec.venue_id,
           day: effectiveDay,
           startTime,
-          endTime: fromMinutes(timeToMin(startTime) + duration),
+          endTime,
         });
         // Reload to show all siblings at new time
         if (schedule) loadView(schedule.id, view, filterId);
@@ -524,9 +619,39 @@ export default function SchedulerPage() {
     const { sec, newDay, newStartTime, duration } = groupChangeModal;
     setGroupChangeModal(null);
 
-    const newGroup   = DAY_GROUPS[newDay] ?? 'single';
-    const newDays    = newGroup !== 'single' ? GROUP_DAYS[newGroup] : [newDay];
-    const newEndTime = fromMinutes(timeToMin(newStartTime) + duration);
+    // NEW-FU-610 (Batch 30 item 3): re-derive the WHOLE-section pattern AND duration for the
+    // course's credits/flags — not the coarse STT/MW guess at the old duration. A 3-credit
+    // Sun/Tue/Thu @ 50 dragged to Monday becomes Mon/Wed @ 75; a 2-credit section dragged to
+    // Sunday becomes Sun/Tue @ 50; a 1-credit becomes a single day. This makes the restructure
+    // produce a pattern the backend validator accepts (the old fixed-duration path created an
+    // illegal Mon/Wed @ 50 for a 3-credit course and the create then 400'd).
+    const course   = courses.find(c => c.id === (sec.courseId ?? sec.course_id));
+    const credits  = course?.credits ?? sec.credits;
+    const hasLab   = course?.has_lab ?? sec.hasLab ?? sec.has_lab ?? false;
+    const tgt        = targetPatternForDrag(newDay, credits, hasLab, duration);
+    const newDays    = tgt.days;
+    const newEndTime = fromMinutes(timeToMin(newStartTime) + tgt.duration);
+
+    // NEW-FU-613 (Batch 30 follow-up): warn-and-confirm BEFORE the restructure creates a conflict
+    // — parity with the same-group time drag. Preview the NEW (re-derived) day-set + duration +
+    // start time; if it would clash, ask the user via the SAME shared popup. This runs BEFORE any
+    // mutation: Cancel → return now, so nothing is deleted or created and the section stays exactly
+    // as it was (the card never left its place). Confirm → fall through to the delete+recreate and
+    // let the conflict surface. previewConflicts excludes this section's own (old) group by
+    // identity, so the check is "does the new pattern clash with OTHER sections?".
+    const ok = await confirmIfConflicts({
+      sectionId:     sec.id,
+      courseId:      sec.courseId      ?? sec.course_id,
+      instructorId:  sec.instructorId  ?? sec.instructor_id ?? null,
+      venueId:       sec.venueId       ?? sec.venue_id      ?? null,
+      sectionNumber: sec.sectionNumber ?? sec.section_number,
+      sectionType:   sec.sectionType   ?? sec.section_type  ?? 'Lec',
+      gender:        sec.gender ?? 'M',
+      days:          newDays,
+      startTime:     newStartTime,
+      endTime:       newEndTime,
+    });
+    if (!ok) return;   // aborted before any delete/create — section untouched
 
     // H-8 + NEW-FU-40: Create new sections FIRST so a failed create leaves
     // the old group intact. Use ONE createSection call with the `days` array
@@ -564,7 +689,7 @@ export default function SchedulerPage() {
       });
       await deleteSection(sec.id);
       recordMutation('move section');   // NEW-FU-549: one undo step for the restructure
-      showToast(`✓ Section moved to ${GROUP_LABELS[newGroup] ?? newDay}.`, 'success');
+      showToast(`✓ Section moved to ${tgt.days.map(d => d.slice(0,3)).join('/')} · ${tgt.duration} min.`, 'success');
       loadView(schedule.id, view, filterId);
     } catch(err) {
       showToast(err.response?.data?.error || 'Failed to change group.', 'error');
@@ -595,8 +720,8 @@ export default function SchedulerPage() {
         // from the Save button.
         return;
       }
-      showToast(r.saved ? '✓ Schedule saved.' : 'Conflicts remain.', r.saved ? 'success' : 'error');
-    } catch { showToast('Save failed.', 'error'); }
+      showToast(r.saved ? '✓ Term finalized & locked.' : 'Conflicts remain.', r.saved ? 'success' : 'error');
+    } catch { showToast('Finalize failed.', 'error'); }
   }
 
   // NEW-FU-467 (Phase 112): un-finalize ("Unlock") parity with Save — the user
@@ -696,29 +821,22 @@ export default function SchedulerPage() {
     setSectionModal({ mode: 'edit', initial: { section } });
   }
 
-  // NEW-FU-272/273: grid-block quick-delete handler.
-  //   scope='row'   → DELETE just this meeting day (calls /sections/:id?scope=row)
-  //   scope='group' → DELETE the whole section group (default endpoint behavior)
-  // Confirmation prompts differ by scope:
-  //   • per-day: light prompt, low-risk action ("delete this meeting day?")
-  //   • group:   stronger prompt naming the course + section
-  // After success we reload the view so the deleted block (and any new
-  // R-15 conflict on the surviving group) appear.
-  async function handleSectionDelete(section, scope) {
+  // NEW-FU-272/273 + NEW-FU-609 + NEW-FU-629 (audit): grid-block quick-delete handler.
+  // The grid ✕ ALWAYS deletes the whole section group (all meeting days) — a section has
+  // one identity across its days, so a per-day delete would leave an impossible partial
+  // group. The old scope='row' path was removed (SectionBlock hardcodes a group delete and
+  // its `deleteSectionRow` API helper is gone). After success we reload the view so the
+  // deleted block (and any new R-15 conflict on a surviving group) appear.
+  async function handleSectionDelete(section) {
     if (!schedule || scheduleLocked) return;
     const courseCode = section.courseCode ?? section.course_code ?? '';
     const secNum     = section.sectionNumber ?? section.section_number ?? '';
-    const day        = section.day ?? '';
     // NEW-FU-547 (Batch 15 Issue 5): themed dialog (askDecision/DecisionModal) instead
     // of the native window.confirm white panel — dark-mode compatible.
     const ok = await askDecision({
       icon: <Ico name="alert" />,
-      title: scope === 'row'
-        ? `Delete the ${day} meeting of ${courseCode} §${secNum}?`
-        : `Delete ALL meeting days of ${courseCode} §${secNum}?`,
-      lead: scope === 'row'
-        ? 'Other meeting days of this section will remain.'
-        : 'This removes the entire section.',
+      title: `Delete ALL meeting days of ${courseCode} §${secNum}?`,
+      lead: 'This removes the entire section.',
       options: [
         { label: 'Delete', value: true, tone: 'danger' },
         { label: 'Cancel', value: false, tone: 'neutral' },
@@ -727,20 +845,10 @@ export default function SchedulerPage() {
     });
     if (!ok) return;
     try {
-      const { deleteSection, deleteSectionRow } = await import('../api/index.js');
-      if (scope === 'row') await deleteSectionRow(section.id);
-      else                 await deleteSection(section.id);
-      recordMutation(scope === 'row' ? 'delete meeting' : 'delete section');   // NEW-FU-549
-      // NEW-FU-299/FU-300 (Phase 26): toast text explicitly names which
-      // SCOPE happened. Prior text was ambiguous ("Removed Tuesday meeting"
-      // vs "Removed SWE201 §01") and the user couldn't tell at a glance
-      // whether they'd just deleted one day or the whole group. Now the
-      // toast names BOTH the scope and the target so future delete-scope
-      // regressions are visible without opening DevTools.
-      const toast = scope === 'row'
-        ? `✓ Removed ${day} meeting of ${courseCode} §${secNum} (other days remain).`
-        : `✓ Removed entire section ${courseCode} §${secNum} (all meeting days).`;
-      showToast(toast, 'success');
+      const { deleteSection } = await import('../api/index.js');
+      await deleteSection(section.id);
+      recordMutation('delete section');   // NEW-FU-549
+      showToast(`✓ Removed entire section ${courseCode} §${secNum} (all meeting days).`, 'success');
       await loadView(schedule.id, view, filterId);
     } catch (err) {
       showToast('Delete failed: ' + (err.response?.data?.error ?? err.message), 'error');
@@ -1031,7 +1139,11 @@ export default function SchedulerPage() {
         // `instructors`/`venues` — otherwise dummyInstrCount/dummyVenueCount stay 0
         // and the "X instructors / Y venues needed to go live" banner never shows.
         await loadReference(schedule.semester);
-        clearHistory?.();   // NEW-FU-549 (Batch 16): Suggest regenerates the schedule → reset undo history
+        // NEW-FU-585 (Batch 25): Suggest is now UNDOABLE. The snapshot+reconcile history
+        // captures the whole regenerated schedule as ONE step (before = pre-Suggest baseline,
+        // after = this post-Suggest snapshot), so Cmd+Z reverts the entire Suggest — instead
+        // of the Batch-16 `clearHistory()` that wiped the stack and left undo dead afterwards.
+        await recordMutation('Suggest');
         return r;
       });
       const hard   = (result.conflicts??[]).filter(c=>c.severity==='Hard').length;
@@ -1131,7 +1243,7 @@ export default function SchedulerPage() {
                 <span className="scheduler-archived-icon" aria-hidden="true"><Ico name="lock" /></span>
                 <span className="scheduler-archived-msg">
                   This term is <strong>finalized</strong> and is read-only.
-                  Click <strong>Unlock</strong> in the top bar to make changes.
+                  Click the <strong>Locked</strong> button in the top bar to unlock it and make changes.
                 </span>
               </div>
             )}

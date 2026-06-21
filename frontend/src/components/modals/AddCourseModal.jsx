@@ -35,6 +35,26 @@ import './SectionModal.css';
 // so a space is required.
 const COURSE_NAME_DISALLOWED = /[^A-Za-z0-9 .,&()/+'-]/g;
 const sanitizeCourseName = (raw) => String(raw ?? '').replace(COURSE_NAME_DISALLOWED, '');
+
+// NEW-FU-597 (Batch 27): accurate English TITLE CASE for course names, applied LIVE as the
+// user types (so the field shows "Introduction to Software Engineering" while writing) and
+// again on save. Rules: capitalize the first letter of every word; lowercase the small
+// "minor" words (articles / conjunctions / short prepositions) UNLESS they lead the title;
+// keep Roman numerals upper ("Senior Design Project II"). Case-only ⇒ same length ⇒ the
+// caret stays put while typing left-to-right. Mirrored server-side (domain/courseFormat).
+const COURSE_MINOR_WORDS = new Set(['a','an','the','and','or','nor','but','for','yet','so',
+  'of','to','in','on','at','by','as','up','off','per','via','with','from','into']);
+const COURSE_ROMAN_RE = /^(?=[ivx])x{0,3}(ix|iv|v?i{0,3})$/i; // I, II, III, IV … X, etc.
+const capCourseWord = (w) =>
+  w.toLowerCase().replace(/(^|[-/'(])([a-z])/g, (_, p, c) => p + c.toUpperCase());
+const titleCaseCourseName = (raw) =>
+  String(raw ?? '').split(' ').map((w, i) => {
+    if (w === '') return w;                                  // keep spaces (incl. trailing) mid-type
+    const lower = w.toLowerCase();
+    if (COURSE_ROMAN_RE.test(lower)) return w.toUpperCase(); // Roman numerals stay upper
+    if (i !== 0 && COURSE_MINOR_WORDS.has(lower)) return lower; // minor word (not leading) → lower
+    return capCourseWord(w);
+  }).join(' ');
 const COURSE_NAME_RE = /^(?!.*(.)\1{3})(?=.*[A-Za-z]{2})[A-Za-z][A-Za-z0-9 .,&()/+'-]+$/;
 
 export default function AddCourseModal({ onClose, showToast }) {
@@ -62,6 +82,11 @@ export default function AddCourseModal({ onClose, showToast }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  // NEW-FU-592 (Batch 26): clear a stale submit error the instant the user edits any
+  // form field, so a backend error from a previous attempt never lingers as a stuck
+  // flag over a now-valid input. (Parity with Add Venue / Add Instructor.)
+  useEffect(() => { setError(''); }, [form]);
+
   // NEW-FU-484 (Phase 118 item 3): level-gated flags.
   // CAPSTONE = Undergraduate + Senior only.
   // EXTERNAL = Undergraduate + Junior only.
@@ -70,22 +95,48 @@ export default function AddCourseModal({ onClose, showToast }) {
   // in the useEffect dependency array.
   const capstoneAllowed = form.category === 'UG' && form.academicLevel === 'Senior';
   const externalAllowed = form.category === 'UG' && form.academicLevel === 'Junior';
+  // NEW-FU-600 (Batch 28): a lab only makes sense for a 3- or 4-credit course (4-credit MUST
+  // have one; 3-credit may). 0/1/2-credit courses meet too few hours to carry a lab section, so
+  // the "Has lab" flag is DISABLED for them (and cleared if credits drop into that range).
+  const labAllowed = form.credits === '3' || form.credits === '4';
+  // NEW-FU-595 (Batch 27): only ONE external (internship / summer-training co-op) course is
+  // allowed per term. If the active term already has one, disable the External toggle with a
+  // clear note. `courses` is the term-scoped reference list, so an external course here is
+  // already "in" this term. (The backend create + section-create guards are the backstop.)
+  const externalCourse = (courses || []).find(c => c.is_external);
+  const externalTaken  = !!externalCourse;
+  const externalSelectable = externalAllowed && !externalTaken;
+  // NEW-FU-602 (Batch 28 item 3): a 0-credit course must be a Capstone. The effect above
+  // auto-ticks Capstone when the level allows it (UG Senior); this error covers the case where
+  // it can't (non-Senior 0-credit) — Save is blocked until the user sets the level to Senior,
+  // which enables Capstone. Mirrors the backend creditsFlagError 0cr⇒capstone gate.
+  const creditCapstoneError = (form.credits === '0' && !form.isCapstone)
+    ? 'A 0-credit course must be a Capstone (Senior graduation project, e.g. SWE 413). Set the academic level to Senior to enable it.'
+    : null;
 
   // NEW-FU-422 (Phase 104 item 4): LIVE code/name validation mirroring the API
   // rule — flagged as the user types, not on Save. Code = "SWE " + 101–699.
   const codeError = (() => {
     const c = (form.courseCode || '').trim();
     if (!c) return null;                         // emptiness → handled by Save guard
+    // NEW-FU-599 (Batch 28): the FIRST digit fixes the band — only 1–6 can yield 101–699, so a
+    // leading 0/7/8/9 can never be valid. Flag it the INSTANT it's typed (1 digit is enough),
+    // instead of waiting for all three digits — "999" or "7…" reads as out-of-range right away.
+    const num = c.replace(/^SWE\s*/i, '');
+    if (num && !/^[1-6]/.test(num)) return 'Course number must be 101–699 — it must start with 1–6.';
     const m = /^SWE (\d{3})$/.exec(c);
     if (!m) return 'Enter the 3-digit course number after SWE (e.g. 206).';
     const n = parseInt(m[1], 10);
     if (n < 101 || n > 699) return `Course number must be 101–699 (got ${m[1]}).`;
     return null;
   })();
-  // NEW-FU-576 (Batch 22): the course-code NUMBER fixes the academic level/category —
-  // 100–199 Freshman, 200–299 Sophomore, 300–399 Junior, 400–499 Senior, 500–699 Graduate.
-  // If the chosen category/level doesn't match the number, flag it AS THE USER TYPES and
-  // block Save until they correct the level (or the number) so the two always agree.
+  // NEW-FU-579 (Batch 24): course NUMBER ↔ academic level/category are LIVE-LINKED in BOTH
+  // directions, so a mismatch can't occur (the Batch-22 blocking error is gone). The hundreds
+  // digit fixes the band — 1xx Freshman, 2xx Sophomore, 3xx Junior, 4xx Senior, 5xx/6xx
+  // Graduate. Typing the number sets level+category (levelForCourseNumber, in the code
+  // onChange); choosing a level/category rewrites the hundreds digit (LEVEL_PREFIX +
+  // withHundreds, in the chip handlers). Backend courseCodeLevelError stays the authoritative
+  // backstop for any direct API call.
   const levelForCourseNumber = (n) =>
       n >= 100 && n <= 199 ? { category: 'UG', level: 'Freshman' }
     : n >= 200 && n <= 299 ? { category: 'UG', level: 'Sophomore' }
@@ -93,14 +144,19 @@ export default function AddCourseModal({ onClose, showToast }) {
     : n >= 400 && n <= 499 ? { category: 'UG', level: 'Senior' }
     : n >= 500 && n <= 699 ? { category: 'GR', level: 'Graduate' }
     : null;
-  const levelError = (() => {
-    const m = /^SWE (\d{3})$/.exec((form.courseCode || '').trim());
-    if (!m || codeError) return null;                 // empty/invalid code handled by codeError
-    const expected = levelForCourseNumber(parseInt(m[1], 10));
-    if (!expected || (form.category === expected.category && form.academicLevel === expected.level)) return null;
-    const want = expected.category === 'GR' ? 'Graduate' : `Undergraduate → ${expected.level}`;
-    return `SWE ${m[1]} is a ${expected.level} course — set the level to ${want} to match the number (or change the number).`;
-  })();
+  const LEVEL_PREFIX = { Freshman: '1', Sophomore: '2', Junior: '3', Senior: '4', Graduate: '5' };
+  // Rewrite the hundreds digit of the code to `h`, keeping the last two digits already typed.
+  const withHundreds = (code, h) => {
+    const digits = (code || '').replace(/^SWE\s*/i, '').replace(/\D/g, '').slice(0, 3);
+    const next = h + digits.slice(1);
+    return next ? `SWE ${next}` : '';
+  };
+  // Graduate keeps an existing 5xx/6xx prefix (600-level is advanced-graduate — allowed);
+  // otherwise it defaults to 5xx (where most graduate courses live).
+  const gradHundreds = (code) => {
+    const h = (code || '').replace(/^SWE\s*/i, '').replace(/\D/g, '').charAt(0);
+    return h === '5' || h === '6' ? h : '5';
+  };
   const nameError = (() => {
     const nm = (form.name || '').trim();
     if (!nm) return null;
@@ -127,7 +183,8 @@ export default function AddCourseModal({ onClose, showToast }) {
     return courses.some(co => (co.name || '').trim().toLowerCase() === nm.toLowerCase())
       ? `A course named "${nm}" already exists.` : null;
   })();
-  const formInvalid = !!codeError || !!levelError || !!nameError || !!dupCodeError || !!dupNameError
+  const formInvalid = !!codeError || !!nameError || !!dupCodeError || !!dupNameError
+    || !!creditCapstoneError   // FU-602: 0-credit must be a Capstone
     || !(form.courseCode || '').trim() || !(form.name || '').trim();
 
   // NEW-FU-484 (Phase 118 item 3): auto-uncheck gated flags when the user
@@ -138,10 +195,22 @@ export default function AddCourseModal({ onClose, showToast }) {
     setForm(f => {
       const next = { ...f };
       if (!capstoneAllowed && f.isCapstone) next.isCapstone = false;
-      if (!externalAllowed && f.isExternal) next.isExternal = false;
+      // NEW-FU-595 (Batch 27): clear External when it's not selectable — out of its
+      // level OR the term already has an external course.
+      if ((!externalAllowed || externalTaken) && f.isExternal) next.isExternal = false;
+      // NEW-FU-600 (Batch 28): clear Has-lab when credits drop to 0/1/2 (no lab allowed there).
+      if (!labAllowed && f.hasLab) next.hasLab = false;
+      // NEW-FU-602 (Batch 28 item 3): a 0-credit course MUST be a Capstone (it carries no
+      // credit because it IS the graduation project, e.g. SWE 413). Auto-enable Capstone when
+      // the level allows it (UG Senior) — clearing the mutually-exclusive flags — so the smooth
+      // path (type SWE 413 → Senior → 0 credits) needs no extra click. When the level doesn't
+      // allow capstone, creditCapstoneError blocks Save until the user sets the level to Senior.
+      if (f.credits === '0' && capstoneAllowed && !next.isCapstone) {
+        next.isCapstone = true; next.hasLab = false; next.isExternal = false;
+      }
       return next;
     });
-  }, [capstoneAllowed, externalAllowed]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [capstoneAllowed, externalAllowed, externalTaken, labAllowed, form.credits]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // NEW-FU-423 (Phase 104 item 3): course type flags are mutually exclusive —
   // pick AT MOST ONE of has-lab / capstone / external. Selecting one clears the
@@ -159,7 +228,9 @@ export default function AddCourseModal({ onClose, showToast }) {
     e.preventDefault();
     setBusy(true); setError('');
     try {
-      await addCourse(form);
+      // NEW-FU-597 (Batch 27): title-case the name on save too — belt-and-suspenders in case
+      // it was set programmatically; the live onChange already keeps it title-cased.
+      await addCourse({ ...form, name: titleCaseCourseName(form.name) });
       showToast(`✓ Course ${form.courseCode} added.`, 'success');
       onClose();
     } catch (err) {
@@ -201,19 +272,24 @@ export default function AddCourseModal({ onClose, showToast }) {
                 aria-label="Course number (101–699)"
                 aria-invalid={!!codeError || !!dupCodeError}
                 value={(form.courseCode || '').replace(/^SWE\s*/i, '').replace(/\D/g, '').slice(0, 3)}
-                onChange={e => { const d = e.target.value.replace(/\D/g, '').slice(0, 3); setForm(f => ({ ...f, courseCode: d ? `SWE ${d}` : '' })); }} />
+                onChange={e => { const d = e.target.value.replace(/\D/g, '').slice(0, 3); setForm(f => {
+                  const next = { ...f, courseCode: d ? `SWE ${d}` : '' };
+                  // NEW-FU-579 (Batch 24): the hundreds digit immediately drives level + category.
+                  const band = d ? levelForCourseNumber(parseInt(d[0] + '00', 10)) : null;
+                  if (band) { next.category = band.category; next.academicLevel = band.level; }
+                  return next;
+                }); }} />
             </div>
             {codeError && <p className="sm-inline-error" role="alert"><span>{codeError}</span></p>}
             {!codeError && dupCodeError && <p className="sm-inline-error" role="alert"><span>{dupCodeError}</span></p>}
             {/* NEW-FU-576 (Batch 22): the number must match the selected academic level. */}
-            {!codeError && !dupCodeError && levelError && <p className="sm-inline-error" role="alert"><span>{levelError}</span></p>}
           </div>
 
           <div className="sm-field">
             <label>Course name</label>
             <input placeholder="e.g. Software Architecture" value={form.name}
               aria-invalid={!!nameError || !!dupNameError}
-              onChange={e => setForm(f => ({ ...f, name: sanitizeCourseName(e.target.value) }))} />
+              onChange={e => setForm(f => ({ ...f, name: titleCaseCourseName(sanitizeCourseName(e.target.value)) }))} />
             {nameError && <p className="sm-inline-error" role="alert"><span>{nameError}</span></p>}
             {!nameError && dupNameError && <p className="sm-inline-error" role="alert"><span>{dupNameError}</span></p>}
           </div>
@@ -222,13 +298,15 @@ export default function AddCourseModal({ onClose, showToast }) {
             <label>Category</label>
             <div style={{ display: 'flex', gap: 8 }}>
               <Chip active={form.category === 'UG'}
-                onClick={() => setForm(f => ({
-                  ...f, category: 'UG',
-                  academicLevel: f.academicLevel === 'Graduate' ? 'Junior' : f.academicLevel,
-                }))}
+                onClick={() => setForm(f => {
+                  // NEW-FU-579 (Batch 24): switching to UG also rewrites the hundreds digit to
+                  // match the resulting level (Graduate→Junior fallback), keeping code ↔ level in sync.
+                  const level = f.academicLevel === 'Graduate' ? 'Junior' : f.academicLevel;
+                  return { ...f, category: 'UG', academicLevel: level, courseCode: withHundreds(f.courseCode, LEVEL_PREFIX[level]) };
+                })}
                 style={{ flex: 1 }}>Undergraduate</Chip>
               <Chip active={form.category === 'GR'}
-                onClick={() => setForm(f => ({ ...f, category: 'GR', academicLevel: 'Graduate' }))}
+                onClick={() => setForm(f => ({ ...f, category: 'GR', academicLevel: 'Graduate', courseCode: withHundreds(f.courseCode, gradHundreds(f.courseCode)) }))}
                 style={{ flex: 1 }}>Graduate</Chip>
             </div>
           </div>
@@ -239,7 +317,7 @@ export default function AddCourseModal({ onClose, showToast }) {
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {['Freshman', 'Sophomore', 'Junior', 'Senior'].map(l => (
                   <Chip key={l} active={form.academicLevel === l}
-                    onClick={() => setForm(f => ({ ...f, academicLevel: l }))}
+                    onClick={() => setForm(f => ({ ...f, academicLevel: l, courseCode: withHundreds(f.courseCode, LEVEL_PREFIX[l]) }))}
                     style={{ flex: '1 1 calc(50% - 3px)' }}>{l}</Chip>
                 ))}
               </div>
@@ -263,6 +341,11 @@ export default function AddCourseModal({ onClose, showToast }) {
                   style={{ flex: 1 }}>{c}</Chip>
               ))}
             </div>
+            {/* NEW-FU-602 (Batch 28 item 3): a 0-credit course must be a Capstone. Auto-ticked
+                when the level is Senior; this flags the non-Senior case and blocks Save. */}
+            {creditCapstoneError && (
+              <p className="sm-inline-error" role="alert"><span>{creditCapstoneError}</span></p>
+            )}
           </div>
 
           {/* NEW-FU-578 (Batch 23): the "Number of sections · parallel sections per term"
@@ -282,16 +365,25 @@ export default function AddCourseModal({ onClose, showToast }) {
           <div className="sm-field" style={{ borderTop: '1px solid var(--slate-200)', paddingTop: 12, marginTop: 4 }}>
             <label style={{ marginBottom: 6 }}>Course flags</label>
 
+            {/* NEW-FU-600 (Batch 28): disabled + note for 0/1/2-credit (no lab allowed). */}
             <label className="acm-flag-row" style={{
-              display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0', cursor: 'pointer',
+              display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0',
+              cursor: labAllowed ? 'pointer' : 'default',
+              opacity: labAllowed ? 1 : 0.45,
             }}>
               <input type="checkbox" checked={form.hasLab} style={{ marginTop: 3, flex: '0 0 auto' }}
+                disabled={!labAllowed}
                 onChange={() => pickFlag('hasLab')} />
               <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
                 <strong>Has lab sections</strong>{' '}
                 <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
                   — course has both lectures and hands-on labs; you'll choose Lecture or Lab when adding a section.
                 </span>
+                {!labAllowed && (
+                  <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
+                    Only available for 3- and 4-credit courses (4-credit requires a lab).
+                  </span>
+                )}
               </span>
             </label>
 
@@ -322,12 +414,12 @@ export default function AddCourseModal({ onClose, showToast }) {
 
             <label className="acm-flag-row" style={{
               display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0',
-              cursor: externalAllowed ? 'pointer' : 'default',
-              opacity: externalAllowed ? 1 : 0.45,
+              cursor: externalSelectable ? 'pointer' : 'default',
+              opacity: externalSelectable ? 1 : 0.45,
             }}>
               <input type="checkbox" checked={form.isExternal}
                 style={{ marginTop: 3, flex: '0 0 auto' }}
-                disabled={!externalAllowed}
+                disabled={!externalSelectable}
                 onChange={() => pickFlag('isExternal')} />
               <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
                 <strong>External</strong>{' '}
@@ -338,6 +430,12 @@ export default function AddCourseModal({ onClose, showToast }) {
                 {!externalAllowed && (
                   <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
                     Only available for Undergraduate → Junior courses.
+                  </span>
+                )}
+                {/* NEW-FU-595 (Batch 27): one external course per term. */}
+                {externalAllowed && externalTaken && (
+                  <span style={{ display: 'block', marginTop: 3, color: 'var(--amber-500, #d97706)', fontStyle: 'italic', fontSize: '.8rem' }}>
+                    This term already has an external course ({externalCourse.course_code ?? externalCourse.courseCode}). Only one internship / co-op course is allowed per term.
                   </span>
                 )}
               </span>

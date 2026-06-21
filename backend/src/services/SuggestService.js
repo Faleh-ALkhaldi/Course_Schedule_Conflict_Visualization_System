@@ -22,7 +22,7 @@ const InstructorRepository = require('../repositories/InstructorRepository');
 const Section              = require('../domain/Section');
 // NEW-FU-25: use the constant instead of the literal 'Finalized'. Same value
 // today; insulates from a future status-enum rename.
-const { SCHEDULE_STATUS, ACADEMIC_LEVELS: ACADEMIC_LEVEL_NUM, TIME_WINDOWS }  = require('../config/constants');
+const { SCHEDULE_STATUS, ACADEMIC_LEVELS: ACADEMIC_LEVEL_NUM, TIME_WINDOWS, teachingWindowFor }  = require('../config/constants'); // teachingWindowFor NEW-FU-628 (audit)
 
 const engine      = new ConflictEngine();
 const sectionRepo = new SectionRepository();
@@ -57,7 +57,7 @@ function timesOverlap(s1, e1, s2, e2) {
 // ONE_DAY_* synthetic patterns can expand to 5 single-day candidates
 // for the greedy phase) plus the fixed duration. For multi-day
 // patterns dayCombos is just [days].
-function generateSlots(pattern, category) {
+function generateSlots(pattern, category, courseCode = null) {
   const resolved = resolvePattern(pattern);
   if (!resolved) {
     // Unknown pattern → empty slot list. The suggester will skip this
@@ -65,11 +65,13 @@ function generateSlots(pattern, category) {
     return [];
   }
   const { dayCombos, duration } = resolved;
-  // Slot bounds come from constants.TIME_WINDOWS (UG 07:00–17:10, GR 17:20–22:00)
-  // so the suggester never emits a slot R-06 would reject. These used to
-  // disagree: this generator hardcoded the GR start at 17:00, but R-06 requires
-  // GR ≥ 17:20 — so the greedy could place a GR section the engine then flagged.
-  const win = TIME_WINDOWS[category === 'GR' ? 'GR' : 'UG'];
+  // NEW-FU-628 (audit): route through the shared R-06-aware resolver so Suggest matches
+  // the rest of the system (previewConflicts / Quick Fix). FU-621 unified five window
+  // sites onto teachingWindowFor but missed Suggest — so it clamped SWE 412 (the one
+  // R-06-time-exempt course) to the 07:00–17:10 UG day and could report no feasible
+  // placement for the evening the registrar actually uses. An exempt course now gets the
+  // full 07:00–22:00 day; everything else keeps its strict UG/GR window.
+  const win = teachingWindowFor({ category, courseCode });
   const slots = [];
   for (const days of dayCombos) {
     for (let start = win.start; start + duration <= win.end; start += 30) {
@@ -96,12 +98,12 @@ const ALL_WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
 // 160-min default (the modal lets the user pick 50/75/160).
 // Defaults (no overrides) preserve pre-FU-252 behavior so legacy
 // callers continue to work unchanged.
-function generateLabSlots(category, { day, duration } = {}) {
+function generateLabSlots(category, { day, duration } = {}, courseCode = null) {
   const dur = Number(duration) || LAB_DURATION;
   const days = day ? [day] : ALL_WEEKDAYS;
-  // Same TIME_WINDOWS source as generateSlots — keep lab placement inside the
-  // R-06 window (UG 07:00–17:10, GR 17:20–22:00) instead of the old 17:00/22:00.
-  const win = TIME_WINDOWS[category === 'GR' ? 'GR' : 'UG'];
+  // NEW-FU-628 (audit): R-06-aware via the shared resolver (see generateSlots) — an
+  // exempt course (SWE 412) gets the full teaching day instead of the UG-only window.
+  const win = teachingWindowFor({ category, courseCode });
   const slots = [];
   for (const d of days) {
     for (let start = win.start; start + dur <= win.end; start += 30) {
@@ -1131,7 +1133,7 @@ class SuggestService {
       const patternInput = cfg.dayPattern
         ? { dayPattern: cfg.dayPattern, duration: cfg.duration, day: cfg.day }
         : cfg.pattern;
-      const lecSlots = generateSlots(patternInput, info.category);
+      const lecSlots = generateSlots(patternInput, info.category, info.courseCode);  // NEW-FU-628: R-06-aware
       // Keep a string representation for the task's `pattern` field so
       // downstream observability (logs / records) stays string-typed.
       const patternStr = cfg.dayPattern
@@ -1157,7 +1159,7 @@ class SuggestService {
         const labSlots = generateLabSlots(info.category, {
           day: cfg.labDay,
           duration: cfg.labDuration,
-        });
+        }, info.courseCode);  // NEW-FU-628: R-06-aware
         for (let sec = 1; sec <= cfg.sections; sec++) {
           tasks.push({
             ...info,
@@ -2320,3 +2322,7 @@ class SuggestService {
 }
 
 module.exports = new SuggestService();
+// NEW-FU-628 (audit): expose the pure slot generators for unit testing the R-06-aware
+// window (SWE 412 full-day vs. the strict UG/GR window). Not used by production callers.
+module.exports._generateSlots = generateSlots;
+module.exports._generateLabSlots = generateLabSlots;

@@ -121,16 +121,20 @@ async function assertSchedulerEditableLocked(client, scheduleId) {
  * Accepts an optional `db` (a transactional client) so callers running inside
  * a transaction can read with the same snapshot.
  */
-async function findSiblings(scheduleId, courseId, sectionNumber, day, startTime, endTime, db = { query }) {
+async function findSiblings(scheduleId, courseId, sectionNumber, day, startTime, endTime, gender, db = { query }) {
   const group = getDayGroup(day);
   if (!group) return [];
   const groupDays = GROUP_DAYS[group];
+  // NEW-FU-618 (audit P3): GENDER-SCOPE the sibling time-move. The section identity is
+  // (course, number, gender); without the gender filter, time-moving one gender's group also
+  // re-timed an opposite-gender same-number group sitting at the identical slot — narrower than
+  // the delete bug (needs an exact time collision) but the same root inconsistency.
   const res = await db.query(`
     SELECT id, day FROM sections
     WHERE schedule_id=$1 AND course_id=$2 AND section_number=$3
       AND day = ANY($4)
-      AND start_time = $5 AND end_time = $6
-  `, [scheduleId, courseId, sectionNumber, groupDays, startTime, endTime]);
+      AND start_time = $5 AND end_time = $6 AND gender = $7
+  `, [scheduleId, courseId, sectionNumber, groupDays, startTime, endTime, gender ?? 'M']);
   return res.rows; // [{ id, day }]
 }
 
@@ -165,16 +169,25 @@ class ScheduleService {
       // NEW-FU-4 + NEW-FU-7: coerce a cross-day move into a time-only move
       // ONLY when an actual sibling already occupies the target day. The
       // collision check + the subsequent UPDATE both see the same snapshot.
+      // NEW-FU-607 (Batch 29 item 4): HARDEN against a Frankenstein day-set. A section that
+      // belongs to a MULTI-day group (has a same course+number+gender sibling on another day)
+      // must NEVER change just one meeting's weekday — that forges an invalid partial pattern
+      // (e.g. Mon/Wed → Wed/Thu, which matches no credit pattern). assignSection is a TIME move:
+      // for a grouped section the day is coerced back to its own (the time still shifts every
+      // day); whole-group day/pattern changes go through the delete+recreate restructure, not
+      // here. A genuinely single-day section (no sibling) keeps free day movement (lab / 0-1cr
+      // lecture). This backstops every non-UI path (direct API / import) now that the panel's
+      // single-day dropdown is gone for multi-day groups.
       if (updates.day && updates.day !== section.day) {
-        const collision = await client.query(
-          `SELECT 1 FROM sections
+        const sib = await client.query(
+          `SELECT COUNT(*)::int AS n FROM sections
            WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3
-             AND day = $4 AND gender = $6 AND id != $5
-           LIMIT 1`,
+             AND gender = $5 AND id != $4`,
           [section.scheduleId, section.courseId, section.sectionNumber,
-           updates.day, sectionId, section.gender ?? 'M']
+           sectionId, section.gender ?? 'M']
         );
-        if (collision.rowCount > 0) {
+        if ((sib.rows[0]?.n ?? 0) > 0) {
+          // Part of a multi-day group → never reweekday one meeting in isolation.
           updates = { ...updates, day: section.day };
         }
       }
@@ -192,7 +205,7 @@ class ScheduleService {
       const siblings = await findSiblings(
         section.scheduleId, section.courseId, section.sectionNumber,
         section.day, section.startTime, section.endTime,
-        client
+        section.gender, client
       );
       for (const sib of siblings) {
         if (sib.id === sectionId) continue;
@@ -248,7 +261,7 @@ class ScheduleService {
       const siblings = await findSiblings(
         section.scheduleId, section.courseId, section.sectionNumber,
         section.day, section.startTime, section.endTime,
-        client
+        section.gender, client
       );
       const allIds = [sectionId, ...siblings.map(s => s.id).filter(id => id !== sectionId)];
 
@@ -443,10 +456,18 @@ class ScheduleService {
       // because moving means "all siblings sharing this time go to the
       // new time" — that's a different operation with a different
       // grouping concept.
+      // NEW-FU-618 (audit P1): GENDER-SCOPE the group delete. The section identity is
+      // (course, number, GENDER) — a course can legitimately have a §01 male group AND a §01
+      // female group at once (the DB UNIQUE key includes gender, createSection enforces only the
+      // type range, not a gender-disjoint sub-range). Without the gender filter, deleting one
+      // gender's group silently DESTROYED the opposite gender's same-numbered group (data loss,
+      // reproduced live). Every other section operation (assignSection day-coerce, deleteSectionRow
+      // coerce, conflict self-exclusion, R-09/R-10/R-15 dedup) is already gender-scoped — this was
+      // the one that forgot it.
       const groupRes = await client.query(`
         SELECT id FROM sections
-        WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3
-      `, [scheduleId, section.courseId, section.sectionNumber]);
+        WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3 AND gender = $4
+      `, [scheduleId, section.courseId, section.sectionNumber, section.gender ?? 'M']);
       allIds = groupRes.rows.map(r => r.id);
       if (allIds.length === 0) allIds = [sectionId]; // defensive — should not happen
       await client.query(`DELETE FROM sections WHERE id = ANY($1)`, [allIds]);
@@ -1173,6 +1194,14 @@ class ScheduleService {
       // carry pre-existing hards; the invariant is "don't make it worse").
       const before = await this._evaluateSchedule(scheduleId, client);
       const beforeHard = before.hardConflicts.length;
+      // NEW-FU-625 (audit, reported item #1): also baseline the TOTAL conflict count.
+      // The move-only panel Quick Fix (RescheduleAroundService) guarantees zero NEW
+      // conflict of ANY severity, and the panel UI promises the same — but this apply
+      // gate previously checked HARD only, so a stale/concurrent plan could slip a new
+      // SOFT conflict past it. A planner-approved plan's conflict set is a subset of the
+      // pre-move baseline, so gating on the total never false-refuses a fresh plan — it
+      // only catches a plan that went stale between preview and apply.
+      const beforeTotal = before.conflicts.length;
       let moved = 0;
       for (const m of moves) {
         const r = await client.query(
@@ -1184,7 +1213,7 @@ class ScheduleService {
       // Re-evaluate AFTER the moves; refuse the whole plan if it raised the
       // hard-conflict count. The catch below performs the ROLLBACK.
       const after = await this._evaluateSchedule(scheduleId, client);
-      if (after.hardConflicts.length > beforeHard) {
+      if (after.hardConflicts.length > beforeHard || after.conflicts.length > beforeTotal) {
         const err = new Error('This fix would introduce new conflicts and was not applied. Refresh and try again.');
         err.status = 409;
         throw err;

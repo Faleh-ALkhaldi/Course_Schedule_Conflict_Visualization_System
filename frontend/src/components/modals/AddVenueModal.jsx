@@ -67,19 +67,29 @@ function isIntStringInRange(s, lo, hi) {
 //   valid  — true iff the combination matches one of the three forms.
 //   reason — when !valid, a human sentence for the inline error.
 export function buildVenueName({ building, room, section }) {
-  const bldg = (building || '').trim();
+  const rawBldg = (building || '').trim();
+  // NEW-FU-591 (Batch 26): pad a SINGLE-digit building to two digits at runtime
+  // (7 → 07) so users can type the natural "7" instead of "07" without tripping a
+  // format flag. The padded, canonical 2-digit form drives the preview, validation,
+  // duplicate detection AND the saved name — so "7" and "07" resolve to the same
+  // venue. ONLY the building is padded; the room keeps its explicit 3–4 digit form.
+  const bldg = /^\d$/.test(rawBldg) ? '0' + rawBldg : rawBldg;
   const rm   = (room     || '').trim();
   const sec  = (section  || '').trim().toUpperCase();
 
-  // Always render a preview, even if incomplete — gives the user a
-  // visual hint of what they're constructing as they type.
+  // Always render a preview, even if incomplete — gives the user a visual hint of
+  // what they're constructing as they type. Uses the PADDED building so the
+  // "Will save as" line shows the real canonical name (e.g. 07-220).
   let preview = bldg;
   if (rm)  preview += `-${rm}`;
   if (sec) preview += `-${sec}`;
 
-  if (!bldg)                                  return { name: preview, valid: false, reason: 'Building is required.' };
+  if (!rawBldg)                               return { name: preview, valid: false, reason: 'Building is required.' };
+  // NEW-FU-591: a bare 0 / 00 building is reserved — reject with a clear message
+  // instead of the generic "2 digits" one that confused users who typed "0".
+  if (/^0+$/.test(bldg))                      return { name: preview, valid: false, reason: 'Building 00 is reserved — pick 01–99.' };
   if (!isIntStringInRange(bldg, 1, 99) || bldg.length !== 2)
-                                              return { name: preview, valid: false, reason: 'Building must be 2 digits (01–99).' };
+                                              return { name: preview, valid: false, reason: 'Building must be 1–99 (type 7 or 07).' };
 
   if (!rm)                                    return { name: preview, valid: false, reason: 'Room is required.' };
   if (!/^\d{3,4}$/.test(rm))                  return { name: preview, valid: false, reason: 'Room must be 3 or 4 digits.' };
@@ -195,6 +205,11 @@ export default function AddVenueModal({ onClose, showToast, onCreated }) {
   const [busy, setBusy]   = useState(false);
   const [error, setError] = useState('');
 
+  // NEW-FU-592 (Batch 26): clear a stale submit error the instant the user edits ANY
+  // field, so a backend error from a previous attempt can never linger as a stuck flag
+  // over a now-valid input. (The format / duplicate verdicts below are already reactive.)
+  useEffect(() => { setError(''); }, [building, room, section, type, capacity]);
+
   const verdict = useMemo(() => buildVenueName({ building, room, section }),
     [building, room, section]);
 
@@ -277,6 +292,9 @@ export default function AddVenueModal({ onClose, showToast, onCreated }) {
               <input placeholder="24" inputMode="numeric" maxLength={2}
                 value={building}
                 onChange={e => setBuilding(e.target.value.replace(/\D/g, '').slice(0,2))}
+                /* NEW-FU-591 (Batch 26): pad a single digit to two on blur (7 → 07) so the
+                   field itself shows the canonical building once the user tabs away. */
+                onBlur={() => setBuilding(b => (/^\d$/.test(b) ? '0' + b : b))}
                 aria-label="Building" />
               <input placeholder="101" inputMode="numeric" maxLength={4}
                 value={room}
@@ -340,9 +358,13 @@ export default function AddVenueModal({ onClose, showToast, onCreated }) {
               Capacity
               <span className="sm-optional"> &nbsp;1–250 seats</span>
             </label>
-            <input id="avm-capacity" type="number" min="1" max="250"
+            {/* NEW-FU-598 (Batch 28): a seat count is a plain positive integer — type="number"
+                let the browser keep "+7", "-", "1e3", and non-English numerals. Use a text
+                input with a runtime digits-only filter (English 0–9, max 3 digits = 250),
+                mirroring the building/room fields, so no sign/letter/decimal can ever enter. */}
+            <input id="avm-capacity" type="text" inputMode="numeric" maxLength={3}
               value={capacity}
-              onChange={e => setCapacity(e.target.value)} />
+              onChange={e => setCapacity(e.target.value.replace(/\D/g, '').slice(0, 3))} />
             {!capacityValid && capacity !== '' && (
               <div className="sm-group-badge" style={{ color: 'var(--red-500, #dc2626)' }}>
                 Capacity must be an integer between 1 and 250.

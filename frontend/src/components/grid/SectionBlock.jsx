@@ -339,18 +339,21 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
         background: secType === 'Lab' ? '#fde68a' : secType === 'Prj' ? '#ddd6fe' : secType === 'Ths' ? '#d1fae5' : '#dbeafe',
         color:      secType === 'Lab' ? '#78350f' : secType === 'Prj' ? '#5b21b6' : secType === 'Ths' ? '#065f46' : '#1e3a8a',
       }}>{badgeText}</span>
-      {/* NEW-FU-272: per-day quick-delete (✕). Removes ONLY this meeting row,
-          leaving the rest of the section group intact. Disabled on archived
-          schedules (mutations blocked upstream). Hover-revealed via CSS. */}
+      {/* NEW-FU-609 (Batch 30 item 2) + NEW-FU-629 (audit): the grid-block ✕ deletes the
+          WHOLE section (all meeting days), not a single day. A section has one identity
+          across its days; deleting one meeting and leaving the others produced an impossible
+          partial group (e.g. 1 of 3 days), so group delete is the only logical action. (The
+          old per-day "row" delete comment/path was removed — see handleSectionDelete.)
+          Disabled on archived schedules (mutations blocked upstream). Hover-revealed via CSS. */}
       {onDelete && !isArchived && (
         <button
           type="button"
           className="sblock-delete-row"
-          title="Delete this meeting day (leaves rest of section)"
+          title="Delete this section (all its meeting days)"
           onClick={(e) => {
             e.stopPropagation();
             hidePopover();
-            onDelete(section, 'row');
+            onDelete(section);
           }}
           onPointerDown={(e) => e.stopPropagation()}
         >×</button>

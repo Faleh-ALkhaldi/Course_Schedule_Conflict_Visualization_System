@@ -21,15 +21,17 @@
 //   the proposed change is conflict-free AND no new conflict was introduced.
 'use strict';
 
+const { teachingWindowFor } = require('../config/constants'); // NEW-FU-621 (audit #2)
+
 const SLOT_STEP_MIN     = 30;   // candidate start-time granularity
 const MAX_MOVED_GROUPS  = 8;    // cap on how many OTHER groups one fix may relocate
 const NODE_BUDGET       = 1400; // hard ceiling on repair-search nodes → bounded latency
 
-function windowFor(category, isCapstone) {
+function windowFor(category, isCapstone, courseCode) {
   // Mirrors the teaching windows used by previewConflicts / the conflict engine.
-  return (category === 'GR' && !isCapstone)
-    ? { start: 17 * 60 + 20, end: 22 * 60 }       // Graduate 17:20–22:00
-    : { start: 7 * 60,       end: 17 * 60 + 10 }; // Undergraduate 07:00–17:10
+  // NEW-FU-621 (audit #2): delegate to the shared R-06-aware resolver so an exempt
+  // course (SWE 412) being rescheduled-around can be retimed into the evening too.
+  return teachingWindowFor({ category, isCapstone, courseCode });
 }
 
 /**
@@ -40,7 +42,7 @@ function windowFor(category, isCapstone) {
  *   fromMin,               // (minutes) => 'HH:MM'
  *   proposedRows,          // rows for the proposed group, already at the desired time
  *   groups,                // [{ key, rows, startMin, durMin, category, isCapstone,
- *                          //    isExternal }]
+ *                          //    isExternal, courseCode }]  (courseCode → R-06 exemption)
  * }
  * @returns { feasible: boolean, moves?: [{ sectionId, courseCode, sectionNumber,
  *                                          day, fromStart, toStart, toEnd }] }
@@ -113,7 +115,7 @@ function planRescheduleAround(ctx) {
   const slotCache = new Map();
   const slotsFor = (g) => {
     if (slotCache.has(g.key)) return slotCache.get(g.key);
-    const win = windowFor(g.category, g.isCapstone);
+    const win = windowFor(g.category, g.isCapstone, g.courseCode);
     const slots = [];
     for (let st = win.start; st + g.durMin <= win.end; st += SLOT_STEP_MIN) slots.push(st);
     slots.sort((a, b) => Math.abs(a - g.startMin) - Math.abs(b - g.startMin));

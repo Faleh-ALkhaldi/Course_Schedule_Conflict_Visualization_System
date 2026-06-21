@@ -174,12 +174,20 @@ class VenueRepository {
          -- Term-scoped: venues ASSIGNED to a section in this term, OR OWNED by
          -- this term (owner_semester) even if not yet assigned — so a just-created
          -- venue stays visible in its term before any section references it.
+         -- NEW-FU-593 (Batch 26): ALSO include GLOBAL/shared venues (owner_semester
+         -- IS NULL). Rooms are shared infrastructure assignable in EVERY term — the
+         -- seed venues are all global. Without this, the picker only listed venues
+         -- already USED in the term, so a shared room (or a venue that ended up global)
+         -- was un-selectable until it had a section — and a fresh term showed almost no
+         -- venues. This matches findAssignable (the pool Suggest/Quick-Fix already use),
+         -- so humans can pick exactly what the auto-resolvers can.
          WHERE v.id IN (
                  SELECT s.venue_id FROM sections s
                  JOIN schedules sc ON sc.id = s.schedule_id
                  WHERE sc.semester = $1
                )
             OR v.owner_semester = $1
+            OR v.owner_semester IS NULL
          -- NEW-FU-462 (Phase 110): order by building number then room number,
          -- NUMERICALLY (so "7-220" sorts before "22-119", rooms ascend within a
          -- building). SELECT DISTINCT requires the sort keys in the SELECT list, so
@@ -236,9 +244,15 @@ class VenueRepository {
   }
 
   async update(id, { name, type, capacity }) {
+    // NEW-FU-619 (audit P3): COALESCE so a PARTIAL update (e.g. just {capacity}) preserves the
+    // other columns instead of NULLing them — name/type/capacity are all NOT NULL, so the old
+    // direct overwrite made a partial PUT 400 (NULL violation) and `parseInt(undefined)→NaN` was
+    // rejected by pg on the int column. Guard parseInt so an unsent capacity stays NULL→kept.
+    // Mirrors the courseRepo.update fix.
     await query(
-      `UPDATE venues SET name=$2, type=$3, capacity=$4, updated_at=NOW() WHERE id=$1`,
-      [id, name, type, parseInt(capacity, 10) /* NEW-L2 */]
+      `UPDATE venues SET name=COALESCE($2,name), type=COALESCE($3,type),
+       capacity=COALESCE($4,capacity), updated_at=NOW() WHERE id=$1`,
+      [id, name ?? null, type ?? null, capacity == null ? null : parseInt(capacity, 10)]
     );
     return this.findById(id);
   }
@@ -309,14 +323,42 @@ class CourseRepository {
   }
 
   async update(id, { courseCode, name, credits, academicLevel, category, numSections, hasLab }) {
-    // NEW-FU-94: COALESCE-style — only update has_lab when it was provided
-    // (hasLab can be undefined for partial updates from older clients).
-    const hasLabClause = hasLab === undefined ? '' : ', has_lab=$8';
-    const params = [id, courseCode, name, parseInt(credits, 10), academicLevel, category, parseInt(numSections, 10) || 1];
+    // NEW-FU-94 + credit-audit follow-up: this is a PARTIAL update — the controller
+    // (updateCourse) passes `undefined` for every field the client didn't send. So
+    // each column must be COALESCE($n, col) to keep its current value instead of being
+    // overwritten with NULL. has_lab already did this via a conditional clause (it only
+    // appears in the SET list when provided); the remaining columns now match via COALESCE.
+    // Without this, a partial PUT (e.g. {credits} only) sent NULL for course_code/name/
+    // academic_level/category — failing on the NOT NULL + UNIQUE course_code (409) or
+    // silently corrupting the row.
+    //
+    // Guard the integer parses: parseInt(undefined,10) is NaN, which pg rejects for an
+    // integer column. Map "not provided" (null/undefined) to NULL so COALESCE preserves
+    // credits / num_sections. (The old `parseInt(numSections,10) || 1` also silently reset
+    // an unsent num_sections to 1.)
+    const creditsVal     = credits     == null ? null : parseInt(credits, 10);
+    const numSectionsVal = numSections == null ? null : parseInt(numSections, 10);
+    const hasLabClause   = hasLab === undefined ? '' : ', has_lab=$8';
+    const params = [
+      id,                    // $1
+      courseCode    ?? null, // $2
+      name          ?? null, // $3
+      creditsVal,            // $4
+      academicLevel ?? null, // $5
+      category      ?? null, // $6
+      numSectionsVal,        // $7
+    ];
     if (hasLab !== undefined) params.push(Boolean(hasLab));
     await query(
-      `UPDATE courses SET course_code=$2, name=$3, credits=$4,
-       academic_level=$5, category=$6, num_sections=$7${hasLabClause}, updated_at=NOW() WHERE id=$1`,
+      `UPDATE courses SET
+         course_code    = COALESCE($2, course_code),
+         name           = COALESCE($3, name),
+         credits        = COALESCE($4, credits),
+         academic_level = COALESCE($5, academic_level),
+         category       = COALESCE($6, category),
+         num_sections   = COALESCE($7, num_sections),
+         updated_at     = NOW()${hasLabClause}
+       WHERE id=$1`,
       params
     );
     return this.findById(id);

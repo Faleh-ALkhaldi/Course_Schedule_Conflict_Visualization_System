@@ -365,7 +365,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                 </code><br/><br/>
                 <strong>Excel</strong> round-trips cleanly. <strong>Word</strong> imports parse the first table. <strong>PDF</strong> imports are best-effort — table extraction can lose rows when the layout is non-standard.<br/>
                 Images cannot be imported.<br/>
-                <strong style={{color:'#b91c1c'}}>Heads up:</strong> import will <strong>replace all current sections</strong> in this schedule.
+                <strong style={{color:'var(--danger-fg)'}}>Heads up:</strong> import will <strong>replace all current sections</strong> in this schedule.
               </div>
 
               <div className="sm-field">
@@ -415,8 +415,10 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
 
               {importResult && (
                 <div style={{
-                  background: importResult.errors?.length ? '#fee2e2' : '#dcfce7',
-                  border: `1px solid ${importResult.errors?.length ? '#fca5a5' : '#86efac'}`,
+                  /* NEW-FU-631 (audit): theme tokens so the result box matches dark mode
+                     (was hardcoded light #fee2e2/#dcfce7 — a light panel inside a dark modal). */
+                  background: importResult.errors?.length ? 'var(--danger-bg)' : 'var(--success-bg)',
+                  border: `1px solid ${importResult.errors?.length ? 'var(--danger-fg)' : 'var(--success-fg)'}`,
                   borderRadius:8, padding:'10px 12px', fontSize:'.8rem',
                 }}>
                   <div style={{fontWeight:600, marginBottom:4}}>
@@ -425,7 +427,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                     {importResult.errors?.length ? ` · ${importResult.errors.length} error(s)` : ''}
                   </div>
                   {importResult.errors?.map((e,i) => (
-                    <div key={i} style={{color:'#dc2626',fontSize:'.75rem'}}>{e}</div>
+                    <div key={i} style={{color:'var(--danger-fg)',fontSize:'.75rem'}}>{e}</div>
                   ))}
                 </div>
               )}

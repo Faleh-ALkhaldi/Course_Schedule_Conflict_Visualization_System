@@ -17,8 +17,8 @@ const suggestSvc = require('../services/SuggestService');
 // to filter candidates before greedy assignment.
 const sectionPattern = require('../domain/sectionPattern');
 const { filterCoursesForTerm, isCourseAllowedInTerm, disallowReason } = require('../domain/courseTermValidity');
-const { courseCodeError, courseNameError, courseFlagError, creditsFlagError, courseCodeLevelError } = require('../domain/courseFormat');
-const { R06_TIME_EXEMPT_COURSES, TIME_WINDOWS } = require('../config/constants'); // NEW-FU-497 (Phase 121)
+const { courseCodeError, courseNameError, courseFlagError, creditsFlagError, courseCodeLevelError, titleCaseCourseName } = require('../domain/courseFormat');
+const { R06_TIME_EXEMPT_COURSES, TIME_WINDOWS, teachingWindowFor } = require('../config/constants'); // NEW-FU-497 (Phase 121); teachingWindowFor NEW-FU-621 (audit #2)
 const { ScheduleRepository, VenueRepository, CourseRepository } = require('../repositories/repositories');
 const InstructorRepository = require('../repositories/InstructorRepository');
 // NEW-FU-23: SectionRepository import dropped — controllers don't touch
@@ -154,6 +154,15 @@ function normalizeInstructorName(s) {
   const n = normalizeName(s);
   return n ? n.replace(/\s+/g, ' ').toUpperCase() : n;
 }
+// NEW-FU-591 (Batch 26): canonicalize a venue name's building to two digits
+// ("7-220" → "07-220"), so a name created via ANY path (direct API, import, legacy)
+// matches the registrar XX-YYY convention the modal enforces — a server-side backstop
+// for the client's runtime padding. Pads ONLY a single leading digit immediately before
+// the first dash; the room/suffix and already-2-digit buildings are left untouched.
+function normalizeVenueName(s) {
+  const n = normalizeName(s);
+  return n ? n.replace(/^(\d)(?=-)/, '0$1') : n;
+}
 
 // NEW-M4: precomputed dummy hash used when a username doesn't exist, so the
 // login handler always runs a bcrypt.compare and takes (roughly) the same
@@ -225,6 +234,27 @@ const createSchedule = ah(async (req, res) => {
     return badRequest(res, 'semester may only contain letters, digits, space, underscore, or dash.');
   const schedule = await schedRepo.create({ departmentId, semester, createdBy: req.user.id });
   res.status(201).json(schedule);
+});
+
+// NEW-FU-608 (Batch 30 item 1): per-term "coverage" summary for the side-panel status
+// flags — which instructors have ≥1 class in THIS schedule, which venues have ≥1 class,
+// and which instructors have ANY office hours (office_hours is global, not term-scoped).
+// The Instructor/Venue sidebars render the full list with NO sections loaded (loadView
+// blanks sections when no filter is picked), so they can't derive this locally — this one
+// cheap endpoint feeds the flags. Read-only, scheduler-accessible.
+const getScheduleCoverage = ah(async (req, res) => {
+  const { scheduleId } = req.params;
+  if (!isUuid(scheduleId)) return badRequest(res, 'scheduleId must be a UUID.');
+  const [instrCls, venueCls, instrOh] = await Promise.all([
+    query(`SELECT DISTINCT instructor_id FROM sections WHERE schedule_id = $1 AND instructor_id IS NOT NULL`, [scheduleId]),
+    query(`SELECT DISTINCT venue_id      FROM sections WHERE schedule_id = $1 AND venue_id      IS NOT NULL`, [scheduleId]),
+    query(`SELECT DISTINCT instructor_id FROM office_hours`),
+  ]);
+  res.json({
+    instructorIdsWithClasses:     instrCls.rows.map(r => r.instructor_id),
+    venueIdsWithClasses:          venueCls.rows.map(r => r.venue_id),
+    instructorIdsWithOfficeHours: instrOh.rows.map(r => r.instructor_id),
+  });
 });
 
 // ── Sections ──────────────────────────────────────────────────────────────────
@@ -356,6 +386,13 @@ const createSection = ah(async (req, res) => {
   if (!courseRow.is_external) {
     if (!instructorId) return badRequest(res, 'An instructor is required for the section.');
     if (!courseRow.is_capstone && !venueId) return badRequest(res, 'A venue is required for the section.');
+  }
+  // NEW-FU-595 (Batch 27): one external course per term. A section is what puts a (global)
+  // course "in" a term, so this is the authoritative per-term gate — reject if the term
+  // already has a DIFFERENT external course.
+  if (courseRow.is_external) {
+    const e = await externalTermConflictError(createTermSemester, courseId);
+    if (e) return res.status(409).json({ error: e });
   }
   // H-3: time-order validation
   if (startTime >= endTime)
@@ -598,7 +635,25 @@ const deleteSection = ah(async (req, res) => {
   // immutable post-creation (sectionPattern validator enforced legal
   // tuples); per-day delete is now possible, and R-15 (FU-270) is the
   // safety net when surviving meetings under-cover the credit hours.
-  const scope = req.query.scope === 'row' ? 'row' : 'group';
+  let scope = req.query.scope === 'row' ? 'row' : 'group';
+  // NEW-FU-609 (Batch 30 item 2): never leave a partial group. A row-scope delete on a
+  // section that's part of a MULTI-day group is coerced to a whole-group delete — deleting
+  // one meeting of a 3-day section and leaving the other two is not a legal section state.
+  // (The grid-block ✕ now requests scope=group anyway; this backstops direct API / import.)
+  // A genuinely single-day section has no siblings, so row==group there — left as-is.
+  if (scope === 'row') {
+    const self = await query(
+      `SELECT schedule_id, course_id, section_number, gender FROM sections WHERE id = $1`,
+      [req.params.sectionId]);
+    const s = self.rows[0];
+    if (s) {
+      const cnt = await query(
+        `SELECT COUNT(*)::int AS n FROM sections
+         WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3 AND gender = $4`,
+        [s.schedule_id, s.course_id, s.section_number, s.gender ?? 'M']);
+      if ((cnt.rows[0]?.n ?? 0) > 1) scope = 'group';
+    }
+  }
   try {
     // NEW-FU-288: forward deletedIds so the frontend updates local state
     // precisely (removing only the listed rows) instead of nuking all
@@ -649,6 +704,11 @@ const previewConflicts = ah(async (req, res) => {
   if (!courseId || !Array.isArray(days) || days.length === 0 || !startTime || !endTime) {
     return res.json({ conflicts: [], conflictFreeStartExists: true });
   }
+  // NEW-FU-627 (audit): a non-empty but MALFORMED time (e.g. "99:99", "banana") slips past
+  // the falsy-guard above, and the local `hm` parser midnight-coerces it (→ 00:00), yielding
+  // a wrong advisory at HTTP 200. Reject with a clean 400. (Only reachable via a hand-crafted
+  // API client — the UI binds <input type="time">, which emits valid HH:MM or empty.)
+  if (!isTime(startTime) || !isTime(endTime)) return badRequest(res, 'startTime and endTime must be HH:MM.');
 
   const Section = require('../domain/Section');
   const ConflictEngine = require('../engine/ConflictEngine');
@@ -751,8 +811,11 @@ const previewConflicts = ah(async (req, res) => {
   let conflictFreeStartExists = conflicts.length === 0;
   let conflictFreeStart = null, conflictFreeEnd = null;
   if (!conflictFreeStartExists) {
-    const win = (course.category === 'GR' && !course.is_capstone)
-      ? { start: 17 * 60 + 20, end: 22 * 60 } : { start: 7 * 60, end: 17 * 60 + 10 };
+    // NEW-FU-621 (audit #2): R-06-aware window — SWE 412 scans the full day (07:00–22:00)
+    // so this self-move scan can offer it a legal evening slot, not just the UG daytime.
+    const win = teachingWindowFor({
+      category: course.category, isCapstone: course.is_capstone, courseCode: course.course_code,
+    });
     const want = hm(startTime);
     let best = null;
     for (let st = win.start; st + durMin <= win.end; st += 30) {
@@ -785,6 +848,9 @@ const autoFixAround = ah(async (req, res) => {
   if (!courseId || !Array.isArray(days) || days.length === 0 || !startTime || !endTime) {
     return res.json({ feasible: false, moves: [] });
   }
+  // NEW-FU-627 (audit): reject malformed times (see previewConflicts) — the local `hm`
+  // parser would otherwise midnight-coerce them and return a bogus plan at HTTP 200.
+  if (!isTime(startTime) || !isTime(endTime)) return badRequest(res, 'startTime and endTime must be HH:MM.');
 
   const Section = require('../domain/Section');
   const ConflictEngine = require('../engine/ConflictEngine');
@@ -871,6 +937,7 @@ const autoFixAround = ah(async (req, res) => {
       groupMap.set(key, {
         key, rows: [], startMin: hm(r.start_time), durMin: hm(r.end_time) - hm(r.start_time),
         category: r.category, isCapstone: r.is_capstone, isExternal: r.is_external,
+        courseCode: r.course_code,                       // NEW-FU-621 (audit #2): for R-06 exemption in windowFor
         instructorId: r.instructor_id, venueId: r.venue_id,
       });
     }
@@ -878,8 +945,8 @@ const autoFixAround = ah(async (req, res) => {
   }
   const groups = [...groupMap.values()].map(g => {
     // Movable = a real, non-external group whose duration fits its teaching window.
-    const win = (g.category === 'GR' && !g.isCapstone)
-      ? { start: 17 * 60 + 20, end: 22 * 60 } : { start: 7 * 60, end: 17 * 60 + 10 };
+    // NEW-FU-621 (audit #2): R-06-aware (SWE 412 gets the full 07:00–22:00 day).
+    const win = teachingWindowFor({ category: g.category, isCapstone: g.isCapstone, courseCode: g.courseCode });
     g.movable = !g.isExternal && (g.startMin >= 0) && (win.start + g.durMin <= win.end);
     return g;
   });
@@ -1031,6 +1098,29 @@ const getCourses = ah(async (req, res) => {
   res.json(filterCoursesForTerm(courses, term));
 });
 
+// NEW-FU-595 (Batch 27): the "external" flag marks the department's single internship /
+// summer-training co-op course, and by department rule only ONE such course is allowed
+// PER TERM. Courses are global (no owner_semester) and "in a term" = has a section there,
+// so we scope by the active term: returns an error message if some OTHER course is already
+// external in that term, else null. `excludeCourseId` skips the course being created/edited.
+async function externalTermConflictError(activeTerm, excludeCourseId = null) {
+  if (!activeTerm) return null;       // no term context (rare direct API call) → can't scope
+  const r = await query(
+    `SELECT DISTINCT c.course_code
+       FROM courses c
+       JOIN sections s   ON s.course_id  = c.id
+       JOIN schedules sc ON sc.id        = s.schedule_id
+      WHERE c.is_external = true
+        AND sc.semester = $1
+        AND ($2::uuid IS NULL OR c.id <> $2)
+      LIMIT 1`,
+    [activeTerm, excludeCourseId]);
+  if (r.rows.length)
+    return `Term ${activeTerm} already has an external course (${r.rows[0].course_code}). ` +
+           `Only one internship / co-op course is allowed per term — remove that flag first.`;
+  return null;
+}
+
 const createCourse = ah(async (req, res) => {
   const { courseCode, name, credits, academicLevel, category, numSections, hasLab,
           isCapstone /* NEW-FU-278 (Phase 54): Phase 50 flag — venue-rule
@@ -1056,7 +1146,7 @@ const createCourse = ah(async (req, res) => {
   { const e = courseCodeLevelError(courseCode, academicLevel, category); if (e) return badRequest(res, e); }
   { const e = courseNameError(name);       if (e) return badRequest(res, e); }
   { const e = courseFlagError({ hasLab, isCapstone, isExternal }); if (e) return badRequest(res, e); }
-  { const e = creditsFlagError({ credits, hasLab }); if (e) return badRequest(res, e); }   // audit P2-8: 4cr ⇒ has-lab
+  { const e = creditsFlagError({ credits, hasLab, isCapstone }); if (e) return badRequest(res, e); }   // audit P2-8: 4cr ⇒ has-lab; FU-602: 0cr ⇒ capstone
   // NEW-FU-484 (Phase 118 item 3): level-gated flag constraints.
   // CAPSTONE requires Undergraduate + Senior; EXTERNAL requires Undergraduate + Junior.
   // Frontend disables the checkboxes, but the backend is the authoritative gate.
@@ -1064,6 +1154,12 @@ const createCourse = ah(async (req, res) => {
     return badRequest(res, 'The Capstone flag is only allowed for Undergraduate Senior courses.');
   if (isExternal && !(category === 'UG' && academicLevel === 'Junior'))
     return badRequest(res, 'The External flag is only allowed for Undergraduate Junior courses.');
+  // NEW-FU-595 (Batch 27): enforce one external course PER TERM (the single internship /
+  // co-op course). Reject if the active term already has an external course.
+  if (isExternal) {
+    const e = await externalTermConflictError(req.activeTerm?.code, null);
+    if (e) return res.status(409).json({ error: e });
+  }
   // NEW-FU-278 (Phase 54): credits range 0..4 per KFUPM catalog. 0 is a
   // legal value (SWE 413 is 0-credit, capstone part 1). Migration 018
   // relaxed the DB CHECK from `> 0` to `>= 0` to match.
@@ -1079,7 +1175,7 @@ const createCourse = ah(async (req, res) => {
   // NEW-FU-94: forward hasLab to the repo (defaults to false at DB level).
   // NEW-FU-278 (Phase 54): forward isCapstone + isExternal too.
   const course = await courseRepo.create({
-    courseCode: normalizeName(courseCode), name: normalizeName(name),
+    courseCode: normalizeName(courseCode), name: titleCaseCourseName(normalizeName(name)),
     credits, academicLevel, category, numSections,
     hasLab,
     isCapstone, isExternal,
@@ -1124,8 +1220,22 @@ const updateCourse = ah(async (req, res) => {
       const e = creditsFlagError({
         credits: credits != null ? credits : existingCourse.credits,
         hasLab:  hasLab  != null ? hasLab  : existingCourse.has_lab,
+        // FU-602 (Batch 28 item 3): updateCourse can't change is_capstone (not in the
+        // allowlist), so the effective capstone flag is the existing row's. This rejects
+        // editing a non-capstone course down to 0 credits.
+        isCapstone: existingCourse.is_capstone,
       });
       if (e) return badRequest(res, e);
+      // NEW-FU-619 (audit P2): mirror createCourse's mutual-exclusion check on UPDATE too.
+      // hasLab IS in the update allowlist, but is_capstone/is_external are NOT — so without this,
+      // PUT {hasLab:true} on an existing capstone OR external course produced a course that was
+      // BOTH has_lab AND capstone/external, the exact state createCourse's courseFlagError forbids.
+      const fe = courseFlagError({
+        hasLab:     hasLab != null ? hasLab : existingCourse.has_lab,
+        isCapstone: existingCourse.is_capstone,
+        isExternal: existingCourse.is_external,
+      });
+      if (fe) return badRequest(res, fe);
     }
   }
   if (numSections != null) {
@@ -1138,12 +1248,17 @@ const updateCourse = ah(async (req, res) => {
   // existing value via the repo's COALESCE-style update.
   const course = await courseRepo.update(req.params.courseId, {
     courseCode: courseCode != null ? normalizeName(courseCode) : undefined,
-    name:       name       != null ? normalizeName(name)       : undefined,
+    name:       name       != null ? titleCaseCourseName(normalizeName(name)) : undefined,
     credits, academicLevel, category, numSections, hasLab,
   });
   // NEW-M9: surface missing rows as 404 instead of returning a confusing
   // "200 OK with null body" that the frontend can't act on.
   if (!course) return res.status(404).json({ error: 'Course not found.' });
+  // NEW-FU-626: a credits/has_lab/category/level change alters conflict rules across every
+  // term using this global course — refresh their persisted conflicts (name/numSections don't).
+  if (credits != null || hasLab != null || academicLevel != null || category != null) {
+    await revalidateSchedulesForResource('course_id', req.params.courseId);
+  }
   res.json(course);
 });
 
@@ -1420,8 +1535,35 @@ async function withInstructorLock(instructorId, fn) {
 // recomputed those schedules' persisted conflicts, leaving them stale until each
 // was next viewed. Revalidate each affected schedule best-effort after the write.
 async function revalidateSchedulesForInstructor(instructorId) {
+  // NEW-FU-620 (audit #1): only revalidate EDITABLE (Draft, non-archived) schedules. Office hours
+  // are GLOBAL per-instructor, so an OH change touches every term the instructor teaches — but a
+  // Finalized or archived term is a FROZEN snapshot whose persisted conflicts must NOT be silently
+  // rewritten by a later OH edit (that violated the finalized=immutable contract). The conflict is
+  // re-derived when the term is unlocked (unfinalize → revalidate), so nothing is lost.
   const affected = await query(
-    `SELECT DISTINCT schedule_id FROM sections WHERE instructor_id = $1`, [instructorId]
+    `SELECT DISTINCT s.schedule_id FROM sections s
+        JOIN schedules sc ON sc.id = s.schedule_id
+       WHERE s.instructor_id = $1 AND sc.status <> 'Finalized' AND sc.archived_at IS NULL`,
+    [instructorId]
+  );
+  for (const r of affected.rows) await schedSvc.revalidateSchedule(r.schedule_id).catch(() => {});
+}
+
+// NEW-FU-626 (audit, data-integrity): courses and venues are GLOBAL — editing a
+// conflict-affecting field (course credits/has_lab/category → R-06/R-14/R-15; venue type
+// → R-11/R-12) changes the conflict set of EVERY term that uses the resource, but
+// updateCourse/updateVenue never refreshed the persisted conflicts (unlike OH writes
+// [FU-571] and instructor/venue DELETEs [FU-561]). That left stale hard/soft counts in
+// the term list and stale conflicts in the schedule view until a section was next touched.
+// Re-derive the affected EDITABLE (Draft, non-archived) schedules; finalized/archived
+// snapshots stay frozen (matches FU-620). `column` is a hardcoded literal at the call
+// sites ('course_id' | 'venue_id'), never user input.
+async function revalidateSchedulesForResource(column, id) {
+  const affected = await query(
+    `SELECT DISTINCT s.schedule_id FROM sections s
+        JOIN schedules sc ON sc.id = s.schedule_id
+       WHERE s.${column} = $1 AND sc.status <> 'Finalized' AND sc.archived_at IS NULL`,
+    [id]
   );
   for (const r of affected.rows) await schedSvc.revalidateSchedule(r.schedule_id).catch(() => {});
 }
@@ -1487,7 +1629,7 @@ const updateOfficeHour = ah(async (req, res) => {
         err.status = 409;
         throw err;
       }
-      const updated = await instrRepo.updateOfficeHour(req.params.ohId, { day, startTime, endTime }, client);
+      const updated = await instrRepo.updateOfficeHour(req.params.ohId, { day, startTime, endTime }, client, req.params.instructorId);  // NEW-FU-624: scope to owner
       if (!updated) {
         const err = new Error('Office hour not found.');
         err.status = 404;
@@ -1505,7 +1647,7 @@ const updateOfficeHour = ah(async (req, res) => {
 });
 
 const deleteOfficeHour = ah(async (req, res) => {
-  await instrRepo.deleteOfficeHour(req.params.ohId);
+  await instrRepo.deleteOfficeHour(req.params.ohId, req.params.instructorId);  // NEW-FU-619: scope to owner
   await revalidateSchedulesForInstructor(req.params.instructorId);  // NEW-FU-571
   res.json({ deleted: true });
 });
@@ -1563,6 +1705,11 @@ const createVenue = ah(async (req, res) => {
     return badRequest(res, 'name, type, capacity required.');
   // NEW-M8: validate venue type enum + capacity range.
   if (!VALID_VENUE_TYPES.has(type)) return badRequest(res, `Invalid venue type: "${type}".`);
+  // NEW-FU-598 (Batch 28): capacity must be a plain positive integer string — reject signs
+  // ("+7"/"-7"), decimals ("7.5"), and any non-digit BEFORE parseInt (which would silently
+  // coerce "+7"→7 / "7.5"→7). The modal already filters to digits; this is the API backstop.
+  if (!/^\d+$/.test(String(capacity)))
+    return badRequest(res, 'capacity must be a whole number (digits only, no signs or decimals).');
   const cap = parseInt(capacity, 10);
   // NEW-FU-225 (Phase 97): cap 10000 → 250 (realistic KFUPM venue max).
   if (!Number.isInteger(cap) || cap < 1 || cap > 250)
@@ -1570,7 +1717,9 @@ const createVenue = ah(async (req, res) => {
   // NEW-FU-46: enforce DB VARCHAR(80) on venues.name.
   if (!isBoundedString(name, 80)) return badLength(res, 'name', 80);
   // NEW-FU-59: trim before write (parity with createInstructor).
-  const cleanName = normalizeName(name);
+  // NEW-FU-591 (Batch 26): also pad a 1-digit building (7-220 → 07-220) so no path
+  // can persist a non-canonical venue name.
+  const cleanName = normalizeVenueName(name);
   // NEW-FU-483 (Phase 117): whole-room/sub-room exclusivity check backstops the modal's
   // client-side gate. Handles format variants (01-002 ≡ 01-0002), whole-room blocking,
   // and sub-room coexistence rules. Returns a plain-English message when blocked.
@@ -1606,6 +1755,9 @@ const updateVenue = ah(async (req, res) => {
   // NEW-M8: validate enum + range when provided.
   if (type && !VALID_VENUE_TYPES.has(type)) return badRequest(res, `Invalid venue type: "${type}".`);
   if (capacity != null) {
+    // NEW-FU-598 (Batch 28): digits-only backstop (parity with createVenue) — no signs/decimals.
+    if (!/^\d+$/.test(String(capacity)))
+      return badRequest(res, 'capacity must be a whole number (digits only, no signs or decimals).');
     const cap = parseInt(capacity, 10);
     // NEW-FU-15: tighten capacity max bound to match createVenue (was missing
     // upper bound on update, allowing 1..Infinity through to pg).
@@ -1616,9 +1768,15 @@ const updateVenue = ah(async (req, res) => {
   // NEW-FU-46: enforce DB VARCHAR(80) on venues.name when supplied.
   if (name != null && !isBoundedString(name, 80)) return badLength(res, 'name', 80);
   // NEW-FU-59: trim before update (parity with createVenue).
-  const venue = await venueRepo.update(req.params.venueId, { name: name != null ? normalizeName(name) : undefined, type, capacity });
+  // NEW-FU-591 (Batch 26): pad a 1-digit building on update too (7-220 → 07-220).
+  const venue = await venueRepo.update(req.params.venueId, { name: name != null ? normalizeVenueName(name) : undefined, type, capacity });
   // NEW-M9: surface missing rows as 404.
   if (!venue) return res.status(404).json({ error: 'Venue not found.' });
+  // NEW-FU-626: a venue TYPE change flips the R-11/R-12 venue-type rules across every term
+  // using this global venue — refresh their persisted conflicts (capacity isn't a conflict input).
+  if (type != null) {
+    await revalidateSchedulesForResource('venue_id', req.params.venueId);
+  }
   res.json(venue);
 });
 
@@ -1980,6 +2138,15 @@ const listTerms = ah(async (req, res) => {
   res.json(terms);
 });
 
+// NEW-FU-582 (Batch 24): term-picker CONTENT search. ?q=<text> → { codes: [...] } of the
+// terms whose course code/name, instructor, venue, or section number matches. Read-only.
+const searchTerms = ah(async (req, res) => {
+  const q = req.query.q || '';
+  const includeArchived = req.query.includeArchived === 'true';
+  const codes = await termSvc.searchTermCodes({ q, includeArchived });
+  res.json({ codes });
+});
+
 const createTerm = ah(async (req, res) => {
   const { code, startsAt, endsAt } = req.body;
   if (typeof code !== 'string') {
@@ -2012,7 +2179,8 @@ const createTerm = ah(async (req, res) => {
 
 const archiveTerm = ah(async (req, res) => {
   const { code } = req.params;
-  // NEW-FU-452 (Phase 107 D3): prefer the server-resolved active term (header) over the query param.
+  // NEW-FU-590 (Batch 25): active term is archivable in place; activeCode is passed for
+  // compatibility only (the service no longer guards on it).
   const activeCode = req.activeTerm?.code || req.query.activeCode || null;
   try {
     const out = await termSvc.archiveTerm({ code, activeCode });
@@ -2078,10 +2246,9 @@ const renameTerm = ah(async (req, res) => {
 
 const deleteTerm = ah(async (req, res) => {
   const { code } = req.params;
-  // NEW-FU-452 (Phase 107 D3): prefer the server-resolved active term (from the
-  // X-Active-Term header the axios interceptor always sends) over a per-call query
-  // param that's easy to omit — so "can't delete the active term" can't be bypassed
-  // by just dropping ?activeCode. Query param remains a fallback for non-app clients.
+  // NEW-FU-590 (Batch 25): the active term is now deletable in place, so there is no
+  // active-term guard left to enforce. activeCode is still resolved (header first, query
+  // fallback) and passed through for API compatibility; the service ignores it.
   const activeCode = req.activeTerm?.code || req.query.activeCode || null;
   try {
     const out = await termSvc.deleteTerm({ code, activeCode });
@@ -2096,6 +2263,7 @@ const deleteTerm = ah(async (req, res) => {
 module.exports = {
   login, logout,
   listSchedules, createSchedule,
+  getScheduleCoverage,
   getSections, createSection, updateSection, deleteSection, extendSection, previewConflicts,
   autoFixAround, autoFixAroundApply,
   quickFixPlan, quickFixApply,
@@ -2108,6 +2276,6 @@ module.exports = {
   getNextSectionNumber,   // NEW-FU-95
   getVenues, createVenue, updateVenue, deleteVenue,
   // NEW-FU-161..163, FU-185, FU-189, FU-193
-  listTerms, createTerm, deleteTerm, renameTerm, setTermStatus,
+  listTerms, searchTerms, createTerm, deleteTerm, renameTerm, setTermStatus,
   archiveTerm, unarchiveTerm,
 };

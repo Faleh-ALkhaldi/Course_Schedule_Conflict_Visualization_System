@@ -196,15 +196,20 @@ describe('DELETE /api/v1/terms/:code', () => {
     createdCodes.delete(code); // already deleted — don't try again in afterAll
   });
 
-  test('cannot delete the active term (409)', async () => {
-    // Use 291 (already created above) as the "active" code
-    const code = '291';
+  test('admin CAN delete the active term in place (NEW-FU-590)', async () => {
+    // Batch 25: deleting the term you're currently viewing is now allowed — the
+    // client auto-switches afterward. Simulate "active" by passing activeCode = code.
+    const code = '263';
+    await request(app)
+      .post('/api/v1/terms')
+      .set('Authorization', `Bearer ${adminTok}`)
+      .send({ code });
     const r = await request(app)
       .delete(`/api/v1/terms/${code}`)
-      .query({ activeCode: code })
+      .query({ activeCode: code }) // same as the deleted term ⇒ "active"
       .set('Authorization', `Bearer ${adminTok}`);
-    expect(r.status).toBe(409);
-    expect(r.body.error).toMatch(/active term/i);
+    expect(r.status).toBe(200);
+    expect(r.body.deleted).toBeDefined();
   });
 
   test('non-admin cannot delete (403)', async () => {
@@ -274,15 +279,22 @@ describe('PATCH /api/v1/terms/:code (rename)', () => {
     expect(r.body.error).toMatch(/Invalid term code/i);
   });
 
-  test('cannot rename the active term (409)', async () => {
-    // 282 is now-active for this test's purposes.
-    const r = await request(app)
-      .patch(`/api/v1/terms/282`)
-      .query({ activeCode: '282' })
+  test('CAN rename the active term in place (NEW-FU-584)', async () => {
+    // Batch 25: renaming the term you're viewing is allowed — the schedule id is
+    // unchanged, so the client keeps viewing under the new code.
+    const from = '311', to = '312'; // both in the 251–343 valid range, unused
+    createdCodes.add(to); // surviving code — clean up in afterAll
+    await request(app)
+      .post('/api/v1/terms')
       .set('Authorization', `Bearer ${adminTok}`)
-      .send({ newCode: '273' });
-    expect(r.status).toBe(409);
-    expect(r.body.error).toMatch(/active term/i);
+      .send({ code: from });
+    const r = await request(app)
+      .patch(`/api/v1/terms/${from}`)
+      .query({ activeCode: from }) // renaming the active term
+      .set('Authorization', `Bearer ${adminTok}`)
+      .send({ newCode: to });
+    expect(r.status).toBe(200);
+    expect(r.body.code).toBe(to);
   });
 
   test('non-admin cannot rename (403)', async () => {
@@ -533,7 +545,7 @@ describe('Conflict-guarded Finalize (NEW-FU-197)', () => {
 //   • PATCH .../archive  hides the term from the default list
 //   • ?includeArchived=true surfaces it back with isArchived:true + archivedAt
 //   • PATCH .../unarchive restores it to the default view
-//   • Cannot archive the active term (409)
+//   • CAN archive the active term in place (NEW-FU-590)
 //   • Idempotent: archive on an already-archived row is a no-op
 //   • Non-admin gets 403 on both archive + unarchive
 //   • 404 on non-existent codes
@@ -545,7 +557,8 @@ describe('Conflict-guarded Finalize (NEW-FU-197)', () => {
 //     Finalize test above covers the supported transition; the guardrail
 //     itself is exercised by the unit tests in TermService.spec.js.
 describe('Archive flow (NEW-FU-194 / FU-195)', () => {
-  const ARCHIVE_CODE = '261'; // Fall 2026 — fresh code unused elsewhere
+  const ARCHIVE_CODE = '321'; // Fall 2032 — in 251–343 range, unused & NOT seeded
+                              // (was '261', which later became a seed term → create 409)
 
   beforeAll(async () => {
     // Seed the term we'll archive. Tracked in createdCodes so afterAll
@@ -558,14 +571,21 @@ describe('Archive flow (NEW-FU-194 / FU-195)', () => {
     expect(r.status).toBe(201);
   });
 
-  test('cannot archive the active term (409)', async () => {
-    // Pretend 251 is active — the server should refuse to archive it.
+  test('CAN archive the active term in place (NEW-FU-590)', async () => {
+    // Batch 25: archiving the term you're viewing is allowed — the client switches
+    // to another non-archived term first. Simulate "active" by passing activeCode = code.
+    const code = '313'; // in the 251–343 valid range, unused
+    createdCodes.add(code); // afterAll hard-deletes regardless of archived state
+    await request(app)
+      .post('/api/v1/terms')
+      .set('Authorization', `Bearer ${adminTok}`)
+      .send({ code });
     const r = await request(app)
-      .patch('/api/v1/terms/251/archive')
-      .query({ activeCode: '251' })
+      .patch(`/api/v1/terms/${code}/archive`)
+      .query({ activeCode: code })
       .set('Authorization', `Bearer ${adminTok}`);
-    expect(r.status).toBe(409);
-    expect(r.body.error).toMatch(/active/i);
+    expect(r.status).toBe(200);
+    expect(r.body.isArchived).toBe(true);
   });
 
   test('admin can archive a non-active term', async () => {

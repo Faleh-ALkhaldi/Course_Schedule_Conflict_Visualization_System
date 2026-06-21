@@ -102,6 +102,16 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
   const [emailTouched, setEmailTouched] = useState(false);
   const [busy, setBusy]   = useState(false);
   const [error, setError] = useState('');
+  // NEW-FU-616 (Batch 31 item 4): the full-name guidance reads as a calm GRAY hint while the
+  // user is still typing, and only turns into a RED error once they ATTEMPT to add without a
+  // valid full name. Showing red mid-typing made users feel they'd already done something wrong.
+  const [submitAttempted, setSubmitAttempted] = useState(false);
+
+  // NEW-FU-592 (Batch 26): clear a stale submit error the instant the user edits the
+  // name or email, so a backend duplicate/validation error from a previous attempt can
+  // never linger as a stuck flag over a now-valid input. (The runtime duplicateError /
+  // nameError verdicts below are already reactive — this covers the backend `error`.)
+  useEffect(() => { setError(''); }, [name, email]);
 
   // NEW-FU-461 (Phase 109): capture office hours up front (pre-filled with a sensible
   // default) so the new instructor is never flagged for having none. Days Sun–Thu;
@@ -198,6 +208,7 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
 
   async function handleSubmit(e) {
     e.preventDefault();
+    setSubmitAttempted(true);   // from here on, an invalid full name shows RED (item 4)
     if (!canSubmit) return;
     setBusy(true); setError('');
     try {
@@ -234,10 +245,14 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
             <label htmlFor="aim-name">Full name</label>
             <input id="aim-name" autoFocus required
               placeholder="e.g. Faleh Al-Khaldi"
-              aria-invalid={!!nameError}
+              aria-invalid={submitAttempted && !!nameError}
               value={name}
               onChange={handleNameChange} />
-            {nameError && <p className="sm-inline-error" role="alert">{nameError}</p>}
+            {/* NEW-FU-616 (Batch 31 item 4): GRAY hint while typing; RED error only after an
+                add attempt without a valid full name. */}
+            {nameError && (submitAttempted
+              ? <p className="sm-inline-error" role="alert">{nameError}</p>
+              : <p className="sm-hint">{nameError}</p>)}
           </div>
 
           <div className="sm-field">
@@ -287,7 +302,10 @@ export default function AddInstructorModal({ onClose, showToast, onCreated }) {
 
           <div className="sm-actions">
             <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-            <button type="submit" className="sm-btn-save" disabled={!canSubmit}>
+            {/* NEW-FU-616 (Batch 31 item 4): the button stays clickable while the name is
+                incomplete so a click is a real "save attempt" that surfaces the red error;
+                handleSubmit's canSubmit guard still blocks the actual add. */}
+            <button type="submit" className="sm-btn-save" disabled={busy}>
               {busy ? '…' : 'Add Instructor'}
             </button>
           </div>

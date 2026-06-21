@@ -124,8 +124,15 @@ class InstructorRepository {
     return res.rows[0];
   }
 
-  async deleteOfficeHour(ohId) {
-    await query(`DELETE FROM office_hours WHERE id = $1`, [ohId]);
+  async deleteOfficeHour(ohId, instructorId = null) {
+    // NEW-FU-619 (audit P3): scope the delete to the owning instructor when the URL provides one,
+    // so a mismatched :instructorId can't delete another instructor's office hour (and then leave
+    // that real owner's schedules un-revalidated). Backward-compatible when instructorId omitted.
+    if (instructorId) {
+      await query(`DELETE FROM office_hours WHERE id = $1 AND instructor_id = $2`, [ohId, instructorId]);
+    } else {
+      await query(`DELETE FROM office_hours WHERE id = $1`, [ohId]);
+    }
   }
 
   /**
@@ -139,16 +146,21 @@ class InstructorRepository {
    * frontend can splice it into its local OH list without reshaping. Null
    * when no row matched (404 territory for the caller).
    */
-  async updateOfficeHour(ohId, { day, startTime, endTime }, client = null) {
+  async updateOfficeHour(ohId, { day, startTime, endTime }, client = null, instructorId = null) {
     // NEW-FU-64: accept transactional client for callers performing the
     // update inside an instructor-row lock (closes the TOCTOU window).
+    // NEW-FU-624 (audit #2): scope the update to the owning instructor when the URL
+    // provides one — the exact sibling of the FU-619 deleteOfficeHour fix, which was
+    // applied to delete but missed on update. Without it a mismatched
+    // PUT /instructors/A/office-hours/{ohId-of-B} rewrote instructor B's office hour
+    // (the overlap pre-check ran against A, and A's — not B's — schedules were revalidated).
     const db = client ?? { query: (t, p) => query(t, p) };
     const res = await db.query(
       `UPDATE office_hours
        SET day = $2, start_time = $3, end_time = $4
-       WHERE id = $1
+       WHERE id = $1 AND ($5::uuid IS NULL OR instructor_id = $5)
        RETURNING id, day, start_time::text AS start_time, end_time::text AS end_time`,
-      [ohId, day, startTime, endTime]
+      [ohId, day, startTime, endTime, instructorId]
     );
     return res.rows[0] ?? null;
   }

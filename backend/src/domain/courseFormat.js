@@ -68,6 +68,23 @@ function courseNameError(name) {
 }
 function isValidCourseName(name) { return courseNameError(name) === null; }
 
+// NEW-FU-597 (Batch 27): accurate English TITLE CASE for course names — the server-side
+// mirror of the modal's live title-casing, so a name created via ANY path (direct API,
+// import) is stored in the same canonical case. Capitalize each word; lowercase the small
+// "minor" words unless they lead the title; keep Roman numerals upper ("Compilers II").
+const COURSE_MINOR_WORDS = new Set(['a','an','the','and','or','nor','but','for','yet','so',
+  'of','to','in','on','at','by','as','up','off','per','via','with','from','into']);
+const COURSE_ROMAN_RE = /^(?=[ivx])x{0,3}(ix|iv|v?i{0,3})$/i;
+function titleCaseCourseName(raw) {
+  return String(raw ?? '').split(' ').map((w, i) => {
+    if (w === '') return w;
+    const lower = w.toLowerCase();
+    if (COURSE_ROMAN_RE.test(lower)) return w.toUpperCase();
+    if (i !== 0 && COURSE_MINOR_WORDS.has(lower)) return lower;
+    return lower.replace(/(^|[-/'(])([a-z])/g, (_, p, c) => p + c.toUpperCase());
+  }).join(' ');
+}
+
 // At most ONE of has_lab / capstone / external. A plain lecture course has none;
 // these three are mutually-exclusive course TYPES, not stackable attributes.
 function courseFlagError({ hasLab, isCapstone, isExternal } = {}) {
@@ -83,16 +100,28 @@ function courseFlagError({ hasLab, isCapstone, isExternal } = {}) {
 // accept NO section (every section failed pattern validation). Enforce the invariant
 // where the course is DEFINED. (capstone/external are mutually exclusive with hasLab via
 // courseFlagError, so this also blocks a 4-credit capstone/external.)
-function creditsFlagError({ credits, hasLab } = {}) {
-  return (Number(credits) === 4 && !hasLab)
-    ? '4-credit courses must be marked “Has lab” — a 4-credit course requires a lab section.'
-    : null;
+function creditsFlagError({ credits, hasLab, isCapstone } = {}) {
+  const c = Number(credits);
+  if (c === 4 && !hasLab)
+    return '4-credit courses must be marked “Has lab” — a 4-credit course requires a lab section.';
+  // NEW-FU-600 (Batch 28): a lab only fits a 3- or 4-credit course. 0/1/2-credit courses meet
+  // too few hours to carry a lab section — reject the Has-lab flag for them (the modal disables it).
+  if ((c === 0 || c === 1 || c === 2) && hasLab)
+    return 'Only 3- and 4-credit courses can have a lab section — remove the “Has lab” flag for a 0/1/2-credit course.';
+  // NEW-FU-602 (Batch 28 item 3): a 0-credit course is a capstone part (e.g. SWE 413 Senior
+  // Project I) — it carries no academic credit because it is the capstone itself. Enforce the
+  // Capstone flag so a 0-credit plain lecture (which has no legal credit→pattern meaning) can
+  // never be created. As a capstone it is venue-exempt but still instructor-required and
+  // time-clash-checked (handled where the section/venue/window rules live).
+  if (c === 0 && !isCapstone)
+    return 'A 0-credit course must be a Capstone — set the Capstone flag (a 0-credit course is a capstone part, e.g. SWE 413).';
+  return null;
 }
 
 module.exports = {
   COURSE_CODE_RE, COURSE_NAME_RE,
   isValidCourseCode, courseCodeError,
-  isValidCourseName, courseNameError,
+  isValidCourseName, courseNameError, titleCaseCourseName,
   courseFlagError, creditsFlagError,
   levelForCourseNumber, courseCodeLevelError,
 };

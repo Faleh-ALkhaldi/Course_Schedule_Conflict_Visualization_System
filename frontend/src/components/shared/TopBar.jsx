@@ -63,11 +63,15 @@ export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitch
   const hasSoftOnly = !saveBlocked && softPending.length > 0;
   // NEW-FU-503 (Phase 123): stateful label keeps its three meanings, rendered
   // with the shared SVG icons instead of 🔴 / ⚠️ / ✓ emoji.
+  // NEW-FU-614 (Batch 31 item 3): the top-bar commit button FINALIZES the term (saveSchedule
+  // sets status=Finalized; section edits already auto-persist live). Label it "Finalize" so it
+  // matches the term-level finalize/lock action; once finalized it flips to a "Locked" button
+  // (below) whose click unlocks. The blocked state still reads "Conflicts" (can't finalize).
   const saveLabel   = saveBlocked
     ? <><Ico name="alert" /><span>Conflicts</span></>
     : hasSoftOnly
-    ? <><Ico name="alert" /><span>Save</span></>
-    : <><Ico name="check" /><span>Save</span></>;
+    ? <><Ico name="alert" /><span>Finalize</span></>
+    : <><Ico name="check" /><span>Finalize</span></>;
   const saveClass   = saveBlocked ? 'topbar-btn danger' : hasSoftOnly ? 'topbar-btn warn' : 'topbar-btn success';
 
   // NEW-FU-56: in teacher/venue view without a filter selected, Suggest's
@@ -133,10 +137,13 @@ export default function TopBar({ onSave, onSuggest, onExport, onImport, onSwitch
           <Ico name="sparkles" /><span>Suggest</span>
         </button>
         {isFinalized ? (
+          // NEW-FU-614 (Batch 31 item 3): finalized → show a LOCK button (the locked state),
+          // replacing the "Finalize" button in place. Clicking it still unlocks (un-finalizes),
+          // exactly as before — the label just reflects the state ("Locked") instead of the verb.
           <button className="topbar-btn warn" onClick={onUnlock}
             disabled={!schedule || loading || isArchived}
-            title="This term is saved & locked. Click to unlock it so you can edit again.">
-            <Ico name="unlock" /><span>Unlock</span></button>
+            title="This term is finalized & locked. Click to unlock it so you can edit again.">
+            <Ico name="lock" /><span>Locked</span></button>
         ) : (
           <button className={saveClass} onClick={onSave}
             disabled={!schedule || loading || saveBlocked || isArchived}
