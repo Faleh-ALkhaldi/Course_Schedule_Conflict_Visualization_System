@@ -94,6 +94,15 @@ async function fetchVenuesRef(scheduleId, filter) {
   if (scopeOf(filter) === 'venue') {
     return (await query(`SELECT name, type, capacity FROM venues WHERE id = $1`, [filter.id])).rows;
   }
+  // NEW-FU-670: a WHOLE-TERM file now lists EVERY owner-term venue (like instructors), not only
+  // the venues that back a section. A complete Venues reference makes section-less venues
+  // round-trip losslessly AND lets the import safely PRUNE venues the new file no longer carries.
+  if (scopeOf(filter) === 'full') {
+    return (await query(
+      `SELECT name, type, capacity FROM venues
+        WHERE owner_semester = (SELECT semester FROM schedules WHERE id = $1) ORDER BY name`,
+      [scheduleId])).rows;
+  }
   const { clause, params } = sectionScopeClause(scheduleId, filter);
   const res = await query(
     `SELECT DISTINCT v.name, v.type, v.capacity FROM venues v

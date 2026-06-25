@@ -80,14 +80,14 @@ const TABLE_FONT  = 7;
 const TABLE_COLS = [
   { key: 'courseCode',    label: 'Course Code',    width: 40 },
   { key: 'courseName',    label: 'Course Name',    width: 72 },
-  { key: 'academicLevel', label: 'Academic Level', width: 38 },
+  { key: 'academicLevel', label: 'Academic Level', width: 44 },   // NEW-FU-671: fit "Sophomore" (was 38 → char-wrapped)
   { key: 'category',      label: 'Category',       width: 52 },
   { key: 'credits',       label: 'Credits',        width: 30 },
   { key: 'courseType',    label: 'Course Type',    width: 40 },
   { key: 'sectionNumber', label: 'Section #',      width: 32 },
   { key: 'sectionType',   label: 'Section Type',   width: 42 },
   { key: 'gender',        label: 'Gender',         width: 26 },
-  { key: 'days',          label: 'Days',           width: 108 },
+  { key: 'days',          label: 'Days',           width: 102 },   // NEW-FU-671: −6 to fund Academic Level (still fits "Sunday, Tuesday, Thursday")
   { key: 'startTime',     label: 'Start Time',     width: 30 },
   { key: 'endTime',       label: 'End Time',       width: 30 },
   { key: 'duration',      label: 'Duration (min)', width: 34 },

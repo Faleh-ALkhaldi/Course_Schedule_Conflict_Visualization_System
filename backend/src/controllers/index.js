@@ -3,6 +3,7 @@ const jwt       = require('jsonwebtoken');
 const { query } = require('../config/db');
 const schedSvc   = require('../services/ScheduleService');
 const exportSvc  = require('../services/ExportService');
+const parseRunner = require('../services/ImportParseRunner');   // NEW-FU-670: off-thread, hard-killable parse
 const multer     = require('multer');
 // NEW-C2: bound upload size and count to prevent OOM / DoS via unbounded
 // multipart bodies. Bumped 5→10MB to fit PDF/DOCX imports (PDFs with images
@@ -1083,6 +1084,9 @@ const ALLOWED_IMPORT_FORMATS = new Set(['xlsx', 'pdf', 'docx']);
 // NEW-FU-660: the three merge modes the scoped-import dialog can choose. Any other
 // value (or none) means the first "preview" call — merge-if-clean, else ask.
 const ALLOWED_MERGE_MODES = new Set(['entity-only', 'with-conflicts', 'conflict-free']);
+// NEW-FU-668: whole-term (REPLACE) imports get the same dialog. There is no "entity-only"
+// for a whole-term file (it carries the whole schedule), so just proceed vs. fix.
+const WHOLE_TERM_MODES = new Set(['with-conflicts', 'conflict-free']);
 
 // Map a MIME type / extension to our internal format slug. Lets the user upload
 // a file without specifying ?format= and have the right parser picked.
@@ -1110,19 +1114,14 @@ const importSchedule = ah(async (req, res) => {
     });
   }
   try {
-    // NEW-FU-662: SAFETY gate FIRST — verify the file's real signature (magic bytes), reject
-    // a renamed/spoofed/polyglot file, and reject zip bombs / macro-bearing / over-large
-    // Office archives BEFORE any parser allocates memory. Then parse under a hard timeout so
-    // a pathological file can never wedge the request. (err.status flows to the catch below.)
-    uploadSafety.assertSafeUpload(req.file.buffer, format);
-
-    // NEW-FU-660: parse first so we can read the file's SCOPE and route accordingly:
-    //   • full (whole-term file)      → REPLACE the current term (keeps the CURRENT
-    //                                    term's name; the file's term code is ignored).
-    //   • instructor / venue (scoped) → MERGE that entity into the current term. A
-    //     clean merge commits immediately; a conflicting merge returns needsDecision so
-    //     the UI can offer the 3 options (?mode=entity-only|with-conflicts|conflict-free).
-    const parsed = await uploadSafety.withParseTimeout(exportSvc.parseRows(req.file.buffer, format));
+    // NEW-FU-662 / NEW-FU-670: SAFETY gate + parse run TOGETHER inside a worker thread that is
+    // HARD-KILLED at the 20 s deadline — the file's real signature (magic bytes), zip-bomb /
+    // macro / oversize checks, AND the exceljs/mammoth/pdfjs parse are ALL off the request
+    // thread, so a synchronous CPU-bound burst can never wedge the event loop (the in-thread
+    // `withParseTimeout` Promise.race could not interrupt sync work). err.status flows to the
+    // catch below. Routing by the parsed SCOPE (FU-660): full → REPLACE the current term;
+    // instructor/venue → MERGE (a conflicting merge returns needsDecision for the 3-option UI).
+    const parsed = await parseRunner.parseUploadInWorker(req.file.buffer, format);
     const fileScope = (parsed && parsed.scope) || 'full';
 
     if (fileScope === 'instructor' || fileScope === 'venue') {
@@ -1135,12 +1134,63 @@ const importSchedule = ah(async (req, res) => {
       return res.json({ ...result, format, conflicts });
     }
 
-    // Whole-term file → the proven full-replace path.
-    const result    = await exportSvc.commitRows(
-      parsed.rows || [], req.params.scheduleId,
-      parsed.officeHours || [], parsed.instructors || [], parsed.venues || []);
-    const conflicts = await schedSvc.revalidateSchedule(req.params.scheduleId);
-    res.json({ ...result, format, conflicts });
+    // NEW-FU-668: whole-term file → REPLACE the current term, but give it the SAME
+    // proceed / cancel / fix dialog the scoped merges get. We PREVIEW first (stage the
+    // whole replace in a rolled-back transaction, evaluate the conflicts it WOULD have),
+    // so an import that introduces conflicts pauses for the user instead of silently
+    // committing a conflicted schedule.
+    const args = [parsed.rows || [], req.params.scheduleId,
+                  parsed.officeHours || [], parsed.instructors || [], parsed.venues || []];
+    const rawMode = (req.query.mode || '').toLowerCase();
+    const mode    = WHOLE_TERM_MODES.has(rawMode) ? rawMode : undefined;
+
+    if (!mode) {
+      // PREVIEW — no DB change. If the clean replace would introduce conflicts, return
+      // needsDecision so the UI shows the three options; otherwise commit straight away.
+      const pv   = await exportSvc.commitRows(...args, { preview: true });
+      const conf = pv.conflicts || [];
+      if (conf.length > 0) {
+        const hardCount = conf.filter(c => !c.isSoft).length;
+        return res.json({
+          needsDecision: true, scope: 'full', format,
+          conflictCount: conf.length, hardCount, softCount: conf.length - hardCount,
+        });
+      }
+      const result    = await exportSvc.commitRows(...args);
+      const conflicts = await schedSvc.revalidateSchedule(req.params.scheduleId);
+      return res.json({ ...result, format, conflicts });
+    }
+
+    // A mode was chosen → commit the replace, then auto-fix if asked.
+    const result    = await exportSvc.commitRows(...args);
+    let   conflicts = await schedSvc.revalidateSchedule(req.params.scheduleId);
+    let   fix       = null;
+    if (mode === 'conflict-free') {
+      // FIX AND IMPORT — the replace is now COMMITTED. NEW-FU-671 (re-audit): run the resolver in
+      // its OWN try/catch so a fix failure (a concurrent finalize, the resolver's weighted-gate
+      // 409, a transient DB error) can NEVER surface as if the IMPORT was rejected — the import
+      // already succeeded, so degrade to "imported, but the auto-fix couldn't run" (HTTP 200 + the
+      // conflicts that remain) instead of a misleading 4xx that implies nothing changed.
+      try {
+        const quickFixSvc = require('../services/QuickFixService');
+        const plan = await quickFixSvc.plan(req.params.scheduleId);
+        // NEW-FU-671: apply only NON-last-resort ops. A `drop` destroys sections and is opt-in in
+        // the grid UI; "fix and import" must never silently drop a section to reach zero.
+        const ops = (plan.ops || []).filter((o) => !o.lastResort && o.type !== 'drop');
+        if (ops.length) await quickFixSvc.apply(req.params.scheduleId, ops);
+        conflicts = await schedSvc.revalidateSchedule(req.params.scheduleId);
+        // Report the resolver's planned summary but with the ACTUAL remaining counts (honest even
+        // if ops were filtered).
+        const remaining = conflicts.conflicts || [];
+        const remHard   = remaining.filter((c) => !c.isSoft).length;
+        fix = { ...(plan.summary || {}), remainingHard: remHard, remainingSoft: remaining.length - remHard };
+      } catch (fixErr) {
+        console.error('[import] auto-fix after a committed import failed:', fixErr.message);
+        conflicts = await schedSvc.revalidateSchedule(req.params.scheduleId);
+        fix = { failed: true, message: 'Imported, but the automatic conflict fix could not run — the conflicts remain.' };
+      }
+    }
+    res.json({ ...result, format, conflicts, fix });
   } catch (err) {
     // Validation errors we raised on purpose carry a status + a user-facing message.
     if (err.status) return res.status(err.status).json({ error: err.message });

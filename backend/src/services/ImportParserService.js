@@ -156,12 +156,33 @@ function cellsFor(rowHtml) {
       .trim());
 }
 
+// NEW-FU-669: the table/row extraction below uses lazy `[\s\S]*?` regexes. Those go O(n²) —
+// catastrophic, minutes-to-hours — when a `<table>`/`<tr>` opener has NO matching closer, which
+// a crafted .docx can supply (a ~1 MB body of `'<table>'.repeat(150000)` froze the event loop
+// for 28 s). mammoth's render of a FAITHFUL export is always well-formed and small, and Node
+// parses synchronously so withParseTimeout() can't interrupt it. So guard BEFORE the scans:
+// bound the rendered size and require BALANCED, count-capped table/row tags (all linear,
+// no-backtracking counts) — balanced + bounded ⇒ every lazy scan stays inside a real, closed
+// element ⇒ O(n). Pure + exported for unit testing.
+const MAX_DOCX_HTML   = 16 * 1024 * 1024;   // 16 MB rendered (real combined exports are < 1 MB)
+const MAX_DOCX_TABLES = 500;                // a real combined export has ~a dozen tables
+function assertDocxStructureSafe(html) {
+  const bad = (msg) => { const e = new Error(msg); e.status = 400; throw e; };
+  if (html.length > MAX_DOCX_HTML) bad('This Word file is too large to read safely and was rejected.');
+  const tOpen  = (html.match(/<table\b/gi)  || []).length;
+  const tClose = (html.match(/<\/table>/gi) || []).length;
+  const trOpen  = (html.match(/<tr\b/gi)  || []).length;
+  const trClose = (html.match(/<\/tr>/gi) || []).length;
+  if (tOpen !== tClose || trOpen !== trClose || tOpen > MAX_DOCX_TABLES)
+    bad("We couldn't read this Word file — its table structure looks malformed.");
+  return trOpen;
+}
+
 async function parseDocxToRows(buffer) {
   const { value: html } = await mammoth.convertToHtml({ buffer });
-  // NEW-FU-662: bound the rendered size + total rows so a docx that passed the zip gate but
-  // still expands to an enormous table can't blow up memory while we scan it.
-  if (html.length > 40 * 1024 * 1024) { const e = new Error('This Word file is too large to read safely and was rejected.'); e.status = 400; throw e; }
-  const trCount = (html.match(/<tr[\s>]/gi) || []).length;
+  // NEW-FU-669: bound + balance the rendered HTML BEFORE the lazy table/row scans (was a bare
+  // 40 MB length cap that left the O(n²)-on-unclosed-tags ReDoS reachable at ~1 MB).
+  const trCount = assertDocxStructureSafe(html);
   assertRowCount(trCount, 'Word document');
   // NEW-FU-657: the combined DOCX contains the per-day visual-schedule tables
   // (Half A) FIRST, then the full-semester section table (Half B). Scan EVERY
@@ -285,23 +306,42 @@ async function parsePdfToRows(buffer) {
   // (page order, then top→bottom within a page; items left→right within a row).
   const allRows = [];
   let itemCount = 0;   // NEW-FU-662: bound total text items (a flood-of-glyphs PDF)
+  try {
   for (let p = 1; p <= doc.numPages; p++) {
     const page = await doc.getPage(p);
-    const content = await page.getTextContent();
-    itemCount += content.items.length;
-    if (itemCount > MAX_TEXT_ITEMS) { const e = new Error('This PDF contains too much text data and was rejected as unsafe.'); e.status = 400; throw e; }
-    const items = content.items
-      .filter(it => it.str && it.str.trim())
-      .map(it => ({ str: it.str.trim(), x: it.transform[4], y: it.transform[5] }));
+    // NEW-FU-670: STREAM the page's text and count items AS THEY ARRIVE, cancelling the moment the
+    // cap is exceeded — so a flood-of-glyphs page is rejected BEFORE its entire content is
+    // materialized (the old getTextContent() built the whole page first, then checked the cap).
+    const reader = page.streamTextContent().getReader();
     const byY = new Map();
-    for (const it of items) {
-      const key = Math.round(it.y);
-      if (!byY.has(key)) byY.set(key, []);
-      byY.get(key).push(it);
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      for (const it of (value.items || [])) {
+        if (++itemCount > MAX_TEXT_ITEMS) {
+          // NEW-FU-671 (re-audit): do NOT reader.cancel() here — it RACES pdfjs's in-flight stream
+          // pump, which keeps enqueueing into the now-closed controller → an ERR_INVALID_STATE
+          // unhandledRejection that crashes the parse worker (and can race the 400 message into a
+          // generic 422). Just throw; the `finally { await doc.destroy() }` below stops the pump
+          // cleanly (verified: 0 unhandled rejections, identical 400 result).
+          const e = new Error('This PDF contains too much text data and was rejected as unsafe.'); e.status = 400; throw e;
+        }
+        const str = it.str && it.str.trim();
+        if (!str) continue;
+        const key = Math.round(it.transform[5]);
+        if (!byY.has(key)) byY.set(key, []);
+        byY.get(key).push({ str, x: it.transform[4], y: it.transform[5] });
+      }
     }
     for (const yk of [...byY.keys()].sort((a, b) => b - a)) {
       allRows.push(byY.get(yk).sort((a, b) => a.x - b.x));
     }
+  }
+  } finally {
+    // NEW-FU-670 (re-audit): tear the pdfjs document down on EVERY exit (incl. the cap-exceeded
+    // throw) so its worker's in-flight stream pump can't `enqueue` into the cancelled reader and
+    // raise an ERR_INVALID_STATE unhandledRejection that would crash the parse worker.
+    await doc.destroy().catch(() => {});
   }
 
   const tableLefts = columnLefts(TABLE_COLS);
@@ -388,4 +428,4 @@ async function parsePdfToRows(buffer) {
   return { scope: scope.detectScopeFromText(allText), rows, officeHours, instructors, venues };
 }
 
-module.exports = { parseDocxToRows, parsePdfToRows };
+module.exports = { parseDocxToRows, parsePdfToRows, assertDocxStructureSafe };

@@ -24,9 +24,14 @@ const zlib = require('zlib');
 
 // ── Caps (generous vs. real exports, which are ~10–300 KB / a few dozen ZIP entries) ──────
 const MAX_ZIP_ENTRIES      = 2000;
-const MAX_ZIP_UNCOMPRESSED = 100 * 1024 * 1024;   // 100 MB total expanded (declared AND actual)
+// NEW-FU-669: tightened from 100/60 MB. Real exports are ~10–300 KB, so even a huge term's
+// document.xml / sharedStrings is a few MB. The OLD 60 MB single-part ceiling let a ~10 MB
+// .docx inflate to ~59 MB of XML and keep mammoth's SYNCHRONOUS parser (uninterruptible by
+// withParseTimeout) busy 15–23 s. A 25 MB part / 40 MB total cap is still 80×+ any real file
+// but bounds that synchronous burst to a few seconds.
+const MAX_ZIP_UNCOMPRESSED = 40 * 1024 * 1024;    // 40 MB total expanded (declared AND actual)
 const MAX_ZIP_RATIO        = 200;                 // expanded ÷ stored — a classic zip-bomb tell
-const MAX_SINGLE_ENTRY     = 60 * 1024 * 1024;    // 60 MB any one part (declared AND actual)
+const MAX_SINGLE_ENTRY     = 25 * 1024 * 1024;    // 25 MB any one part (declared AND actual)
 
 // File signatures (magic bytes).
 const ZIP_SIGS = [Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from([0x50, 0x4b, 0x05, 0x06]), Buffer.from([0x50, 0x4b, 0x07, 0x08])];

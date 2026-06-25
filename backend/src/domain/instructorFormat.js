@@ -25,9 +25,13 @@ function instructorNameError(name) {
   const trimmed = String(name ?? '').trim();
   if (/^NEW INSTRUCTOR \d+$/i.test(trimmed)) return null;
   if (trimmed.length > 120) return 'name is too long (max 120 characters).';   // NEW-FU-662: DB VARCHAR(120)
-  if (!/^[A-Za-z\s'-]+$/.test(trimmed))
-    return 'name may contain only letters, spaces, hyphens and apostrophes.';
-  const parts = trimmed.split(/\s+/).filter(Boolean);
+  // NEW-FU-669: a literal ASCII space ONLY — `\s` also matches NBSP / em-space / ideographic
+  // space / BOM / tab / newline, which slipped homograph + invisible-character names past this
+  // gate (the course-name and venue-name gates already reject them). A real name is plain ASCII;
+  // an interior NBSP both hides text and forges a look-alike DUPLICATE of an ASCII-space name.
+  if (!/^[A-Za-z '-]+$/.test(trimmed))
+    return 'name may contain only English letters, plain spaces, hyphens and apostrophes.';
+  const parts = trimmed.split(/ +/).filter(Boolean);
   if (parts.length < 2 || !parts.every(p => /^[A-Za-z][A-Za-z'-]*$/.test(p)))
     return 'Enter a full name — at least a first and last name (English letters only, separated by a space).';
   return null;

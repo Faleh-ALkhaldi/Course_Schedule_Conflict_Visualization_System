@@ -188,9 +188,22 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
       } else {
         const skippedMsg = result.skipped ? ` (${result.skipped} duplicate row(s) skipped)` : '';
         const errMsg = result.errors?.length ? ` · ${result.errors.length} row(s) had errors` : '';
-        summary = `Imported ${result.created} section(s) from ${inferred.toUpperCase()}${skippedMsg}${errMsg}.`;
+        // NEW-FU-668: "Fix and import" reports what the resolver changed (and anything it
+        // couldn't auto-resolve), so the user sees exactly what happened to their schedule.
+        let fixMsg = '';
+        if (result.fix?.failed) {
+          // NEW-FU-671: the import committed but the auto-fix couldn't run — say so honestly.
+          fixMsg = ' · the automatic fix could not run, conflicts remain';
+        } else if (result.fix) {
+          const resolved  = (result.fix.resolvedHard || 0) + (result.fix.resolvedSoft || 0);
+          const remaining = (result.fix.remainingHard || 0) + (result.fix.remainingSoft || 0);
+          fixMsg = ` · fixed ${resolved} conflict(s)` +
+            (remaining ? `, ${remaining} need manual attention` : ' — now conflict-free');
+        }
+        summary = `Imported ${result.created} section(s) from ${inferred.toUpperCase()}${skippedMsg}${fixMsg}${errMsg}.`;
       }
-      const toastKind = (result.errors?.length || result.newConflicts) ? 'warning' : 'success';
+      const wholeTermLeftover = result.scope === undefined && (result.conflicts?.conflicts?.length || 0) > 0;
+      const toastKind = (result.errors?.length || result.newConflicts || wholeTermLeftover) ? 'warning' : 'success';
       showToast && showToast('✓ ' + summary, toastKind);
       setStagedFile(null);
       if (fileRef.current) fileRef.current.value = '';
@@ -201,8 +214,14 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
     } finally { setImporting(false); }
   }
 
-  // NEW-FU-660: the three conflict-dialog options, worded per scope.
-  const decisionOptions = decision ? (decision.scope === 'venue' ? [
+  // NEW-FU-660 / NEW-FU-668: the conflict-dialog options, worded per scope. A whole-term
+  // (REPLACE) file has no "entity-only" — it carries the whole schedule — so it offers just
+  // proceed vs. fix; the scoped (MERGE) files keep the entity-only choice too.
+  const decisionOptions = !decision ? [] : (
+    decision.scope === 'full' ? [
+      { mode:'with-conflicts', title:'Import and keep the conflicts', desc:'Replace the term with this file exactly as it is — conflicts included.' },
+      { mode:'conflict-free',  title:'Import and fix the conflicts',  desc:'Replace the term, then automatically resolve the conflicts and show what changed.' },
+    ] : decision.scope === 'venue' ? [
     { mode:'entity-only',    title:'Add the venue only',            desc:'Just its capacity & type — no courses assigned.' },
     { mode:'with-conflicts', title:'Add everything, keep conflicts', desc:'Add the venue, its courses & instructors, and proceed even with the conflicts.' },
     { mode:'conflict-free',  title:'Add everything, conflict-free',  desc:'Add it all, but move conflicting classes to free times — nothing is dropped.' },
@@ -210,7 +229,7 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
     { mode:'entity-only',    title:'Add the instructor only',        desc:'With their office hours — no courses assigned.' },
     { mode:'with-conflicts', title:'Add everything, keep conflicts', desc:'Add the instructor, their courses & venues, and proceed even with the conflicts.' },
     { mode:'conflict-free',  title:'Add everything, conflict-free',  desc:'Add it all, but move conflicting classes to free times — nothing is dropped.' },
-  ]) : [];
+  ]);
 
   // Pre-compute the inferred format of the staged file so we can render a
   // warning chip before the user clicks Import.
@@ -487,10 +506,14 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
                   borderRadius:8, padding:'12px 14px', marginTop:12,
                 }}>
                   <div style={{fontWeight:700, fontSize:'.86rem', color:'var(--warn-fg)', marginBottom:4}}>
-                    Merging {decision.scope} “{decision.entity}” causes {decision.conflictCount} conflict(s)
+                    {decision.scope === 'full'
+                      ? `This import would create ${decision.conflictCount} conflict(s)${decision.hardCount != null ? ` — ${decision.hardCount} hard, ${decision.softCount} soft` : ''}`
+                      : `Merging ${decision.scope} “${decision.entity}” causes ${decision.conflictCount} conflict(s)`}
                   </div>
                   <div style={{fontSize:'.76rem', color:'var(--text-secondary)', marginBottom:10}}>
-                    {decision.courseCount} class group(s) in this file. Choose how to add it:
+                    {decision.scope === 'full'
+                      ? 'Replacing the term with this file introduces conflicts. Choose how to import:'
+                      : `${decision.courseCount} class group(s) in this file. Choose how to add it:`}
                     {decision.conflictSummaries?.length ? (
                       <ul style={{margin:'4px 0 0', paddingLeft:18}}>
                         {decision.conflictSummaries.map((s,i)=>(
@@ -516,7 +539,7 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
                       </button>
                     ))}
                     <button type="button" className="sm-btn-cancel" style={{alignSelf:'flex-start', marginTop:2}}
-                      onClick={() => setDecision(null)}>Cancel merge</button>
+                      onClick={() => setDecision(null)}>{decision.scope === 'full' ? 'Cancel import' : 'Cancel merge'}</button>
                   </div>
                 </div>
               )}

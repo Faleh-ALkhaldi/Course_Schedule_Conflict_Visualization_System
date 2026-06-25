@@ -41,7 +41,11 @@ const HIDDEN_RE    = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEF
 const ODD_SPACE_RE = /[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/;
 function prohibitedCharsError(value) {
   const s = String(value ?? '');
-  if (FORMULA_LEAD.test(s)) return 'must not start with =, +, -, or @ (it looks like a spreadsheet formula)';
+  // NEW-FU-669: anchor the formula check to the first NON-blank char so a leading space/tab
+  // before the payload (" =1+1", " @SUM()") can't smuggle a formula past it. trimStart()
+  // strips the full Unicode-whitespace + BOM set; the odd-space/control checks below still see
+  // the untrimmed string so interior hidden chars remain caught.
+  if (FORMULA_LEAD.test(s.trimStart())) return 'must not start with =, +, -, or @ (it looks like a spreadsheet formula)';
   if (CONTROL_RE.test(s))   return 'contains control characters';
   if (HIDDEN_RE.test(s))    return 'contains hidden zero-width or text-direction characters';
   if (ODD_SPACE_RE.test(s)) return 'contains an unusual (non-standard) space character';
@@ -270,4 +274,4 @@ function validateImportFields({ rows = [], instructors = [], venues = [], office
   return { errors: [...new Set(errors)] };
 }
 
-module.exports = { validateImportFields, VALID_DAYS, VALID_SECTION_TYPES, VALID_VENUE_TYPES };
+module.exports = { validateImportFields, prohibitedCharsError, venueNameError, VALID_DAYS, VALID_SECTION_TYPES, VALID_VENUE_TYPES };

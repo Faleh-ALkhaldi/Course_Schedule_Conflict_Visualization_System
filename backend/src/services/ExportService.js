@@ -576,7 +576,11 @@ async function buildCombinedWorkbook(scheduleId, filter = { type: 'full' }, seme
 // NEW: extracted from importFromExcel so the PDF/Word parsers in
 // ImportParserService.js can feed pre-parsed rows into the same
 // transactional commit path without copy-pasting the lock/upsert logic.
-async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef = [], venuesRef = []) {
+// NEW-FU-668: `opts.preview` runs the WHOLE replace inside the transaction, evaluates
+// the conflicts the imported term WOULD have (via the same canonical evaluator the live
+// validator uses), then ROLLS BACK — so the controller can show the 3-option dialog
+// (proceed / cancel / fix) before any DB change. A non-preview call commits as before.
+async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef = [], venuesRef = [], opts = {}) {
   if (!rowData.length) throw new Error('No data rows found in file.');
 
   // NEW-FU-657b: reference maps so instructors/venues rebuild with their REAL
@@ -708,9 +712,14 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
       const key = row.courseCode.toLowerCase();
       if (!courseByCode.has(key)) {
         const isGR = row.category?.toUpperCase() === 'GR';
+        // NEW-FU-671 (re-audit): strip ALL whitespace before matching the UG level. The PDF
+        // export's narrow Academic-Level column char-wraps "Sophomore" → "Sophomor"+"e", which the
+        // positional parser rejoins as "Sophomor e"; without this the no-match path silently
+        // defaulted EVERY wrapped row to "Freshman" (a real round-trip data loss). No UG level has
+        // an internal space, so collapsing whitespace is loss-free.
         const level = isGR ? 'Graduate' :
           ['Freshman','Sophomore','Junior','Senior'].find(
-            l => l.toLowerCase() === row.academicLevel?.toLowerCase()
+            l => l.toLowerCase() === String(row.academicLevel ?? '').replace(/\s+/g, '').toLowerCase()
           ) ?? 'Freshman';
         // NEW-FU-570 (audit-2 Phase-11 P2): persist the derived has_lab so a
         // 4-credit course imports schedulable (it was defaulting FALSE, which the
@@ -784,10 +793,14 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
       }
     }
 
-    // Step 3: upsert venues
-    const importedVenueNames = [...new Set(
-      rowData.map(r => r.venueName?.trim()).filter(Boolean).map(n => n.toLowerCase())
-    )];
+    // Step 3: upsert venues — NEW-FU-670: from the section rows AND the (now complete) Venues
+    // reference sheet, so a section-less venue carried by a whole-term file is re-created too
+    // (mirrors the FU-665b instructor behaviour; without this a complete venue ref wouldn't
+    // round-trip section-less venues, and the prune below would drop them).
+    const venueDisplayByLc = new Map();
+    for (const r of rowData) { const vn = r.venueName?.trim(); if (vn) venueDisplayByLc.set(vn.toLowerCase(), vn); }
+    for (const v of (venuesRef || [])) { const vn = v?.name?.trim(); if (vn && !venueDisplayByLc.has(vn.toLowerCase())) venueDisplayByLc.set(vn.toLowerCase(), vn); }
+    const importedVenueNames = [...venueDisplayByLc.keys()];
     // NEW-FU-645 (per-term isolation): scope to THIS term's venues ONLY (see instructors).
     const existingVenuesRes = await client.query(
       `SELECT id, name FROM venues WHERE owner_semester = $1`,
@@ -809,7 +822,7 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
 
     for (const name of importedVenueNames) {
       if (!venueByName.has(name)) {
-        const displayName = rowData.find(r => r.venueName?.toLowerCase() === name)?.venueName ?? name;
+        const displayName = venueDisplayByLc.get(name) ?? name;   // NEW-FU-670: ref-sheet name for section-less venues
         // NEW-FU-570 (audit-2 Phase-11 P2): migration 021 dropped the global
         // UNIQUE(name) for partial per-scope indexes, so the old `ON CONFLICT (name)`
         // had NO matching constraint and threw — importing ANY new venue was broken.
@@ -869,34 +882,81 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
       }
     }
 
-    // NEW-FU-657: re-create office hours so the re-imported term doesn't fire R-13
-    // ("instructor has no office hours") for every instructor. Clear the term's
-    // existing OH first so re-import is idempotent (a fresh term has none; the same
-    // term replaces rather than duplicates). Each OH is keyed to its instructor by name.
-    if (Array.isArray(officeHours) && officeHours.length) {
+    // NEW-FU-657 / NEW-FU-669: make the whole-term REPLACE a FAITHFUL replace.
+    // (a) Clear this term's office hours UNCONDITIONALLY — even when the file carries NONE — so a
+    //     file with an empty OH set can no longer leave the previous import's OH orphaned
+    //     (FU-669: the delete used to be gated on `officeHours.length`).
+    await client.query(
+      `DELETE FROM office_hours WHERE instructor_id IN (SELECT id FROM instructors WHERE owner_semester = $1)`,
+      [ownerSemester]
+    );
+
+    // (b) PRUNE instructors AND venues the new file no longer references, so importing a DIFFERENT
+    //     whole-term file fully replaces the term instead of accumulating the previous file's
+    //     entities (orphans lingered in the assignment dropdowns + re-exports). Safe because the
+    //     Instructors and (NEW-FU-670) Venues reference sheets both carry EVERY owner-term entity,
+    //     so the "wanted" set is complete and a faithful round-trip prunes nothing; the "backs no
+    //     current section" clause keeps each DELETE FK-safe. Each is a no-op when nothing is stale.
+    //     COURSES are intentionally NOT pruned: a whole-term file has no complete course reference
+    //     (the section table only lists sectioned courses), and a section-less course — e.g. a
+    //     catalog entry the user is about to add sections to (SWE 485), surfaced by Suggest and
+    //     ignored by the conflict engine — is a legitimate term member that must SURVIVE a REPLACE.
+    //     So a section-less course is an accepted catalog entry, not an orphan to delete.
+    const _lc = (x) => String(x ?? '').trim().toLowerCase();
+    const wantInstr = [...new Set(
+      [...rowData.map(r => _lc(r.instructorName)), ...(instructorsRef || []).map(i => _lc(i.name))].filter(Boolean)
+    )];
+    const wantVenue = [...new Set(
+      [...rowData.map(r => _lc(r.venueName)), ...(venuesRef || []).map(v => _lc(v.name))].filter(Boolean)
+    )];
+    if (wantInstr.length) {
       await client.query(
-        `DELETE FROM office_hours WHERE instructor_id IN (SELECT id FROM instructors WHERE owner_semester = $1)`,
-        [ownerSemester]
+        `DELETE FROM instructors
+           WHERE owner_semester = $1
+             AND lower(name) <> ALL($2::text[])
+             AND id NOT IN (SELECT instructor_id FROM sections WHERE schedule_id = $3 AND instructor_id IS NOT NULL)`,
+        [ownerSemester, wantInstr, scheduleId]
       );
-      for (const oh of officeHours) {
-        const instr = instrByName.get(oh.instructorName?.trim().toLowerCase());
-        if (!instr || !oh.day || !oh.startTime || !oh.endTime) continue;
-        try {
-          await instrRepo.addOfficeHour(
-            instr.id, { day: oh.day, startTime: oh.startTime, endTime: oh.endTime }, client
-          );
-        } catch (err) {
-          // NEW-FU-665: the field gate already validated every OH (shape, window, day,
-          // known instructor) BEFORE the DELETE, so a throw here means a genuine DB-level
-          // problem on an otherwise-clean file. ABORT the whole import (the outer catch
-          // rolls back) rather than dropping this OH and committing the rest — that was the
-          // non-atomic gap. Surface a clean message; never leak raw DB text (cf. FU-659).
-          console.error('[import] office-hour insert failed:', oh.instructorName, oh.day, err.message);
-          const e = new Error(`Import canceled — the office hours could not be saved, so nothing was changed.`);
-          e.status = 400;
-          throw e;
-        }
+    }
+    if (wantVenue.length) {
+      await client.query(
+        `DELETE FROM venues
+           WHERE owner_semester = $1
+             AND lower(name) <> ALL($2::text[])
+             AND id NOT IN (SELECT venue_id FROM sections WHERE schedule_id = $3 AND venue_id IS NOT NULL)`,
+        [ownerSemester, wantVenue, scheduleId]
+      );
+    }
+
+    // (c) Re-create office hours from the file so the term doesn't fire R-13 ("instructor has no
+    //     office hours"). Each OH is keyed to its instructor by name.
+    for (const oh of (officeHours || [])) {
+      const instr = instrByName.get(oh.instructorName?.trim().toLowerCase());
+      if (!instr || !oh.day || !oh.startTime || !oh.endTime) continue;
+      try {
+        await instrRepo.addOfficeHour(
+          instr.id, { day: oh.day, startTime: oh.startTime, endTime: oh.endTime }, client
+        );
+      } catch (err) {
+        // NEW-FU-665: the field gate already validated every OH (shape, window, day, known
+        // instructor) BEFORE the DELETE, so a throw here is a genuine DB-level problem on an
+        // otherwise-clean file. ABORT the whole import (the outer catch rolls back) rather than
+        // dropping this OH and committing the rest. Surface a clean message; never leak raw DB text.
+        console.error('[import] office-hour insert failed:', oh.instructorName, oh.day, err.message);
+        const e = new Error(`Import canceled — the office hours could not be saved, so nothing was changed.`);
+        e.status = 400;
+        throw e;
       }
+    }
+
+    // NEW-FU-668: PREVIEW — the whole replace is now staged in this transaction.
+    // Evaluate the conflicts it WOULD produce with the canonical evaluator (same one
+    // revalidateSchedule uses), then ROLL BACK so nothing is persisted. The controller
+    // uses this to drive the proceed / cancel / fix dialog before committing for real.
+    if (opts.preview) {
+      const evalResult = await schedSvc._evaluateSchedule(scheduleId, client);
+      await client.query('ROLLBACK').catch(() => {});
+      return { created, skipped, errors, preview: true, conflicts: evalResult.conflicts || [] };
     }
 
     await client.query('COMMIT');
@@ -1054,7 +1114,8 @@ function parseMetaScope(wb) {
 function parseInstructorsSheet(wb) {
   const ws = wb.getWorksheet('Instructors') ?? wb.getWorksheet('Instructor');   // NEW-FU-666: accept singular scoped name
   if (!ws) return [];
-  const h = {};
+  assertRowCount(ws.rowCount, 'Instructors sheet');   // NEW-FU-669: cap reference-sheet rows too
+  const h = Object.create(null);   // NEW-FU-669: null-proto so a "__proto__"/"constructor" header can't pollute
   ws.getRow(1).eachCell((cell, n) => { const v = cell.value?.toString().trim(); if (v) h[v.toLowerCase()] = n; });
   const nCol = h['instructor'] ?? h['name'], eCol = h['email'];
   if (!nCol) return [];
@@ -1072,7 +1133,8 @@ function parseInstructorsSheet(wb) {
 function parseVenuesSheet(wb) {
   const ws = wb.getWorksheet('Venues') ?? wb.getWorksheet('Venue');   // NEW-FU-666: accept singular scoped name
   if (!ws) return [];
-  const h = {};
+  assertRowCount(ws.rowCount, 'Venues sheet');   // NEW-FU-669
+  const h = Object.create(null);   // NEW-FU-669: null-proto header map
   ws.getRow(1).eachCell((cell, n) => { const v = cell.value?.toString().trim(); if (v) h[v.toLowerCase()] = n; });
   const nCol = h['venue'] ?? h['name'], tCol = h['type'] ?? h['venue type'], cCol = h['capacity'];
   if (!nCol) return [];
@@ -1092,7 +1154,8 @@ function parseVenuesSheet(wb) {
 function parseOfficeHoursSheet(wb) {
   const ws = wb.getWorksheet('OfficeHours');
   if (!ws) return [];
-  const headers = {};
+  assertRowCount(ws.rowCount, 'OfficeHours sheet');   // NEW-FU-669
+  const headers = Object.create(null);   // NEW-FU-669: null-proto header map
   ws.getRow(1).eachCell((cell, colNum) => {
     const v = cell.value?.toString().trim();
     if (v) headers[v.toLowerCase()] = colNum;
@@ -1218,8 +1281,9 @@ class ExportService {
     return parser(buffer);
   }
 
-  async commitRows(rows, scheduleId, officeHours = [], instructors = [], venues = []) {
-    return commitRows(rows, scheduleId, officeHours, instructors, venues);
+  async commitRows(rows, scheduleId, officeHours = [], instructors = [], venues = [], opts = {}) {
+    // NEW-FU-668: forward `opts` (e.g. { preview:true }) to the real commit path.
+    return commitRows(rows, scheduleId, officeHours, instructors, venues, opts);
   }
 
   async importBuffer(buffer, scheduleId, format = 'xlsx') {
