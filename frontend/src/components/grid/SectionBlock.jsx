@@ -58,7 +58,7 @@ export function abbreviateInstructorName(name) {
   return `${parts[0][0]}. ${parts.slice(1).join(' ')}`;
 }
 
-export default function SectionBlock({ section, conflicts, onClick, onDelete, isDragging, height, tier = 'spacious', uniform = false }) {
+export default function SectionBlock({ section, conflicts, onClick, onDelete, isDragging, height, tier = 'spacious', uniform = false, dimmedForDrag = false }) {
   // NEW-FU-207: archived schedules disable section drag + change the cursor.
   // Click is gated upstream in SchedulerPage.handleBlockClick.
   // NEW-FU-483 (Phase 117): also disable drag when finalized (archived_at may be null for
@@ -229,7 +229,13 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
   const style = {
     background: bg, borderColor, color: colors.text,
     transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined,
-    opacity: activeDragging ? 0.35 : 1,
+    // NEW-FU-636 (issue #1): dim the WHOLE section group while any of its meetings is being
+    // dragged (dimmedForDrag), not just the grabbed card (activeDragging) — the overlay shows
+    // all meetings lifting together, so the on-grid siblings dim + get a dashed outline to make
+    // "this whole group moves together" obvious.
+    opacity: (activeDragging || dimmedForDrag) ? 0.35 : 1,
+    outline: dimmedForDrag && !activeDragging ? '2px dashed #0284c7' : undefined,
+    outlineOffset: dimmedForDrag && !activeDragging ? '-2px' : undefined,
     // NEW-FU-207: archived → default cursor (no drag affordance) + no
     // interactive hint. Click-to-edit is gated upstream so we don't
     // even need to disable pointer-events; the cursor just stops
@@ -304,6 +310,7 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
          element inspector. Not user-visible. */
       aria-label={ariaLabel}
       data-fullinfo={fullInfo}
+      data-section-id={section.id}  /* NEW-FU-643 (issue #4): reliable selector for measuring the dragged card's real size */
       /* NEW-FU-403 (Phase 43): data-section-type drives the corner
          ribbon's color in CSS. Even when .sblock-type-badge is
          hidden at narrow tiers, the ribbon stays visible — a 9×9px

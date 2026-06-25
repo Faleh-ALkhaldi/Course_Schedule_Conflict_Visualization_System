@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { DAYS, useApp } from '../../context/AppContext.jsx';
 import * as api from '../../api/index.js';
+import { findOfficeHourClassClashes, suggestFreeOfficeHour, clashLabel } from '../../utils/officeHourConflict.js'; // NEW-FU-634 (issue #2b)
 import './SectionModal.css'; // reuse same modal styles
 
 // NEW-FU-511 (Batch 2): add one hour to an "HH:MM" time, clamped to 16:00 (the
@@ -20,7 +21,7 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
   // admin can SEE the OH) but every form input and the Save / Delete buttons
   // are disabled. This is purely UX — OH is global per-instructor, so the
   // API can't 409 here; the UI lockdown is the only enforcement axis.
-  const { schedule, confirm } = useApp();
+  const { schedule, confirm, sections, recordRefCommand } = useApp();
   // NEW-FU-562 (audit-2 P2-8): finalized terms are read-only too, but this only checked
   // archived_at — so office hours could be edited/deleted on a Finalized term, bypassing the
   // read-only contract every other surface enforces. The UI lockdown is OH's only enforcement
@@ -97,6 +98,27 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
     // H-9 + NEW-FU-466: block any out-of-window / out-of-order value at the source.
     // The user already sees `validationMsg` inline; this also stops the submit.
     if (blockMsg) { setError(blockMsg); return; }
+    // NEW-FU-634 (issue #2b) + NEW-FU-639 (issue #7): up-front OH↔class conflict confirmation
+    // (edit path). `sections` in TEACHER view is this instructor's class meetings; if the edited
+    // OH would overlap one (R-04), present a 3-OPTION decision instead of a bare yes/no: Save
+    // anyway (accept the conflict) · Use the nearest conflict-free slot (apply it) · Cancel.
+    let payload = { ...form };
+    const clashes = findOfficeHourClassClashes(form, sections);
+    if (clashes.length) {
+      const sug = suggestFreeOfficeHour(form, sections, ohList.filter(o => o.id !== officeHour.id));
+      const choice = await confirm({
+        title: 'This office hour overlaps a class',
+        message: `It overlaps ${clashLabel(clashes[0])}${clashes.length > 1 ? ` (and ${clashes.length - 1} more)` : ''} and will create a conflict.`,
+        options: [
+          { label: 'Save anyway', value: 'proceed', tone: 'danger' },
+          ...(sug ? [{ label: `Use ${sug.day} ${sug.startTime}–${sug.endTime}`, value: 'suggest', tone: 'primary' }] : []),
+          { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+        ],
+        dismissValue: 'cancel',
+      });
+      if (choice === 'cancel') return;
+      if (choice === 'suggest' && sug) { payload = { day: sug.day, startTime: sug.startTime, endTime: sug.endTime }; setForm(payload); }
+    }
     setBusy(true); setError('');
     try {
       // NEW-FU-41: one atomic PUT instead of the prior C-5 add-then-delete
@@ -105,7 +127,16 @@ export default function OfficeHourModal({ officeHour, instructorId, onClose, onS
       // the user got only a generic "Failed to update" toast and no signal
       // that they now had a duplicate row in the DB. PUT updates the same
       // row id, so either the edit lands or the original is unchanged.
-      await api.updateInstructorOfficeHour(instructorId, officeHour.id, form);
+      await api.updateInstructorOfficeHour(instructorId, officeHour.id, payload);
+      // NEW-FU-638 (issue #6): one undo step — the OH row id is stable across an edit, so undo
+      // restores the previous time and redo re-applies the new one.
+      const beforeVals = { day: officeHour.day, startTime: start, endTime: end };
+      const afterVals  = { ...payload };
+      recordRefCommand && recordRefCommand({
+        label: 'edit office hour',
+        undo: async () => { await api.updateInstructorOfficeHour(instructorId, officeHour.id, beforeVals); },
+        redo: async () => { await api.updateInstructorOfficeHour(instructorId, officeHour.id, afterVals); },
+      });
       showToast('✓ Office hours updated.', 'success');
       onSaved();
       onClose();

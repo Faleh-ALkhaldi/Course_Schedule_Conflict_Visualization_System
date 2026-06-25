@@ -51,12 +51,23 @@ function validateImportRows(rowData) {
 
   // Per-course: the 4-credit ⇒ has-lab invariant. Import carries no
   // is_capstone/is_external signal, so only the has_lab axis is checkable here.
+  // NEW-FU-657: capstone is a course-level flag carried in the import's Course Type
+  // column (any row marks the course). A 0-credit course is legal ONLY as a capstone,
+  // so creditsFlagError must see the flag or it wrongly rejects a re-imported capstone.
+  const isCapstoneByCourse = new Map();
+  for (const r of rowData) {
+    if (r.isCapstone) isCapstoneByCourse.set(String(r.courseCode ?? '').toLowerCase(), true);
+  }
   const seen = new Set();
   for (const r of rowData) {
     const key = String(r.courseCode ?? '').toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    const ce = creditsFlagError({ credits: r.credits, hasLab: hasLabByCourse.get(key) || false });
+    const ce = creditsFlagError({
+      credits: r.credits,
+      hasLab: hasLabByCourse.get(key) || false,
+      isCapstone: isCapstoneByCourse.get(key) || false,
+    });
     if (ce) errors.push(`${r.courseCode}: ${ce}`);
   }
 

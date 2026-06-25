@@ -17,6 +17,11 @@
   min-width: 32px;
   overflow: visible;   /* keep the handle (right: -15px) visible when collapsed */
 }
+/* NEW-FU-644 (issue #1b): wider panel in Instructor & Venue views (sparse grids) so long
+   instructor names have ample room. ~350px fits even "NUHA ABDULRAHMAN ALBADI" at full size with
+   the avatar + clock/× + check. Course View keeps 260px. Collapsed always wins (most specific). */
+.sp-root.sp-wide { width: 350px; min-width: 350px; }
+.sp-root.sp-wide.sp-collapsed { width: 32px; min-width: 32px; }
 /* NEW-FU-418 (Phase 103 item 5): inner scroll region (fills the fixed-height root). */
 .sp-scroll {
   height: 100%;
@@ -200,6 +205,10 @@
 .sp-filter-item {
   display:flex; align-items:center; gap:6px;
   padding:5px 6px; border-radius:6px; flex:1;
+  /* NEW-FU-641 (issue #1): min-width:0 lets this flex item shrink below the intrinsic width of
+     its nowrap name, so the name ellipsizes instead of pushing the row's clock/× controls off
+     frame (the long-name clipping seen on "MOHAMMAD ALSHAYEB" / "MOHD SHAMEEM SALEEM"). */
+  min-width:0; overflow:hidden;
   background:none; border:1px solid transparent; cursor:pointer;
   font-family:var(--font-body); text-align:left;
   transition:background .1s;
@@ -222,35 +231,32 @@
    "Dr. Mohammed Bin Abdullah Al-Khaldi" would push the avatar / ✓
    / × out of frame. The 2-line clamp caps card height so the sidebar
    list density stays predictable. */
+/* NEW-FU-633 (issue #4): instructor/venue names render on exactly ONE line. The prior
+   3-line -webkit-line-clamp box + FilterName's fit-text shrink (FU-284/291/295/298/305)
+   wrapped long names ("MOHD SHAMEEM SALEEM", "NUHA ABDULRAHMAN ALBADI") to 2-3 lines and
+   shrank the font — low quality and visually clipped. A single nowrap + ellipsis line keeps
+   every row a uniform height; the row's title attribute carries the full name + email on hover. */
 .sp-filter-name {
-  font-size: 13px;
+  /* NEW-FU-643 (issue #3): a DYNAMIC, uniform font size (set on the list as --sp-name-fz) chosen so
+     even the LONGEST instructor name fits fully on one line — no clipping/ellipsis at the normal
+     panel width. Falls back to 13px before the fit hook runs. */
+  font-size: var(--sp-name-fz, 13px);
   font-weight: 600;
   flex: 1;
   min-width: 0;
   color: var(--text-primary);
-  display: -webkit-box;
-  /* NEW-FU-291 (Phase 58): bumped 2 → 3. The Phase 56/57 2-line clamp
-     was clipping "Introduction to SE (DUMMY — Freshman-tier demo)" and
-     "Software Requirements Engineering" at the visible-card level —
-     the hover tooltip carried the rest, but the card itself wasn't
-     readable at a glance. 3 lines fits every real course / instructor
-     / venue name in the seed; the tooltip stays as fallback for
-     pathological lengths. */
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   overflow: hidden;
-  white-space: normal;
-  overflow-wrap: normal;
-  word-break: normal;
-  /* NEW-FU-288 (Phase 57): hyphens:manual (not :auto). The Phase 56 R5
-     experiment with auto-hyphenation produced ugly mid-word breaks
-     like "Soft-ware", "Engi-neering", "Man-agement" at every viewport
-     width — Safari hyphenated even when there was room to wrap at a
-     space. `manual` keeps the soft-hyphen escape hatch (&shy;) for
-     deliberate break hints, but disables algorithmic hyphenation. */
-  hyphens: manual;
+  text-overflow: ellipsis;   /* extreme last-resort only (the fit hook keeps names within width) */
   line-height: 1.3;
 }
+/* NEW-FU-642 (issue #1a): name on line 1, flag on line 2. The text column owns all the row width
+   left of the trailing controls, so the name (line 1) is never squeezed by the flag — it renders
+   complete. NEW-FU-643 (issue #2): a real vertical gap between the name and its flag pill so the
+   row reads clean, not cramped. */
+.sp-filter-textcol  { display:flex; flex-direction:column; align-items:flex-start; justify-content:center;
+                      min-width:0; flex:1; gap:5px; }   /* NEW-FU-644 (issue #2): a touch more name↔flag breathing room */
+.sp-filter-nameline { display:flex; align-items:center; gap:5px; min-width:0; max-width:100%; }
 .sp-check { font-size:13px; color:var(--teal-500); margin-left:auto; }
 
 /* Venue */
@@ -264,7 +270,24 @@
    either. Same 14% tint shape so the three pills look like a family. */
 .sp-venue-tag.multi { background:rgba(107,63,160,.14); color:#5b21b6; }
 .sp-venue-cap { font-size:11px; font-weight:500; color:var(--text-muted);
-                word-break:keep-all; overflow-wrap:normal; white-space:nowrap; }
+                word-break:keep-all; overflow-wrap:normal; white-space:nowrap; flex-shrink:0; }
+/* NEW-FU-648: venue row's SECOND line — capacity + triage flag sit together below the name
+   (parity with the instructor row's name/flag stacking), so neither ever steals the name's width. */
+.sp-venue-metaline { display:flex; align-items:center; gap:6px; min-width:0; flex-wrap:wrap; }
+
+/* NEW-FU-641 (issue #1): fixed, non-shrinking trailing-controls group (clock + ×). flex-shrink:0
+   guarantees both buttons stay fully visible at every sidebar width; the name ellipsizes instead. */
+.sp-filter-actions { display:flex; align-items:center; gap:2px; flex-shrink:0; }
+/* NEW-FU-641 (issue #1): the "manage office hours" clock button — same footprint family as
+   .sp-del-btn (was an unclassed inline-styled control with no flex-shrink, part of the clip). */
+.sp-oh-btn {
+  width:22px; height:22px; border-radius:50%; border:none;
+  background:none; color:var(--text-muted); cursor:pointer;
+  display:flex; align-items:center; justify-content:center;
+  flex-shrink:0; transition:color .1s, background .1s;
+}
+.sp-oh-btn:hover { color:var(--teal-500); background:var(--slate-50); }
+.sp-oh-btn svg { width:14px; height:14px; }
 
 /* Delete button */
 .sp-del-btn {

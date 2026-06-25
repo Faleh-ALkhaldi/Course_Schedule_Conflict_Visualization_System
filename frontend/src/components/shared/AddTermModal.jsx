@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import * as api from '../../api';
 import './TermPicker.css';
@@ -122,9 +122,23 @@ export function AddTermModal({ existingCodes, onClose, onCreated }) {
   // NEW-FU-233: admin-supplied start/end when the code has no override.
   const [startsAt, setStartsAt] = useState('');
   const [endsAt,   setEndsAt]   = useState('');
+  // NEW-FU-656: seed mode — 'copy' (default; preserves prior behavior of seeding from the nearest
+  // same-season term) or 'blank' (create the term empty). + a transient hint flashed when the user
+  // types a disallowed character (so they understand why the keystroke didn't register).
+  const [seedMode, setSeedMode] = useState('copy');
+  const [hint, setHint]         = useState('');
+  const hintTimer = useRef(null);
+  function flashHint(msg) {
+    setHint(msg);
+    if (hintTimer.current) clearTimeout(hintTimer.current);
+    hintTimer.current = setTimeout(() => setHint(''), 2500);
+  }
 
   const preview = useMemo(() => decodePreview(code), [code]);
   const duplicate = code && existingCodes.includes(code);
+  // NEW-FU-656: is there a same-season term to copy from? (else "copy" effectively starts blank)
+  const hasSameSeasonTerm = TERM_RE.test(code)
+    && existingCodes.some(c => c !== code && c.length === 3 && c[2] === code[2]);
   const validShape = TERM_RE.test(code);
   // NEW-FU-218: range check. Only meaningful after the shape passes —
   // an invalid shape already trips its own warning above this one.
@@ -166,6 +180,7 @@ export function AddTermModal({ existingCodes, onClose, onCreated }) {
       // The backend ignores them when the code has an override anyway,
       // but staying explicit keeps the wire payload predictable.
       const payload = needsDates ? { startsAt, endsAt } : {};
+      payload.seedMode = seedMode;   // NEW-FU-656: 'copy' (seed from same-season term) | 'blank' (empty)
       const created = await api.createTerm(code, payload);
       onCreated(created);
     } catch (err) {
@@ -185,10 +200,14 @@ export function AddTermModal({ existingCodes, onClose, onCreated }) {
               type="text"
               className="tp-modal-input"
               value={code}
-              onChange={e => setCode(e.target.value.trim().slice(0, 3))}
+              onChange={e => {
+                // NEW-FU-656: accept ONLY English digits 0–9 — a disallowed key (any letter, symbol,
+                // Arabic-Indic numeral ٠–٩) never registers; also strips pasted junk.
+                if (/[^0-9]/.test(e.target.value)) flashHint('Term code accepts only numbers (0–9).');
+                setCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 3));
+              }}
               placeholder="e.g. 262"
               autoFocus
-              maxLength={3}
               inputMode="numeric"
             />
             <span className="tp-modal-hint">
@@ -196,6 +215,8 @@ export function AddTermModal({ existingCodes, onClose, onCreated }) {
               Allowed range: <code>{CODE_MIN}</code>–<code>{CODE_MAX}</code> (Fall 2025–Summer 2031).
             </span>
           </label>
+
+          {hint && <div className="tp-input-hint">{hint}</div>}
 
           {code && !validShape && (
             <div className="tp-preview tp-preview-warn">
@@ -229,13 +250,30 @@ export function AddTermModal({ existingCodes, onClose, onCreated }) {
                     the redundant template guess here. */}
                 {!needsDates && <span>{preview.span}</span>}
               </div>
+              {/* NEW-FU-656: let the user choose Copy (seed from the nearest same-season term) vs Start
+                  blank (empty term). Default Copy preserves the prior auto-seed behavior. */}
+              <div className="tp-preview-row tp-seed-toggle" role="group" aria-label="Seed mode">
+                <button type="button"
+                  className={`tp-seed-btn ${seedMode === 'copy' ? 'tp-seed-btn-on' : ''}`}
+                  onClick={() => setSeedMode('copy')}
+                  title={hasSameSeasonTerm
+                    ? `Start from a copy of the most recent ${preview.season} term's sections, then adjust.`
+                    : `No existing ${preview.season} term to copy from — this will start blank.`}>
+                  Copy last {preview.season} term
+                </button>
+                <button type="button"
+                  className={`tp-seed-btn ${seedMode === 'blank' ? 'tp-seed-btn-on' : ''}`}
+                  onClick={() => setSeedMode('blank')}
+                  title="Create the term empty — no sections, instructors, or venues copied.">
+                  Start blank
+                </button>
+              </div>
               <div className="tp-preview-row tp-preview-seed">
-                {/* NEW-FU-234: terms seed from the NEAREST existing
-                    term in the SAME season family (Fall ← Fall,
-                    Spring ← Spring, Summer ← Summer). Summer no
-                    longer starts blank by default. */}
-                Will copy from the nearest existing {preview.season} term
-                (or start blank if no {preview.season} term exists yet).
+                {seedMode === 'blank'
+                  ? 'Starts empty — no data copied.'
+                  : hasSameSeasonTerm
+                    ? `Will copy sections from the nearest existing ${preview.season} term.`
+                    : `No ${preview.season} term exists yet — will start blank.`}
               </div>
             </div>
           )}

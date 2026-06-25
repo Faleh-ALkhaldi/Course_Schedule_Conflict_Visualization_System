@@ -40,7 +40,7 @@ async function extractActiveTerm(req, _res, next) {
   }
   try {
     const r = await query(
-      `SELECT id, semester, archived_at
+      `SELECT id, semester, archived_at, status
          FROM schedules
         WHERE department_id = $1 AND semester = $2`,
       [DEFAULT_DEPT, raw]
@@ -52,6 +52,7 @@ async function extractActiveTerm(req, _res, next) {
         code:        r.rows[0].semester,
         scheduleId:  r.rows[0].id,
         archivedAt:  r.rows[0].archived_at, // Date or null
+        status:      r.rows[0].status,      // 'Draft' | 'PendingApproval' | 'Finalized' (NEW-FU-632)
       };
     }
   } catch {
@@ -78,4 +79,27 @@ function refuseIfActiveTermArchived(req, res, next) {
   next();
 }
 
-module.exports = { extractActiveTerm, refuseIfActiveTermArchived };
+// NEW-FU-632 (issue #2): the API-level twin of the read-only contract for office hours.
+// A FINALIZED term is read-only in the UI (banner + Locked button), and an ARCHIVED term
+// likewise — yet office hours are GLOBAL (no per-schedule FK), so unlike section edits they
+// can't be gated by the schedule row-lock (assertSchedulerEditableLocked). The only existing
+// gate, refuseIfActiveTermArchived, blocked archived but NOT finalized, so OH add/edit/delete
+// went through while viewing a finalized term. Block BOTH here. (Frontend disables the
+// affordance too; this is the backstop for a dev-tools power user.) Status is the schedule's
+// own status — a draft term active elsewhere is unaffected.
+function refuseIfActiveTermArchivedOrFinalized(req, res, next) {
+  const t = req.activeTerm;
+  if (t && t.archivedAt) {
+    return res.status(409).json({
+      error: `Cannot modify office hours while viewing archived term ${t.code}. Switch to an active term first.`,
+    });
+  }
+  if (t && t.status === 'Finalized') {
+    return res.status(409).json({
+      error: `Cannot modify office hours while term ${t.code} is finalized. Unlock the term first.`,
+    });
+  }
+  next();
+}
+
+module.exports = { extractActiveTerm, refuseIfActiveTermArchived, refuseIfActiveTermArchivedOrFinalized };

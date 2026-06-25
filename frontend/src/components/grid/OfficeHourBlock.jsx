@@ -3,7 +3,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { useApp } from '../../context/AppContext.jsx';
 import './OfficeHourBlock.css';
 
-export default function OfficeHourBlock({ officeHour, height, onClick, draggable = true }) {
+export default function OfficeHourBlock({ officeHour, height, onClick, onDelete, draggable = true }) {
   const id    = `oh-${officeHour.id}`;
   const start = (officeHour.start_time ?? officeHour.startTime ?? '').substring(0, 5);
   const end   = (officeHour.end_time   ?? officeHour.endTime   ?? '').substring(0, 5);
@@ -51,6 +51,18 @@ export default function OfficeHourBlock({ officeHour, height, onClick, draggable
     >
       <span className="oh-label">Office Hours</span>
       <span className="oh-time">{start}–{end}</span>
+      {/* NEW-FU-643 (issue #1): delete THIS office-hour slot ONLY (not the instructor's other
+          office hours) — unlike the section block's × which removes the whole group. Hover-revealed;
+          hidden when the term is read-only. onPointerDown stops the drag from starting on the X. */}
+      {onDelete && !isLocked && (
+        <button
+          type="button"
+          className="oh-delete"
+          title="Delete this office hour (only this slot)"
+          onPointerDown={e => e.stopPropagation()}
+          onClick={e => { e.stopPropagation(); onDelete(officeHour); }}
+        >×</button>
+      )}
     </div>
   );
 }

@@ -119,6 +119,13 @@
   color: var(--teal-500);
 }
 .suggest-pattern-btn.active small { color: var(--teal-500); opacity:.7; }
+/* NEW-FU-650: a duration the course's credits/flags MANDATE (only one legal value). Shown as a
+   non-interactive button (with a hover tooltip) so the user still sees the duration but can't pick. */
+.suggest-pattern-btn-fixed {
+  cursor: not-allowed;
+  opacity: .6;
+  border-style: dashed;
+}
 
 /* NEW-FU-242: per-course credits chip — surfaces WHY the pattern set
    varies per row. Subtle so it doesn't compete with the course code. */
@@ -525,6 +532,47 @@
 .suggest-autochoose-help:hover,
 .suggest-autochoose-help:focus { color: var(--teal-600, #0f766e); outline: none; }
 
+/* ── NEW-FU-655: Replace vs Add-to apply-mode segmented control ──────────────
+   Sits at the right end of the auto-choose header row. Two labelled segments
+   styled like the .suggest-pattern-btn day/duration buttons, so it reads as a
+   single pill with the active segment highlighted in the app's teal accent.
+   Theme tokens only (no hardcoded colours beyond the existing fallbacks). */
+.suggest-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;          /* push to the right edge of the header row */
+}
+.suggest-mode-btn {
+  appearance: none;
+  border: 1.5px solid var(--slate-200, #e2e8f0);
+  background: var(--bg-surface);
+  color: var(--slate-600, #475569);
+  font-size: .74rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+}
+/* Join the two segments into one pill. */
+.suggest-mode-btn:first-of-type  { border-radius: 6px 0 0 6px; border-right-width: .75px; }
+.suggest-mode-btn:nth-of-type(2) { border-radius: 0 6px 6px 0; border-left-width: .75px; }
+.suggest-mode-btn:hover { border-color: var(--teal-500, #0d9488); color: var(--teal-600, #0f766e); }
+.suggest-mode-btn.active {
+  background: var(--teal-500, #0d9488);
+  border-color: var(--teal-500, #0d9488);
+  color: #fff;
+}
+.suggest-mode-help {
+  cursor: help;
+  color: var(--slate-400);
+  font-size: .82rem;
+  user-select: none;
+}
+.suggest-mode-help:hover,
+.suggest-mode-help:focus { color: var(--teal-600, #0f766e); outline: none; }
+
 /* ── NEW-FU-232 (Phase 97, item 6): calmer cards + quieter controls ──────────
    The panel read as a wall of competing chips/colours. Soften every secondary
    element (inactive buttons, borders, axis labels) so the eye lands on the
@@ -665,4 +713,12 @@
   width: 44px;
   padding: 3px 4px;
 }
+/* NEW-FU-649: two compact per-gender counters (M / F) replace the single "# Sec". */
+.suggest-sections-field { gap: 8px; }
+.suggest-gender-counter { display: inline-flex; align-items: center; gap: 3px; }
+.suggest-sections-field .suggest-gender-counter .suggest-num-input { width: 38px; }
+/* NEW-FU-651: per-gender lab counters in the Lab-section heading. */
+.suggest-lab-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.suggest-lab-counters { display: inline-flex; align-items: center; gap: 8px; }
+.suggest-lab-counters .suggest-num-input { width: 38px; padding: 3px 4px; }
 .suggest-card-body { margin-top: 7px; }

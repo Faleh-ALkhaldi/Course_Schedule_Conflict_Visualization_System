@@ -265,9 +265,11 @@ describe('legalPatternsForCourse', () => {
     );
   });
 
-  test('3-credit WITH lab → 2-day lecture (50 + 75), never the 3-day Sun/Tue/Thu', () => {
+  test('3-credit WITH lab → 2-day 50min lecture only (FU-648: with-lab lecture is 2×50, never 75)', () => {
+    // A with-lab 3-credit course meets the LECTURE in two 50-min sessions + a separate lab.
+    // 2×75 delivers the full 3-credit lecture load (a NO-lab pattern), so it's not offered here.
     expect(values(legalPatternsForCourse({ credits: 3, hasLab: true }))).toEqual(
-      ['ST_50', 'MW_50', 'TT_50', 'MW_75', 'ST_75', 'TT_75']
+      ['ST_50', 'MW_50', 'TT_50']
     );
   });
 

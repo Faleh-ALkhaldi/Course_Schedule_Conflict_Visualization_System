@@ -10,7 +10,7 @@ const { authenticate, requireRole } = require('../middleware/auth');
 //     the frontend has asserted it's viewing an archived term. Wired into
 //     POST/PUT/DELETE on global resources (courses, instructors, venues,
 //     office-hours) below.
-const { extractActiveTerm, refuseIfActiveTermArchived } = require('../middleware/activeTerm');
+const { extractActiveTerm, refuseIfActiveTermArchived, refuseIfActiveTermArchivedOrFinalized } = require('../middleware/activeTerm');
 
 // NEW-FU-9: centralized UUID validation for every paramized route. Express
 // runs router.param handlers before the route handler, so a malformed UUID
@@ -110,13 +110,13 @@ router.get   ('/instructors/:instructorId/office-hours',    ctrl.getOfficeHours)
 // add buttons.
 // NEW-FU-211: OH timing was an explicit Phase-11 request — block all three
 // OH mutation verbs when the active-term context is archived.
-router.post  ('/instructors/:instructorId/office-hours',    requireRole('admin'), refuseIfActiveTermArchived, ctrl.addOfficeHour);
+router.post  ('/instructors/:instructorId/office-hours',    requireRole('admin'), refuseIfActiveTermArchivedOrFinalized, ctrl.addOfficeHour);  // NEW-FU-632: block on finalized too
 // NEW-FU-41: atomic office-hour update. Replaces the frontend's previous
 // create-new + delete-old dance, which silently duplicated OH rows on
 // partial failure. Admin-only to stay in lockstep with the POST/DELETE
 // gate from FU-28.
-router.put   ('/instructors/:instructorId/office-hours/:ohId', requireRole('admin'), refuseIfActiveTermArchived, ctrl.updateOfficeHour);
-router.delete('/instructors/:instructorId/office-hours/:ohId', requireRole('admin'), refuseIfActiveTermArchived, ctrl.deleteOfficeHour);
+router.put   ('/instructors/:instructorId/office-hours/:ohId', requireRole('admin'), refuseIfActiveTermArchivedOrFinalized, ctrl.updateOfficeHour);  // NEW-FU-632
+router.delete('/instructors/:instructorId/office-hours/:ohId', requireRole('admin'), refuseIfActiveTermArchivedOrFinalized, ctrl.deleteOfficeHour);  // NEW-FU-632
 
 // ── Venues ────────────────────────────────────────────────────────────────────
 router.get   ('/venues',         ctrl.getVenues);
@@ -150,6 +150,9 @@ router.delete('/sections/:sectionId',            ctrl.deleteSection);
 // R-15 quick-fix UI (Phase 23) calls this endpoint with the days from
 // the chosen fix proposal. Scheduler-accessible (matches section CRUD).
 router.post  ('/sections/:sectionId/extend',     ctrl.extendSection);
+// NEW-FU-642 (issue #4): atomically restructure a section group to a new day-pattern + time
+// (the cross-day-group drag). Reconciles the day-set in one tx — no duplicate-section 409.
+router.post  ('/sections/:sectionId/restructure', ctrl.restructureSection);
 // NEW-FU-95: next-available two-digit section number for a course in a
 // schedule (used by the "+ Add Section" UI to pre-fill the default).
 router.get   ('/schedules/:scheduleId/courses/:courseId/next-section-number',

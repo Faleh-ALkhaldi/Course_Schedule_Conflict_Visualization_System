@@ -259,8 +259,8 @@ app.use((err, req, res, next) => {
   else if (err.name === 'MulterError') {
     status  = 400;
     message = err.code === 'LIMIT_FILE_SIZE'
-      ? 'Uploaded file is too large (max 5 MB).'
-      : `Upload rejected: ${err.code}.`;
+      ? 'Uploaded file is too large (max 10 MB).'   // NEW-FU-662: match the actual multer cap (was a stale "5 MB")
+      : 'Upload rejected — send a single Excel, Word, or PDF file.';   // NEW-FU-662: don't leak the raw err.code
   }
   // NEW-FU-470 (Phase 113): a malformed JSON body makes body-parser throw with
   // status 400 + a parser-position message ("Expected ',' … at position 12").

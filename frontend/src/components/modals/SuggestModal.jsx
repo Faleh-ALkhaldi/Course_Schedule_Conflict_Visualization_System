@@ -22,22 +22,35 @@ const DAY_TEMPLATE_LABELS = {
   TT:      'Tue / Thu',
   ONE_DAY: 'Any day',
 };
-function legalDurationsForCourse({ credits }) {
+// NEW-FU-648: this mirror had DRIFTED badly from backend legalPatternsForCourse — it offered
+// 75 min for 2-credit, the 3-day STT for 3-credit-with-lab @ 50, STT+2-day for 4-credit, and
+// had no 0-credit case. Rewritten to reproduce the canonical OFFERING set EXACTLY (decomposed
+// into the duration → day-template two-step the modal renders), so every course shows only the
+// legal options for its (credits × has-lab) and an illegal duration/pattern can't be picked:
+//   0/1 cr ............... 50 → Any day (single meeting)
+//   2 cr ................. 50 → Sun/Tue, Mon/Wed, Tue/Thu   (no 75)
+//   3 cr (no lab) ....... 50 → Sun/Tue/Thu  |  75 → Mon/Wed, Sun/Tue, Tue/Thu
+//   3 cr (WITH lab) ..... 50 → Sun/Tue, Mon/Wed, Tue/Thu   (2×50 lecture + lab; NO 75, NO 3-day)
+//   4 cr (always lab) ... 50 → Sun/Tue/Thu  |  75 → Mon/Wed, Sun/Tue, Tue/Thu
+// Accepts either `hasLab` or the course's raw `has_lab` so every call site works unchanged.
+function legalDurationsForCourse({ credits, hasLab, has_lab }) {
   const c = Number(credits);
-  if (c === 1) return [50];
-  if (c >= 2 && c <= 4) return [50, 75];
+  const lab = hasLab ?? has_lab ?? false;
+  if (c === 4) return [50, 75];
+  if (c === 3) return lab ? [50] : [50, 75];
+  if (c === 0 || c === 1 || c === 2) return [50];
   return [];
 }
-function legalDayTemplatesForCourse({ credits, hasLab, duration }) {
+function legalDayTemplatesForCourse({ credits, hasLab, has_lab, duration }) {
   const c = Number(credits);
+  const lab = hasLab ?? has_lab ?? false;
   const d = Number(duration);
-  if (c === 1 && d === 50) return ['ONE_DAY'];
-  if (c === 2 && d === 50) return ['ST', 'MW', 'TT'];
-  if (c === 2 && d === 75) return ['ONE_DAY'];
-  if (c === 3 && d === 50) return hasLab ? ['STT', 'ST', 'MW', 'TT'] : ['STT'];
-  if (c === 3 && d === 75) return ['MW', 'ST', 'TT'];
-  if (c === 4 && d === 50) return ['STT', 'ST', 'MW', 'TT'];
-  if (c === 4 && d === 75) return ['MW', 'ST', 'TT'];
+  if (d === 75) return ((c === 3 && !lab) || c === 4) ? ['MW', 'ST', 'TT'] : [];
+  // d === 50
+  if (c === 0 || c === 1) return ['ONE_DAY'];
+  if (c === 2)            return ['ST', 'MW', 'TT'];
+  if (c === 3)            return lab ? ['ST', 'MW', 'TT'] : ['STT'];
+  if (c === 4)            return ['STT'];
   return [];
 }
 // Default duration per course: the "canonical" one for its credits.
@@ -83,7 +96,8 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   // instantly) and replace it with the un-scoped catalog once it loads (effect
   // below). The backend already schedules GR courses in their own 17:00–22:00
   // evening window, so once they're offered here the rest works end-to-end.
-  const { courses: termCourses } = useApp();
+  const { courses: termCourses, schedule } = useApp();
+  const termCode = schedule?.semester ?? null;   // NEW-FU-650: scope the course list to THIS term
   const [courses, setCourses] = useState(termCourses);
 
   // NEW-FU-264 / FU-266: smart auto-suggester state.
@@ -110,6 +124,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   const [loading,         setLoading]         = useState(true);
   const [recommendError,  setRecommendError]  = useState(null);
   const [capacityWarnings, setCapacityWarnings] = useState([]); // [{ courseId, courseCode, message }]
+  const [labError,        setLabError]        = useState(null); // NEW-FU-651: per-gender R-14 block messages
   // NEW-FU-231 (Phase 97): "auto-choose" toggle (items 7/8). When ON (default),
   // changing a course's section count makes Suggest automatically re-pick the
   // best duration / day-pattern for the affected courses to avoid conflicts.
@@ -117,6 +132,18 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   // when their picks "changed by themselves". The toggle (with a tooltip) makes
   // it explicit and lets a user turn it OFF to keep every manual choice fixed.
   const [autoChoose, setAutoChoose] = useState(true);
+  // NEW-FU-655: apply MODE — how a Suggest run reconciles with the term's
+  // CURRENT schedule for the courses it generates:
+  //   • 'replace' — the generated sections REPLACE the term's existing sections
+  //                 for those courses (cleared and rebuilt from the selection).
+  //                 This is the historical behaviour, so it's the DEFAULT —
+  //                 nothing silently changes for existing users.
+  //   • 'add'     — the generated sections are ADDED alongside the term's
+  //                 existing sections (existing KEPT; Suggest only appends the
+  //                 newly generated ones, renumbered so they don't collide).
+  // The value rides on each per-course payload entry in handleSubmit (the only
+  // channel that survives SchedulerPage.runSuggest's preview/relax/apply chain).
+  const [mode, setMode] = useState('replace');
   // NEW-FU-374 (Phase 98 item 4): default the apply-set to the courses ALREADY in
   // this term (termCourses), NOT the whole catalog. Catalog-only courses (grad /
   // not-yet-scheduled) appear in the panel but start UNCHECKED, so a default
@@ -221,51 +248,48 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
       // Phase 19 prompt. Predictable; later phases can promote this
       // to a capacity-aware default once /suggest-recommend exists.
       init[c.id] = {
-        sections:    1,
+        // NEW-FU-649/650: per-gender counts default to 1 Male + 1 Female.
+        maleSections:   1,
+        femaleSections: 1,
         duration,
         dayPattern,
         day:         'Sunday',
         labDuration: c.has_lab ? 50 : null,
         labDay:      c.has_lab ? 'Sunday' : null,
+        // NEW-FU-651: per-gender lab counts (1 each by default for a lab course; null otherwise).
+        maleLabSections:   c.has_lab ? 1 : null,
+        femaleLabSections: c.has_lab ? 1 : null,
       };
     }
     return init;
   });
 
-  // NEW-FU-374 (Phase 98 item 4): load the full program catalog (un-scoped) so
-  // every academic tier — including GRADUATE — is offered, regardless of what the
-  // current term already contains. Falls back silently to the term-scoped list on
-  // failure (the modal stays fully usable). Also seeds config defaults for every
-  // newly-revealed course (the term-scoped init above only covered courses that
-  // already exist in this term; grad / other catalog courses need defaults too,
-  // with the same GR 75-min bias the term init applies).
+  // NEW-FU-650 (per-term isolation): load THIS TERM's OWN courses (owner_semester = term),
+  // including just-created section-less ones (e.g. SWE 485). This REPLACES the old
+  // scope=catalog load, which pulled the global TEMPLATE library (owner NULL) — that showed
+  // courses NOT added to the term and MISSED the term's own courses, and Running Suggest would
+  // then create other terms' courses. The panel now reflects exactly the active term's courses.
+  // Retried with backoff (transient pool saturation shouldn't drop the list); falls back to the
+  // term-scoped seed on failure.
   useEffect(() => {
+    if (!termCode) return;
     let cancelled = false;
-    // NEW-FU-381 (Phase 99 item 6): load the full catalog ROBUSTLY. Under heavy
-    // Suggest load the shared DB pool could briefly saturate and this fetch
-    // would fail, silently dropping the Graduate tier (the term-scoped fallback
-    // has no grad courses in a sparse term). Retry a few times with backoff so a
-    // transient spike can't make the Graduate tier vanish. (The backend pool +
-    // fast-recommend fixes remove most of the pressure; this is the belt.)
-    async function loadCatalog() {
+    async function loadTermCourses() {
       let lastErr;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          // NEW-FU-415 (Phase 103 item 1): full program catalog MINUS courses
-          // not offered in the active term (SWE 412 after 252, SWE 399 outside
-          // Summer). scope=catalog keeps Graduate/not-yet-added courses visible.
-          const all = await getCourses(undefined, { scope: 'catalog' });
+          const all = await getCourses(termCode);   // term-scoped: owner=term (+ any sectioned)
           if (Array.isArray(all) && all.length > 0) return all;
-          lastErr = new Error('empty catalog');
+          lastErr = new Error('empty term course list');
         } catch (err) { lastErr = err; }
         if (cancelled) return null;
         await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
       }
-      throw lastErr ?? new Error('catalog load failed');
+      throw lastErr ?? new Error('term course load failed');
     }
     (async () => {
       try {
-        const all = await loadCatalog();
+        const all = await loadTermCourses();
         if (cancelled || !all) return;
         setCourses(all);
         setConfig(prev => {
@@ -275,27 +299,27 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
             let duration = defaultDurationFor(c);
             if (c.category === 'GR' && legalDurationsForCourse(c).includes(75)) duration = 75;
             next[c.id] = {
-              sections:    1,
+              maleSections:   1,   // NEW-FU-649: per-gender counts (M 1 / F 1 default — see init)
+              femaleSections: 1,
               duration,
               dayPattern:  defaultDayTemplateFor(c, duration),
               day:         'Sunday',
               labDuration: c.has_lab ? 50 : null,
               labDay:      c.has_lab ? 'Sunday' : null,
+              maleLabSections:   c.has_lab ? 1 : null,   // NEW-FU-651
+              femaleLabSections: c.has_lab ? 1 : null,
             };
           }
           return next;
         });
-        // NEW-FU-381 (Phase 99 item 3): default EVERY course ON — including the
-        // Graduate tier — so a default Run includes them. Skip only if the user
-        // has already started toggling the selection (they can't while loading,
-        // but this guards the race).
+        // Default EVERY course in the term ON (they're all this term's own courses now).
         if (!userTouchedSelectionRef.current) {
           setApplyToCourseIds(new Set(all.map(c => c.id)));
         }
-      } catch { /* all retries failed — keep the term-scoped list; modal still works */ }
+      } catch { /* retries failed — keep the term-scoped seed; modal still works */ }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [termCode]);
 
   // NEW-FU-264: pre-flight to /suggest-recommend on mount. The backend runs
   // the greedy in dry-run mode (no DB writes) and returns:
@@ -331,7 +355,9 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
             if (!cur) continue; // course gone — skip silently
             next[r.courseId] = {
               ...cur,
-              sections:    r.sections    ?? cur.sections,
+              // NEW-FU-649: the recommend returns a single count → seed it as Male sections
+              // (all-Male default, unchanged behaviour); the user adds Female sections explicitly.
+              maleSections: r.sections   ?? cur.maleSections,
               duration:    r.duration    ?? cur.duration,
               dayPattern:  r.dayPattern  ?? cur.dayPattern,
               day:         r.day         ?? cur.day,
@@ -419,7 +445,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   const configKey = React.useMemo(() => {
     const locked = userEditedRef.current;
     return Object.entries(config).map(([id, c]) => {
-      const base = `${id}:n${c.sections}`;
+      const base = `${id}:m${c.maleSections}f${c.femaleSections}`;   // NEW-FU-649: per-gender counts
       return locked.has(id)
         ? `${base}:d${c.duration}:p${c.dayPattern}:${c.day ?? ''}:l${c.labDuration ?? ''}:${c.labDay ?? ''}`
         : base;
@@ -440,7 +466,10 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
     const lockedCourseIds = [...userEditedRef.current].filter(id => config[id]);
     const configs = Object.entries(config).map(([courseId, c]) => ({
       courseId,
-      sections:    Number(c.sections) || 1,
+      // NEW-FU-649: the recommend's saturation model is gender-agnostic — feed it the TOTAL.
+      sections:    (Number(c.maleSections) || 0) + (Number(c.femaleSections) || 0) || 1,
+      maleSections:   Number(c.maleSections) || 0,
+      femaleSections: Number(c.femaleSections) || 0,
       duration:    c.duration,
       dayPattern:  c.dayPattern,
       day:         c.day,
@@ -449,7 +478,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
     }));
     const sectionsHint = {};
     for (const [id, cfg] of Object.entries(config)) {
-      const n = Number(cfg.sections);
+      const n = (Number(cfg.maleSections) || 0) + (Number(cfg.femaleSections) || 0);
       if (Number.isFinite(n) && n >= 1) sectionsHint[id] = n;
     }
 
@@ -510,27 +539,43 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
     // wants the run to touch. Unchecked rows are dropped entirely —
     // the backend's applyToCourseIds filter scopes the wipe to those
     // ids, so existing sections of unchecked courses are preserved.
-    const applyAll  = applyToCourseIds.size === courses.length;
-    const targetIds = applyAll ? null : [...applyToCourseIds];
-
-    // Build the request payload using the new two-axis shape. Belt-
-    // and-suspenders: if a course somehow has no config entry yet,
-    // fall back to the canonical defaults.
+    // Build the request payload using the new two-axis shape. Belt-and-suspenders: if a course
+    // somehow has no config entry yet, fall back to the canonical defaults.
+    // NEW-FU-649: a course the user zeroed on BOTH genders (Male 0 + Female 0) is dropped from the
+    // run — neither regenerated nor wiped (its existing sections are preserved), exactly like an
+    // unchecked row. targetIds is derived from the surviving payload (below) so the backend wipe
+    // never touches a course we aren't regenerating.
+    const totalFor = (id) => {
+      const cc = config[id];
+      return (Number(cc?.maleSections) || 0) + (Number(cc?.femaleSections) || 0);
+    };
     const payload = courses
-      .filter(c => applyToCourseIds.has(c.id))
+      .filter(c => applyToCourseIds.has(c.id) && totalFor(c.id) >= 1)
       .map(c => {
         const cfg = config[c.id] ?? {
-          sections: 1,
+          maleSections: 1,
+          femaleSections: 1,
           duration: defaultDurationFor(c),
           dayPattern: defaultDayTemplateFor(c, defaultDurationFor(c)),
           day: 'Sunday',
         };
+        // NEW-FU-649: per-gender counts drive section generation; `sections` (the total) still
+        // rides along for the gender-agnostic saturation/legacy backend paths.
+        const male   = Math.max(0, parseInt(cfg.maleSections, 10)   || 0);
+        const female = Math.max(0, parseInt(cfg.femaleSections, 10) || 0);
         return {
           courseId:   c.id,
           courseCode: c.course_code,
-          sections:   parseInt(cfg.sections),
+          maleSections:   male,
+          femaleSections: female,
+          sections:   (male + female) || 1,
           dayPattern: cfg.dayPattern,
           duration:   cfg.duration,
+          // NEW-FU-655: carry the apply mode ('replace' default | 'add') on each
+          // config so it survives SchedulerPage.runSuggest's preview/relax/apply
+          // chain (which forwards courseConfigs verbatim). The API lifts it to a
+          // single top-level body field; the backend reads it there.
+          mode,
           // NEW-FU-254: include `day` only when the dayPattern is
           // ONE_DAY — for multi-day templates (STT/MW/ST/TT) the days
           // are implicit and the field is ignored. The backend
@@ -543,9 +588,36 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
           ...(c.has_lab && cfg.labDuration ? {
             labDuration: cfg.labDuration,
             labDay:      cfg.labDay,
+            // NEW-FU-651: per-gender lab counts.
+            maleLabSections:   Math.max(0, parseInt(cfg.maleLabSections, 10)   || 0),
+            femaleLabSections: Math.max(0, parseInt(cfg.femaleLabSections, 10) || 0),
           } : {}),
         };
       });
+    // NEW-FU-651: proactive R-14 enforcement — a has-lab course must, FOR EACH GENDER, have a lab
+    // section whenever it has a lecture section, and a lecture whenever it has a lab. A Male lab
+    // never covers Female lectures and vice versa. Block the Run with a precise message (the backend
+    // throws the same as a backstop) so Suggest can never emit a lecture-without-lab / lab-without-
+    // lecture R-14. (Applied courses are wiped + regenerated, so the panel config is authoritative;
+    // an unapplied course is left untouched and isn't in `payload`.)
+    const r14Errors = [];
+    for (const p of payload) {
+      const c = courses.find(x => x.id === p.courseId);
+      if (!c || !c.has_lab) continue;
+      const ml = Math.max(0, parseInt(config[c.id]?.maleLabSections, 10)   || 0);
+      const fl = Math.max(0, parseInt(config[c.id]?.femaleLabSections, 10) || 0);
+      if (p.maleSections   > 0 && ml === 0) r14Errors.push(`${c.course_code}: add a Male lab section (it has ${p.maleSections} Male lecture${p.maleSections > 1 ? 's' : ''}).`);
+      if (ml > 0 && p.maleSections   === 0) r14Errors.push(`${c.course_code}: add a Male lecture section (it has a Male lab).`);
+      if (p.femaleSections > 0 && fl === 0) r14Errors.push(`${c.course_code}: add a Female lab section (it has ${p.femaleSections} Female lecture${p.femaleSections > 1 ? 's' : ''}).`);
+      if (fl > 0 && p.femaleSections === 0) r14Errors.push(`${c.course_code}: add a Female lecture section (it has a Female lab).`);
+    }
+    if (r14Errors.length) { setLabError(r14Errors); return; }
+    setLabError(null);
+    // NEW-FU-649: derive targetIds from the SURVIVING payload (courses with ≥1 section), so the
+    // backend wipe is scoped to exactly what we regenerate. null = "apply to all" only when every
+    // course is in the payload.
+    const payloadIds = new Set(payload.map(p => p.courseId));
+    const targetIds  = payloadIds.size === courses.length ? null : [...payloadIds];
     // NEW-FU-223 (Phase 96): no tolerance argument — runSuggest is clean-first
     // and negotiates conflicts after the dry-run, not via an upfront knob.
     onConfirm(payload, targetIds);
@@ -606,6 +678,37 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
             tabIndex={0}
             title="Auto-choose keeps the rest of each course's settings optimal as you edit. When ON, changing a course's section count auto-adjusts its duration / day-pattern to avoid clashes. When OFF, nothing changes unless you change it."
           ><Ico name="info" /></span>
+
+          {/* NEW-FU-655: Replace vs Add to schedule — how the generated sections
+              reconcile with the term's CURRENT schedule. Two labelled segmented
+              buttons, each with a tooltip. Default 'Replace' = today's behaviour. */}
+          <div
+            className="suggest-mode"
+            role="radiogroup"
+            aria-label="How to apply the suggested sections"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={mode === 'replace'}
+              className={`suggest-mode-btn ${mode === 'replace' ? 'active' : ''}`}
+              onClick={() => setMode('replace')}
+              title="Replace the term's current schedule for the courses you generate — their existing sections are cleared and rebuilt from your selections. (Default.)"
+            >Replace</button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={mode === 'add'}
+              className={`suggest-mode-btn ${mode === 'add' ? 'active' : ''}`}
+              onClick={() => setMode('add')}
+              title="Add to the term's current schedule — existing sections are kept, and Suggest only appends the newly generated ones (numbered so they don't collide)."
+            >Add to</button>
+            <span
+              className="suggest-mode-help"
+              tabIndex={0}
+              title="Replace rebuilds each generated course from scratch (existing sections cleared). Add to keeps every existing section and only appends the new ones. Choose Add to when you want to grow the schedule without losing what's already there."
+            ><Ico name="info" /></span>
+          </div>
         </div>
 
         {/* NEW-FU-264: pre-flight banners. Loading is brief (one DB
@@ -721,6 +824,15 @@ cd backend && npm run dev`}
             <Ico name="alert" /> {capacityWarnings.length} course{capacityWarnings.length === 1 ? '' : 's'} could not be placed without conflicts. See per-course notes below.
           </div>
         )}
+        {/* NEW-FU-651: per-gender Lec/Lab coexistence (R-14) block — Run is refused until fixed. */}
+        {labError && labError.length > 0 && (
+          <div className="suggest-banner suggest-banner-warn">
+            <Ico name="alert" /> Each gender needs both a lecture and a lab:
+            <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>
+              {labError.map((m, i) => <li key={i}>{m}</li>)}
+            </ul>
+          </div>
+        )}
 
         <div className="suggest-table-wrap">
           {/* NEW-FU-224 (Phase 96): a sticky "select all" bar replaces the old
@@ -811,24 +923,36 @@ cd backend && npm run dev`}
                             style={{color: LEVEL_COLORS[level]?.border}}>
                             {course.category}
                           </span>
-                          <label className="suggest-sections-field" title="Parallel sections to generate">
-                            <span className="suggest-sections-label"># Sec</span>
-                            {/* NEW-FU-484 (Phase 118): clamp to [1,10] on every change so
-                                the spinner can never reach 0 or a negative value. The
-                                `min` attribute only blocks the up/down arrows in some
-                                browsers — direct typing still allows out-of-range values,
-                                so we enforce the floor in onChange. */}
-                            <input
-                              type="number" min="1" max="10"
-                              value={cfg.sections}
-                              onChange={e => {
-                                const raw = parseInt(e.target.value, 10);
-                                const clamped = Number.isFinite(raw) ? Math.max(1, Math.min(10, raw)) : 1;
-                                setField(course.id, 'sections', clamped);
-                              }}
-                              className="suggest-num-input"
-                            />
-                          </label>
+                          {/* NEW-FU-649: per-gender counters replace the single "# Sec". Each clamps
+                              to [0,10]; the total (M+F) must be ≥1 to generate (a course zeroed on
+                              BOTH genders is left untouched — see handleSubmit). Female lectures get
+                              their own gender-matched lab(s) automatically (one lab per 3 lectures). */}
+                          <span className="suggest-sections-field" title="Male / Female lecture sections to generate (total must be ≥ 1)">
+                            <label className="suggest-gender-counter" title="Male sections">
+                              <span className="suggest-sections-label">M</span>
+                              <input
+                                type="number" min="0" max="10"
+                                value={cfg.maleSections ?? 0}
+                                onChange={e => {
+                                  const r = parseInt(e.target.value, 10);
+                                  setField(course.id, 'maleSections', Number.isFinite(r) ? Math.max(0, Math.min(10, r)) : 0);
+                                }}
+                                className="suggest-num-input"
+                              />
+                            </label>
+                            <label className="suggest-gender-counter" title="Female sections">
+                              <span className="suggest-sections-label">F</span>
+                              <input
+                                type="number" min="0" max="10"
+                                value={cfg.femaleSections ?? 0}
+                                onChange={e => {
+                                  const r = parseInt(e.target.value, 10);
+                                  setField(course.id, 'femaleSections', Number.isFinite(r) ? Math.max(0, Math.min(10, r)) : 0);
+                                }}
+                                className="suggest-num-input"
+                              />
+                            </label>
+                          </span>
                         </div>
                         {/* NEW-FU-266: per-course capacity warning from the
                             recommend dry-run — text comes verbatim from the
@@ -850,18 +974,30 @@ cd backend && npm run dev`}
                                 one duration is legal).
                               Step 2: day-template buttons filtered to
                                 those legal for the chosen duration. */}
-                          {showDurationToggle && (
+                          {/* NEW-FU-650: ALWAYS show the duration. With a real choice → clickable
+                              buttons; when the course's credits/flags mandate exactly ONE duration →
+                              show it as a DISABLED button with a tooltip explaining why it's fixed,
+                              so the user still sees the duration (instead of the toggle being hidden). */}
+                          {legalDurs.length > 0 && (
                             <div className="suggest-step suggest-duration-step">
                               <span className="suggest-step-label">Duration</span>
                               <div className="suggest-pattern-group suggest-duration-group">
-                                {legalDurs.map(d => (
-                                  <label key={d} className={`suggest-pattern-btn ${cfg.duration === d ? 'active' : ''}`}>
-                                    <input type="radio" name={`dur-${course.id}`}
-                                      value={d} checked={cfg.duration === d}
-                                      onChange={() => setField(course.id, 'duration', d)} />
-                                    <span>{d} min</span>
-                                  </label>
-                                ))}
+                                {showDurationToggle ? (
+                                  legalDurs.map(d => (
+                                    <label key={d} className={`suggest-pattern-btn ${cfg.duration === d ? 'active' : ''}`}>
+                                      <input type="radio" name={`dur-${course.id}`}
+                                        value={d} checked={cfg.duration === d}
+                                        onChange={() => setField(course.id, 'duration', d)} />
+                                      <span>{d} min</span>
+                                    </label>
+                                  ))
+                                ) : (
+                                  <span
+                                    className="suggest-pattern-btn active suggest-pattern-btn-fixed"
+                                    aria-disabled="true"
+                                    title={`A ${course.credits}-credit${course.has_lab ? ' with-lab' : ''} course meets only in ${legalDurs[0]}-minute sessions — its credits and flags fix the lecture duration, so there's nothing to choose here.`}
+                                  >{legalDurs[0]} min</span>
+                                )}
                               </div>
                             </div>
                           )}
@@ -921,7 +1057,24 @@ cd backend && npm run dev`}
                           {course.has_lab && (
                             <div className="suggest-section-block suggest-lab-block">
                               <div className="suggest-section-heading suggest-lab-heading">
-                                Lab section
+                                <span>Lab section</span>
+                                {/* NEW-FU-651: per-gender lab counters (parallel to the lecture M/F
+                                    counters). A gender with ≥1 lecture must have ≥1 lab of that gender
+                                    and vice versa (R-14) — enforced before Run + on the backend. */}
+                                <span className="suggest-lab-counters">
+                                  <label className="suggest-gender-counter" title="Male lab sections">
+                                    <span className="suggest-sections-label">M</span>
+                                    <input type="number" min="0" max="10" value={cfg.maleLabSections ?? 0}
+                                      onChange={e => { const r = parseInt(e.target.value, 10); setField(course.id, 'maleLabSections', Number.isFinite(r) ? Math.max(0, Math.min(10, r)) : 0); }}
+                                      className="suggest-num-input" />
+                                  </label>
+                                  <label className="suggest-gender-counter" title="Female lab sections">
+                                    <span className="suggest-sections-label">F</span>
+                                    <input type="number" min="0" max="10" value={cfg.femaleLabSections ?? 0}
+                                      onChange={e => { const r = parseInt(e.target.value, 10); setField(course.id, 'femaleLabSections', Number.isFinite(r) ? Math.max(0, Math.min(10, r)) : 0); }}
+                                      className="suggest-num-input" />
+                                  </label>
+                                </span>
                               </div>
                               <div className="suggest-step">
                                 <span className="suggest-step-label">Duration</span>

@@ -32,7 +32,7 @@ const Section = require('../domain/Section');
 const sectionPattern = require('../domain/sectionPattern');
 const { query, getClient } = require('../config/db');
 const { pickDummyOfficeHours, nextDummyVenueName } = require('../domain/dummyResources'); // NEW-FU-429/431 (Phase 106)
-const { teachingWindowFor } = require('../config/constants'); // NEW-FU-621 (audit #2): shared R-06-aware window
+const { teachingWindowFor, OFFICE_HOURS_WINDOW } = require('../config/constants'); // NEW-FU-621 (audit #2); OFFICE_HOURS_WINDOW NEW-FU-635 (issue #3)
 
 const engine = new ConflictEngine();
 const instrRepo = new InstructorRepository();
@@ -47,6 +47,11 @@ const SCORE = {
   CREATE_HARD:     -25,   // creating a new hard is worse than resolving one
   CREATE_SOFT:     -3,
   OP_MOVE:         -2,    // moderate disruption
+  // NEW-FU-635 (issue #3): relocate an OFFICE HOUR. Low disruption (it shifts one OH block,
+  // touches no class/people assignment) and intentionally PREFERRED over reassign (-5) so an
+  // OH↔class overlap (R-04, office-hours variant) is fixed by moving the OH, not by handing
+  // the whole class to a different instructor.
+  OP_MOVE_OH:      -2,
   OP_REASSIGN:     -5,    // people-facing change
   OP_ADD_DAY:      -3,    // additive, mild
   OP_DROP:         -25,   // last resort
@@ -198,8 +203,14 @@ function evaluateInMemory(sections, ohMap) {
   for (const sec of sections) {
     if (sec.sectionType !== 'Lec') continue;
     if (!sec.credits) continue;
+    if (sec.isExternal) continue;        // NEW-FU-651: match ScheduleService — external/capstone exempt
+    if (sec.isCapstone) continue;
     if (!sec.startTime || !sec.endTime) continue;
-    const key = `${sec.courseId}|${sec.sectionNumber}`;
+    // NEW-FU-651: GENDER is part of the section identity — a Male §01 and a Female §01 are SEPARATE
+    // sections that must EACH meet the credit minutes. Grouping without gender summed both genders'
+    // minutes (2×100 = 200 ≥ 150) and reported the schedule "clean", so Quick Fix never saw — let
+    // alone fixed — the per-gender R-15 conflicts the engine (ScheduleService) correctly fires.
+    const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;
     let group = f15Groups.get(key);
     if (!group) {
       group = {
@@ -451,24 +462,41 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
       s.courseId === sectionA.courseId && s.sectionNumber === sectionA.sectionNumber
     );
     const groupDays = new Set(groupRows.map(s => s.day));
+    // NEW-FU-655: R-02 is a COURSE-cohort overlap — EVERY gender meeting of this logical section overlaps
+    // the other course, so the WHOLE section (all genders) must move to clear it. Moving one gender just
+    // shifts the overlap onto the other gender (the "Applied 1 fix but still 1 soft" whack-a-mole). So:
+    // (a) only accept a slot where EVERY gender group's instructor + venue is free, and (b) emit the move
+    // with allGenders:true so apply + sim relocate the whole logical section together (M+F become a same-
+    // time dual-audience pair, which is R-04/R-05 exempt).
+    const genderGroups = [...new Set(groupRows.map(r => r.gender ?? 'M'))].map(g => {
+      const rows = groupRows.filter(r => (r.gender ?? 'M') === g);
+      return { instructorId: rows[0].instructorId, venueId: rows[0].venueId, days: [...new Set(rows.map(r => r.day))] };
+    });
+    const slotFreeForAllGenders = (sMin, eMin) => genderGroups.every(gg => {
+      const busy = (field, resId) => !!resId && sections.some(s =>
+        !(s.courseId === sectionA.courseId && s.sectionNumber === sectionA.sectionNumber) &&
+        s[field] === resId && gg.days.includes(s.day) &&
+        Section.toMinutes(s.startTime) < eMin && sMin < Section.toMinutes(s.endTime));
+      return !busy('instructorId', gg.instructorId) && !busy('venueId', gg.venueId);
+    });
     const candidatesClearingSectionB = candidates.filter(cand => {
-      if (!sectionBRows.length) return true; // no B to clear → keep all
       const newStartMin = Section.toMinutes(cand.newStartTime);
       const newEndMin   = Section.toMinutes(cand.newEndTime);
+      if (!slotFreeForAllGenders(newStartMin, newEndMin)) return false; // every gender's resources must be free
+      if (!sectionBRows.length) return true; // no B to clear → keep all
       return !sectionBRows.some(b =>
         groupDays.has(b.day) &&
         Section.toMinutes(b.startTime) < newEndMin &&
         newStartMin < Section.toMinutes(b.endTime)
       );
     });
-    // Use the filtered candidates if any exist; otherwise fall back
-    // to the raw closest-first list so the compound branch below has
-    // SOME candidate to widen from.
-    const chosen = candidatesClearingSectionB.length ? candidatesClearingSectionB : candidates;
-    for (const cand of chosen.slice(0, 5)) {
+    // Only emit moves that actually clear B AND keep every gender free. If none qualify, push nothing
+    // and let the compound (move + reassign) fallback below try — and ultimately the gender-complete drop.
+    for (const cand of candidatesClearingSectionB.slice(0, 5)) {
       ops.push({
         type:         'move',
         sectionId:    sectionA.id,
+        allGenders:   true,   // NEW-FU-655: relocate the whole logical section to clear the cohort overlap
         newStartTime: cand.newStartTime,
         newEndTime:   cand.newEndTime,
         priority:     SCORE.OP_MOVE,
@@ -796,10 +824,19 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
   // Find which template days are missing from the surviving group and
   // propose the smallest extension (least intrusive).
   if (conflict.ruleId === 'R-15') {
+    // NEW-FU-652: gender is part of section-group identity (the engine fires R-15
+    // per courseId|sectionNumber|gender — see L213 and ScheduleService L1073). This
+    // group-rows filter was gender-BLIND, so `survivingRow = groupRows[0]` resolved to
+    // whichever gender sorted first (Male). Both the Male AND Female R-15 conflicts then
+    // emitted an add-day op pointing at the SAME Male row, so the Female group never got
+    // its meeting day, the simulator saw no improvement for it, and it fell through to a
+    // last-resort DROP — silently destroying the Female section instead of fixing it.
+    // Scoping to the conflict's own gender makes each gender propose its own add-day.
     const groupRows = sections.filter(s =>
       s.sectionType === 'Lec' &&
       s.courseId === sectionA.courseId &&
-      s.sectionNumber === sectionA.sectionNumber
+      s.sectionNumber === sectionA.sectionNumber &&
+      (s.gender ?? 'M') === (sectionA.gender ?? 'M')
     );
     if (groupRows.length > 0) {
       const survivingDays = new Set(groupRows.map(s => s.day));
@@ -849,6 +886,40 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
   if (conflict.ruleId === 'R-04' && sectionA.instructorId) {
     const startMin = Section.toMinutes(sectionA.startTime);
     const endMin   = Section.toMinutes(sectionA.endTime);
+    // NEW-FU-635 (issue #3): OFFICE-HOUR overlap variant (sectionBId === null: the class
+    // overlaps the instructor's OWN office hours, not a double-booking with another section).
+    // PREFER moving the office hour to a free slot over reassigning the whole class to another
+    // instructor. Emitted BEFORE simpleR04Before so the existing reassign cap / compound-
+    // fallback logic is unaffected; the greedy then picks move-OH on cost (OP_MOVE_OH > REASSIGN).
+    // Falls through to reassign/compound/dummy only when no free OH slot exists that day.
+    if (conflict.sectionBId == null) {
+      const ohList = ohMap.get(sectionA.instructorId) ?? [];
+      const sameDayOH = ohList.filter(o => o.day === sectionA.day);
+      const sameDayClasses = sections.filter(s =>
+        s.instructorId === sectionA.instructorId && s.day === sectionA.day && s.startTime && s.endTime);
+      const instrName = instructors.find(i => i.id === sectionA.instructorId)?.name
+        ?? sectionA.instructorName ?? 'the instructor';
+      for (const oh of sameDayOH) {
+        if (oh.id == null) continue;   // can't move an OH we can't identify by id
+        // only the OH that actually overlaps THIS section
+        if (!(Section.toMinutes(oh.startTime) < endMin && startMin < Section.toMinutes(oh.endTime))) continue;
+        const slot = freeOfficeHourSlot(oh, sameDayClasses, sameDayOH);
+        if (!slot) continue;
+        ops.push({
+          type:         'move-office-hour',
+          officeHourId: oh.id,
+          instructorId: sectionA.instructorId,
+          day:          oh.day,
+          fromStart:    String(oh.startTime).slice(0, 5),
+          fromEnd:      String(oh.endTime).slice(0, 5),
+          toStart:      slot.startTime,
+          toEnd:        slot.endTime,
+          priority:     SCORE.OP_MOVE_OH,
+          label: `Move ${instrName}'s ${oh.day} office hours to ${slot.startTime}–${slot.endTime} `
+            + `(keeps ${sectionA.courseCode} §${sectionA.sectionNumber} with its instructor)`,
+        });
+      }
+    }
     const simpleR04Before = ops.length;
     // NEW-FU-390 (Phase 37): R-04 busy check must scan ALL group days.
     const groupRows = sections.filter(s =>
@@ -1436,12 +1507,69 @@ function setVenueCache(venues) {
   _venueCache = new Map(venues.map(v => [v.id, v]));
 }
 
+// NEW-FU-635 (issue #3): minutes → 'HH:MM'.
+function _ohFromMin(mins) {
+  return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+}
+// NEW-FU-635 (issue #3): find a conflict-free relocation for an office hour — same day, same
+// duration, inside the 08:00–16:00 OH window, avoiding the instructor's class meetings on that
+// day AND their other office hours. Because the target is guaranteed clear of every class the
+// instructor teaches that day, moving the OH there removes the R-04 OH↔class overlap and
+// introduces no new one. Returns { startTime, endTime } ('HH:MM') or null if the day is full.
+function freeOfficeHourSlot(oh, sameDayClassSections, sameDayOH, stepMin = 15) {
+  const s = Section.toMinutes(oh.startTime), e = Section.toMinutes(oh.endTime);
+  const dur = (Number.isFinite(s) && Number.isFinite(e) && e > s) ? e - s : 0;
+  if (!dur) return null;
+  const blocked = [];
+  for (const c of sameDayClassSections) {
+    const cs = Section.toMinutes(c.startTime), ce = Section.toMinutes(c.endTime);
+    if (Number.isFinite(cs) && Number.isFinite(ce)) blocked.push([cs, ce]);
+  }
+  for (const o of sameDayOH) {
+    if (o === oh || (o.id != null && o.id === oh.id)) continue;   // don't block against itself
+    const os = Section.toMinutes(o.startTime), oe = Section.toMinutes(o.endTime);
+    if (Number.isFinite(os) && Number.isFinite(oe)) blocked.push([os, oe]);
+  }
+  const W_START = OFFICE_HOURS_WINDOW.start, W_END = OFFICE_HOURS_WINDOW.end;
+  const anchor = Number.isFinite(s) ? s : W_START;
+  const cands = [];
+  for (let st = W_START; st + dur <= W_END; st += stepMin) cands.push(st);
+  cands.sort((a, b) => Math.abs(a - anchor) - Math.abs(b - anchor)); // nearest the OH's current start first
+  for (const st of cands) {
+    if (!blocked.some(([bs, be]) => st < be && bs < st + dur)) {
+      return { startTime: _ohFromMin(st), endTime: _ohFromMin(st + dur) };
+    }
+  }
+  return null;
+}
+// NEW-FU-635 (issue #3): apply a move-office-hour op (or a compound's OH sub-ops) to a COPY of
+// the ohMap, so the greedy's per-candidate simulation AND its commit see the relocated OH.
+// Non-OH ops return the same map reference (no clone). Only the touched instructor's array is
+// re-built, keeping the trials cheap and isolated.
+function applyOhOpToMap(ohMap, op) {
+  const moves = op.type === 'move-office-hour' ? [op]
+    : op.type === 'compound' ? (op.subOps || []).filter(x => x.type === 'move-office-hour') : [];
+  if (!moves.length) return ohMap;
+  const next = new Map(ohMap);
+  for (const m of moves) {
+    const list = (next.get(m.instructorId) || []).map(o =>
+      (o.id != null && o.id === m.officeHourId)
+        ? { ...o, startTime: m.toStart, endTime: m.toEnd }
+        : o);
+    next.set(m.instructorId, list);
+  }
+  return next;
+}
+
 function applyOpInMemory(sections, op) {
   if (op.type === 'reassign-instructor' || op.type === 'reassign-venue') {
     const target = sections.find(s => s.id === op.sectionId);
     if (!target) return sections;
+    // NEW-FU-655: gender-scope to match the gender-scoped DB apply (audit-2 P1-6) so the sim reflects
+    // reality — a reassign on §01 M must not also re-credit §01 F in simulation.
     const groupKey = (s) =>
-      s.courseId === target.courseId && s.sectionNumber === target.sectionNumber;
+      s.courseId === target.courseId && s.sectionNumber === target.sectionNumber &&
+      (s.gender ?? 'M') === (target.gender ?? 'M');
     if (op.type === 'reassign-instructor') {
       return sections.map(s => groupKey(s)
         ? { ...s, instructorId: op.newInstructorId }
@@ -1463,12 +1591,14 @@ function applyOpInMemory(sections, op) {
     return sections.map(s => s.instructorId === op.instructorId ? { ...s, _ohAssigned: true } : s);
   }
   if (op.type === 'drop') {
-    // Drop the WHOLE section group (all rows sharing courseId +
-    // sectionNumber). Matches Phase 27's deleteSection semantics.
+    // NEW-FU-655: gender-scope by default (matches the gender-scoped DB delete, audit-2 P1-6); op.allGenders
+    // drops the WHOLE logical section (course-cohort R-01/R-02 — dropping one gender leaves the other
+    // overlapping). Mirrors deleteSection semantics for the targeted gender group.
     const target = sections.find(s => s.id === op.sectionId);
     if (!target) return sections;
     return sections.filter(s =>
-      !(s.courseId === target.courseId && s.sectionNumber === target.sectionNumber));
+      !(s.courseId === target.courseId && s.sectionNumber === target.sectionNumber &&
+        (op.allGenders || (s.gender ?? 'M') === (target.gender ?? 'M'))));
   }
   if (op.type === 'add-day') {
     // NEW-FU-325 (Phase 30): extend a section group by appending new
@@ -1495,8 +1625,11 @@ function applyOpInMemory(sections, op) {
     // this op as their atomic primitive.
     const target = sections.find(s => s.id === op.sectionId);
     if (!target) return sections;
+    // NEW-FU-655: gender-scope by default (matches the gender-scoped DB move); op.allGenders moves the
+    // WHOLE logical section (course-cohort R-01/R-02 fixes) so the sim matches the all-gender DB apply.
     const groupKey = (s) =>
-      s.courseId === target.courseId && s.sectionNumber === target.sectionNumber;
+      s.courseId === target.courseId && s.sectionNumber === target.sectionNumber &&
+      (op.allGenders || (s.gender ?? 'M') === (target.gender ?? 'M'));
     return sections.map(s => groupKey(s)
       ? { ...s, startTime: op.newStartTime, endTime: op.newEndTime }
       : s
@@ -1633,16 +1766,18 @@ class QuickFixService {
 
     // OH map for the engine
     const instrIds = [...new Set(sections.map(s => s.instructorId).filter(Boolean))];
-    const ohMap = new Map();
+    // NEW-FU-635 (issue #3): `let` (reassigned when a move-office-hour op is committed) and
+    // SELECT id so a move-OH op can identify the exact row to relocate.
+    let ohMap = new Map();
     if (instrIds.length) {
       const ohRes = await query(`
-        SELECT instructor_id, day, start_time::text AS start_time, end_time::text AS end_time
+        SELECT id, instructor_id, day, start_time::text AS start_time, end_time::text AS end_time
         FROM office_hours WHERE instructor_id = ANY($1)
       `, [instrIds]);
       for (const row of ohRes.rows) {
         if (!ohMap.has(row.instructor_id)) ohMap.set(row.instructor_id, []);
         ohMap.get(row.instructor_id).push({
-          day: row.day, startTime: row.start_time, endTime: row.end_time,
+          id: row.id, day: row.day, startTime: row.start_time, endTime: row.end_time,
         });
       }
     }
@@ -1687,7 +1822,10 @@ class QuickFixService {
         let bestPostConflicts = null;
         for (const op of cands) {
           const simSections = applyOpInMemory(sections, op);
-          const postConflicts = evaluateInMemory(simSections, ohMap);
+          // NEW-FU-635 (issue #3): a move-office-hour op relocates an OH, so the trial must
+          // re-evaluate against the moved-OH map (else the greedy can't see it clears R-04).
+          const simOhMap = applyOhOpToMap(ohMap, op);
+          const postConflicts = evaluateInMemory(simSections, simOhMap);
           const pre  = countConflicts(conflicts);
           const post = countConflicts(postConflicts);
           // Score: progress + op cost. Only positive when conflicts
@@ -1730,6 +1868,7 @@ class QuickFixService {
               weightedDelta: afterWeighted - beforeWeighted,
             });
             sections  = applyOpInMemory(sections, bestOp);
+            ohMap     = applyOhOpToMap(ohMap, bestOp);  // NEW-FU-635 (issue #3): persist a committed OH move into the working map
             conflicts = bestPostConflicts;
             progressMade = true;
             break; // restart the loop with fresh conflict ordering
@@ -1800,6 +1939,10 @@ class QuickFixService {
         dropOp = {
           type:       'drop',
           sectionId:  sec.id,
+          // NEW-FU-655: a COURSE-cohort conflict (R-01/R-02) is created by the WHOLE logical section, so a
+          // last-resort drop must remove EVERY gender of it — else dropping one gender leaves the other
+          // still overlapping and Quick Fix "applies a fix" that doesn't actually clear the conflict.
+          allGenders: c.ruleId === 'R-01' || c.ruleId === 'R-02',
           priority:   SCORE.OP_DROP,
           label:      `Remove ${sec.courseCode} §${sec.sectionNumber} (last resort${overPref})`,
           lastResort: true,
@@ -1906,10 +2049,21 @@ class QuickFixService {
           [op.sectionId]
         );
         if (peek.rowCount === 0) return false;
-        await client.query(   // audit-2 P1-6: gender in WHERE — never drop the cross-gender sibling
-          `DELETE FROM sections WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3 AND gender = $4`,
-          [scheduleId, peek.rows[0].course_id, peek.rows[0].section_number, peek.rows[0].gender]
-        );
+        // NEW-FU-655: a COURSE-cohort conflict (R-01/R-02) is created by the WHOLE logical section
+        // (every gender meeting overlaps the other course), so dropping one gender leaves the other
+        // still overlapping → the conflict persists ("Applied 1 fix" but it's still there). op.allGenders
+        // drops the whole logical section. Default stays gender-scoped (audit-2 P1-6) for R-04/R-05 etc.
+        if (op.allGenders) {
+          await client.query(
+            `DELETE FROM sections WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3`,
+            [scheduleId, peek.rows[0].course_id, peek.rows[0].section_number]
+          );
+        } else {
+          await client.query(   // audit-2 P1-6: gender in WHERE — never drop the cross-gender sibling
+            `DELETE FROM sections WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3 AND gender = $4`,
+            [scheduleId, peek.rows[0].course_id, peek.rows[0].section_number, peek.rows[0].gender]
+          );
+        }
         return true;
       }
       if (op.type === 'move') {
@@ -1919,11 +2073,22 @@ class QuickFixService {
         );
         if (peek.rowCount === 0) return false;
         const { course_id, section_number, gender } = peek.rows[0];
-        await client.query(   // audit-2 P1-6: gender in WHERE
-          `UPDATE sections SET start_time = $1, end_time = $2
-           WHERE schedule_id = $3 AND course_id = $4 AND section_number = $5 AND gender = $6`,
-          [op.newStartTime, op.newEndTime, scheduleId, course_id, section_number, gender]
-        );
+        // NEW-FU-655: op.allGenders moves the WHOLE logical section (all genders) to the new slot, so a
+        // course-cohort overlap (R-01/R-02) is actually cleared — moving one gender alone just shifts the
+        // overlap onto the other gender. Same-course M+F sharing a time are dual-audience (R-04/R-05 exempt).
+        if (op.allGenders) {
+          await client.query(
+            `UPDATE sections SET start_time = $1, end_time = $2
+             WHERE schedule_id = $3 AND course_id = $4 AND section_number = $5`,
+            [op.newStartTime, op.newEndTime, scheduleId, course_id, section_number]
+          );
+        } else {
+          await client.query(   // audit-2 P1-6: gender in WHERE
+            `UPDATE sections SET start_time = $1, end_time = $2
+             WHERE schedule_id = $3 AND course_id = $4 AND section_number = $5 AND gender = $6`,
+            [op.newStartTime, op.newEndTime, scheduleId, course_id, section_number, gender]
+          );
+        }
         return true;
       }
       if (op.type === 'add-day') {
@@ -2014,6 +2179,19 @@ class QuickFixService {
           [op.instructorId, op.officeHours.day, op.officeHours.startTime, op.officeHours.endTime]
         );
         return true;
+      }
+      // NEW-FU-635 (issue #3): relocate an existing office hour to the free slot the planner
+      // chose (the preferred fix for an OH↔class overlap). Scoped to id AND instructor_id —
+      // the same IDOR-safe scoping FU-624 added to the direct updateOfficeHour route. The
+      // post-apply re-eval under the lock (below) verifies the move actually cleared R-04 and
+      // added nothing, so a stale plan can never make the schedule worse.
+      if (op.type === 'move-office-hour') {
+        const r = await client.query(
+          `UPDATE office_hours SET start_time = $2, end_time = $3
+           WHERE id = $1 AND instructor_id = $4`,
+          [op.officeHourId, op.toStart, op.toEnd, op.instructorId]
+        );
+        return r.rowCount > 0;
       }
       // NEW-FU-426 (Phase 105): mint a term-local placeholder instructor /
       // venue (is_dummy + owner_semester) and point the section group at it.
@@ -2139,3 +2317,12 @@ class QuickFixService {
 }
 
 module.exports = new QuickFixService();
+// NEW-FU-635 (issue #3): expose the pure OH-relocation helpers for unit tests.
+module.exports._freeOfficeHourSlot = freeOfficeHourSlot;
+module.exports._applyOhOpToMap = applyOhOpToMap;
+// NEW-FU-652: expose the pure candidate-op generator so the per-gender R-15 add-day
+// regression (Female group must get its own add-day, never a last-resort drop) is unit-testable.
+module.exports._candidateOps = candidateOps;
+// NEW-FU-655: expose the pure sim op-applier so the gender-scoped / allGenders move+drop semantics
+// (course-cohort R-01/R-02 fixes must relocate/remove the WHOLE logical section) are unit-testable.
+module.exports._applyOpInMemory = applyOpInMemory;

@@ -139,8 +139,10 @@ export const searchTerms = (q, includeArchived = false) =>
 // NEW-FU-232: createTerm now accepts optional admin-supplied dates
 // for codes without a published override. Pass undefined to keep
 // the backend silent on the date columns (backend will store NULL).
-export const createTerm = (code, { startsAt, endsAt } = {}) => {
+export const createTerm = (code, { startsAt, endsAt, seedMode } = {}) => {
   const body = (startsAt && endsAt) ? { code, startsAt, endsAt } : { code };
+  // NEW-FU-656: 'copy' (default — seed from the nearest same-season term) | 'blank' (empty term).
+  if (seedMode) body.seedMode = seedMode;
   return api.post('/terms', body).then(r => r.data);
 };
 export const deleteTerm  = (code, activeCode) =>
@@ -194,6 +196,12 @@ export const deleteSection = (id) =>
 // becomes the body of this call.
 export const extendSection = (id, addDays) =>
   api.post(`/sections/${id}/extend`, { addDays }).then(r => r.data);
+
+// NEW-FU-642 (issue #4): atomically restructure a section group to a new day-pattern + time.
+// One transactional call (keep shared days, delete removed, insert added) replaces the old
+// create-new-days-then-delete-old dance that 409'd when the new pattern shared a day with the old.
+export const restructureSection = (id, { days, startTime, endTime }) =>
+  api.post(`/sections/${id}/restructure`, { days, startTime, endTime }).then(r => r.data);
 
 // NEW-FU-319 (Phase 29): Quick Fix resolver helpers. plan() returns
 // a proposed sequence of remediations WITHOUT applying — the modal
@@ -328,6 +336,21 @@ export const suggestSchedule = (scheduleId, courseConfigs, applyToCourseIds, max
     courseConfigs,
     ...(applyToCourseIds ? { applyToCourseIds } : {}),
     ...(maxConflictsPerSection != null ? { maxConflictsPerSection } : {}),
+    // NEW-FU-655: apply MODE — 'replace' (default) wipes the affected courses'
+    // existing sections then writes the generated ones; 'add' KEEPS the
+    // existing sections and APPENDS the generated ones. SchedulerPage.runSuggest
+    // (which owns the apply flow and isn't aware of `mode`) forwards the modal's
+    // per-course `courseConfigs` verbatim through every preview/relax/apply call,
+    // so the mode rides on the configs. Lift it to a single top-level body field
+    // here (the backend reads it there). The per-config `mode` is harmless to the
+    // backend's per-entry validator, and it survives the relaxation rebuild
+    // (relaxedConfigs spreads each original config, keeping the field) so a later
+    // apply with relaxed configs still carries the chosen mode.
+    ...(() => {
+      const m = options.mode
+        ?? (Array.isArray(courseConfigs) ? courseConfigs.find(c => c && c.mode)?.mode : undefined);
+      return m === 'add' ? { mode: 'add' } : {};   // omit for 'replace' (default) — keeps legacy body shape
+    })(),
     ...(options.previewOnly      ? { previewOnly:      true } : {}),
     // NEW-FU-363 (Phase 35): when relaxIfConflicts is true the backend
     // runs preview, then if any residual conflicts exist tries up to 8
@@ -367,12 +390,17 @@ export const suggestRecommend = (scheduleId, opts = {}) => {
 // `format` is optional — when omitted, backend infers from the file extension
 // (.xlsx → xlsx, .docx → docx, .pdf → pdf). Pass it explicitly when you want
 // to force a specific parser.
-export const importSchedule = (scheduleId, file, format) => {
+// NEW-FU-660: `mode` carries the scoped-merge decision when the user picks an option
+// in the conflict dialog ('entity-only' | 'with-conflicts' | 'conflict-free'). Omitted
+// on the first call so the backend previews (merge-if-clean, else returns needsDecision).
+export const importSchedule = (scheduleId, file, format, mode) => {
   const form = new FormData();
   form.append('file', file);
-  const url = format
-    ? `/schedules/${scheduleId}/import?format=${encodeURIComponent(format)}`
-    : `/schedules/${scheduleId}/import`;
+  const params = new URLSearchParams();
+  if (format) params.set('format', format);
+  if (mode)   params.set('mode', mode);
+  const qs = params.toString();
+  const url = `/schedules/${scheduleId}/import${qs ? `?${qs}` : ''}`;
   return api.post(url, form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   }).then(r => r.data);

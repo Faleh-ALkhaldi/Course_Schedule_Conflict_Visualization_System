@@ -494,6 +494,75 @@ class ScheduleService {
   }
 
   /**
+   * NEW-FU-642 (issue #4): atomically RESTRUCTURE a section group to a new day-set + time —
+   * the cross-day-group "move to a different pattern" operation. Replaces the frontend's old
+   * create-all-new-days-THEN-delete-all-old-days dance, which 409'd with a duplicate-section
+   * error whenever the new pattern SHARED any day with the old one (e.g. Tue/Thu → Sun/Tue keeps
+   * Tuesday: the new Tuesday INSERT collided with the still-present old Tuesday row under the
+   * UNIQUE(schedule, course, section_number, day, gender) key). This reconciles the day-set in
+   * ONE transaction — no transient duplicate, no data loss, accurate for every transition:
+   *   • day in BOTH old & new → UPDATE its time (row id PRESERVED — "just change the duration")
+   *   • day only in old       → DELETE
+   *   • day only in new       → INSERT (mirroring the group's instructor / venue / type / gender)
+   * Group identity is (schedule, course, sectionNumber, gender) — the same key deleteSection uses.
+   */
+  async restructureSectionGroup(sectionId, { days, startTime, endTime }) {
+    const peek = await sectionRepo.findById(sectionId);
+    if (!peek) throw new Error(`Section ${sectionId} not found.`);
+    const scheduleId = peek.scheduleId;
+    const newDays = [...new Set(days)];
+    let firstId = null;
+
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+      await assertSchedulerEditableLocked(client, scheduleId);
+      const section = await loadSectionLocked(client, sectionId);
+      // Current group rows (gender-scoped, like deleteSection), locked for the tx.
+      const cur = await client.query(
+        `SELECT id, day FROM sections
+         WHERE schedule_id=$1 AND course_id=$2 AND section_number=$3 AND gender=$4 FOR UPDATE`,
+        [scheduleId, section.courseId, section.sectionNumber, section.gender ?? 'M']);
+      const idByDay = new Map(cur.rows.map(r => [r.day, r.id]));
+      const want = new Set(newDays);
+
+      // KEEP (shared days) → update time in place; REMOVE (old − new) → delete.
+      for (const [day, id] of idByDay) {
+        if (want.has(day)) {
+          await client.query(
+            `UPDATE sections SET start_time=$2, end_time=$3, updated_at=NOW() WHERE id=$1`,
+            [id, startTime, endTime]);
+          if (!firstId) firstId = id;
+        } else {
+          await client.query(`DELETE FROM sections WHERE id=$1`, [id]);
+        }
+      }
+      // ADD (new − old) → insert, mirroring the group's instructor / venue / type / gender.
+      for (const day of newDays) {
+        if (idByDay.has(day)) continue;
+        const r = await client.query(`
+          INSERT INTO sections
+            (schedule_id, course_id, instructor_id, venue_id, section_number,
+             day, start_time, end_time, section_type, gender)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+          [scheduleId, section.courseId, section.instructorId ?? null, section.venueId ?? null,
+           section.sectionNumber, day, startTime, endTime, section.sectionType ?? 'Lec', section.gender ?? 'M']);
+        if (!firstId) firstId = r.rows[0].id;
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      try { client.release(err); } catch { /* ignore */ }
+      throw err;
+    } finally {
+      try { client.release(); } catch { /* already released via catch path */ }
+    }
+
+    const firstSection = firstId ? await sectionRepo.findById(firstId) : null;
+    return this._revalidateAndReturn(scheduleId, firstSection);
+  }
+
+  /**
    * NEW-FU-276: extendSection — add one or more new meeting days to an existing
    * section group, mirroring the surviving rows' time/instructor/venue.
    *
@@ -537,13 +606,18 @@ class ScheduleService {
       // We key by (courseId, sectionNumber) — the same logical grouping
       // findSiblings uses, but without filtering by time (a section
       // group is defined by course + number, not by time).
+      // NEW-FU-653: gender-SCOPE the group load. (course, section_number, GENDER) is the
+      // section-group identity — Male §01 and Female §01 hold INDEPENDENT day-patterns (FU-649).
+      // Gender-blind, this unioned both genders' days into `existingDays`/`combinedDays` (an illegal
+      // pattern → bogus 400) AND let `template = existing[0]` be the wrong gender (the added day would
+      // inherit it). Scoping to peek.gender keeps the extend within the moved group's own gender.
       const groupRes = await client.query(`
         SELECT id, day, start_time::text AS start_time, end_time::text AS end_time,
                instructor_id, venue_id, section_type, course_id, section_number, gender
         FROM sections
-        WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3
+        WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3 AND gender = $4
         FOR UPDATE
-      `, [scheduleId, peek.courseId, peek.sectionNumber]);
+      `, [scheduleId, peek.courseId, peek.sectionNumber, peek.gender ?? 'M']);
       const existing = groupRes.rows;
       if (existing.length === 0) {
         // Could only happen if the row was deleted between peek and lock.
@@ -1062,7 +1136,8 @@ class ScheduleService {
           .filter(s =>
             s.sectionType === 'Lec' &&
             s.courseId === group.anySec.courseId &&
-            s.sectionNumber === group.sectionNumber)
+            s.sectionNumber === group.sectionNumber &&
+            (s.gender ?? 'M') === (group.anySec.gender ?? 'M'))   // NEW-FU-654: R-15 groups are per-gender
           .map(s => s.day)
       );
       // Per-meeting duration from any surviving row. All surviving rows
@@ -1071,7 +1146,8 @@ class ScheduleService {
       const survivingRow = sections.find(s =>
         s.sectionType === 'Lec' &&
         s.courseId === group.anySec.courseId &&
-        s.sectionNumber === group.sectionNumber
+        s.sectionNumber === group.sectionNumber &&
+        (s.gender ?? 'M') === (group.anySec.gender ?? 'M')   // NEW-FU-654: per-gender group
       );
       const perMeetingDur = survivingRow
         ? (Section.toMinutes(survivingRow.endTime) - Section.toMinutes(survivingRow.startTime))
@@ -1398,10 +1474,22 @@ class ScheduleService {
 
   async getSectionsForSchedule(scheduleId) { return sectionRepo.findBySchedule(scheduleId); }
   async getSectionsForInstructor(scheduleId, instructorId) {
-    const [sections, officeHours] = await Promise.all([
+    // NEW-FU-646 (phantom-on-term-switch, defense-in-depth): `findByInstructor` is already
+    // schedule-scoped, but `getOfficeHours` is keyed by instructor id ALONE (term-independent).
+    // So a STALE cross-term instructorId (e.g. a selection carried over from another term before
+    // the frontend reset, or any caller passing a foreign id) would return THAT instructor's
+    // office hours here and paint a phantom OH overlay in a term the instructor doesn't belong to.
+    // Gate the OH fetch on the instructor actually belonging to THIS schedule's term
+    // (owner_semester = schedule.semester) — the per-term isolation invariant. Out-of-term → [].
+    const [sections, inTerm] = await Promise.all([
       sectionRepo.findByInstructor(scheduleId, instructorId),
-      instrRepo.getOfficeHours(instructorId),
+      query(
+        `SELECT 1 FROM instructors i JOIN schedules s ON s.semester = i.owner_semester
+          WHERE i.id = $1 AND s.id = $2`,
+        [instructorId, scheduleId]
+      ),
     ]);
+    const officeHours = inTerm.rowCount ? await instrRepo.getOfficeHours(instructorId) : [];
     return { sections, officeHours };
   }
   async getSectionsForVenue(scheduleId, venueId) {

@@ -16,7 +16,7 @@
 // future global selector. The visual style mirrors the Add Section
 // modal (`.sm-overlay` / `.sm-card`) for consistency.
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { useApp } from '../../context/AppContext.jsx';
 
@@ -106,6 +106,13 @@ export default function AddCourseModal({ onClose, showToast }) {
   const externalCourse = (courses || []).find(c => c.is_external);
   const externalTaken  = !!externalCourse;
   const externalSelectable = externalAllowed && !externalTaken;
+  // NEW-FU-647: the credit value MANDATES a flag — 4 credits ⇒ Has-lab, 0 credits ⇒ Capstone.
+  // These are FORCED (auto-set + locked on) so the invalid state, and the on-save error it used
+  // to produce, are unreachable: the user can't save a 4-credit course without a lab, or uncheck
+  // the capstone on a 0-credit course. The reconcile effect below sets them; these flags drive
+  // the locked (disabled) checkbox + "required" note in the UI.
+  const labForced      = form.credits === '4';
+  const capstoneForced = form.credits === '0' && capstoneAllowed;
   // NEW-FU-602 (Batch 28 item 3): a 0-credit course must be a Capstone. The effect above
   // auto-ticks Capstone when the level allows it (UG Senior); this error covers the case where
   // it can't (non-Senior 0-credit) — Save is blocked until the user sets the level to Senior,
@@ -187,27 +194,41 @@ export default function AddCourseModal({ onClose, showToast }) {
     || !!creditCapstoneError   // FU-602: 0-credit must be a Capstone
     || !(form.courseCode || '').trim() || !(form.name || '').trim();
 
-  // NEW-FU-484 (Phase 118 item 3): auto-uncheck gated flags when the user
-  // switches to a disallowed level/category. The useEffect dependency is the
-  // derived boolean, so it fires exactly when the allowed status flips.
-  // (setForm callback always reads fresh state, so no stale-closure risk.)
+  // NEW-FU-484 (Phase 118 item 3): auto-uncheck gated flags when the user switches to a
+  // disallowed level/category. NEW-FU-647: also keep the CREDIT-MANDATED flags in sync —
+  // 0 credits ⇒ Capstone, 4 credits ⇒ Has-lab. SET the flag the current credit mandates, and
+  // when the credit CHANGES away from a mandating value, DROP the flag it had auto-set so a stale
+  // auto-flag never lingers (the user re-checks it if they still want it on the new credit).
+  // prevCreditsRef distinguishes a real credit change from other reconcile triggers, so a MANUAL
+  // flag on a non-mandating credit (e.g. a 2-credit Senior capstone, SWE 412) survives.
+  const prevCreditsRef = useRef(form.credits);
   useEffect(() => {
+    const prevCredits    = prevCreditsRef.current;
+    const creditsChanged = prevCredits !== form.credits;
+    prevCreditsRef.current = form.credits;
     setForm(f => {
       const next = { ...f };
+      // (1) permit-based clears — the level/category/term no longer allows the flag.
       if (!capstoneAllowed && f.isCapstone) next.isCapstone = false;
-      // NEW-FU-595 (Batch 27): clear External when it's not selectable — out of its
-      // level OR the term already has an external course.
+      // NEW-FU-595 (Batch 27): clear External when not selectable (wrong level, or term already has one).
       if ((!externalAllowed || externalTaken) && f.isExternal) next.isExternal = false;
       // NEW-FU-600 (Batch 28): clear Has-lab when credits drop to 0/1/2 (no lab allowed there).
       if (!labAllowed && f.hasLab) next.hasLab = false;
-      // NEW-FU-602 (Batch 28 item 3): a 0-credit course MUST be a Capstone (it carries no
-      // credit because it IS the graduation project, e.g. SWE 413). Auto-enable Capstone when
-      // the level allows it (UG Senior) — clearing the mutually-exclusive flags — so the smooth
-      // path (type SWE 413 → Senior → 0 credits) needs no extra click. When the level doesn't
-      // allow capstone, creditCapstoneError blocks Save until the user sets the level to Senior.
-      if (f.credits === '0' && capstoneAllowed && !next.isCapstone) {
-        next.isCapstone = true; next.hasLab = false; next.isExternal = false;
+      // (2) NEW-FU-647: on a REAL credit change, drop the flag the PREVIOUS credit MANDATED
+      //     (it was auto-set), so leaving 0 clears Capstone and leaving 4 clears Has-lab instead
+      //     of persisting into the new credit. (3-credit then shows Has-lab as an unchecked option.)
+      if (creditsChanged) {
+        if (prevCredits === '0' && f.credits !== '0') next.isCapstone = false;
+        if (prevCredits === '4' && f.credits !== '4') next.hasLab = false;
       }
+      // (3) SET the flag the CURRENT credit MANDATES, clearing the mutually-exclusive others:
+      //     0 ⇒ Capstone (when the level allows it — SWE 413; else creditCapstoneError blocks Save),
+      //     4 ⇒ Has-lab (every 4-credit course carries a lab — forced so the on-save error is
+      //     unreachable; backend creditsFlagError stays the backstop).
+      if (f.credits === '0' && capstoneAllowed) { next.isCapstone = true; next.hasLab = false; next.isExternal = false; }
+      if (f.credits === '4')                    { next.hasLab = true; next.isCapstone = false; next.isExternal = false; }
+      // No flag actually changed → return the same object so we don't trigger a wasted render.
+      if (next.isCapstone === f.isCapstone && next.hasLab === f.hasLab && next.isExternal === f.isExternal) return f;
       return next;
     });
   }, [capstoneAllowed, externalAllowed, externalTaken, labAllowed, form.credits]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -368,20 +389,25 @@ export default function AddCourseModal({ onClose, showToast }) {
             {/* NEW-FU-600 (Batch 28): disabled + note for 0/1/2-credit (no lab allowed). */}
             <label className="acm-flag-row" style={{
               display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0',
-              cursor: labAllowed ? 'pointer' : 'default',
+              cursor: (labAllowed && !labForced) ? 'pointer' : 'default',
               opacity: labAllowed ? 1 : 0.45,
             }}>
               <input type="checkbox" checked={form.hasLab} style={{ marginTop: 3, flex: '0 0 auto' }}
-                disabled={!labAllowed}
+                disabled={!labAllowed || labForced}
                 onChange={() => pickFlag('hasLab')} />
               <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
                 <strong>Has lab sections</strong>{' '}
                 <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
-                  — course has both lectures and hands-on labs; you'll choose Lecture or Lab when adding a section.
+                  — has separate lecture and lab sections.
                 </span>
+                {labForced && (
+                  <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
+                    Required for 4-credit courses.
+                  </span>
+                )}
                 {!labAllowed && (
                   <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
-                    Only available for 3- and 4-credit courses (4-credit requires a lab).
+                    Only for 3- and 4-credit courses (4-credit requires a lab).
                   </span>
                 )}
               </span>
@@ -390,23 +416,26 @@ export default function AddCourseModal({ onClose, showToast }) {
             {/* NEW-FU-484 (Phase 118 item 3): disabled + note when level is wrong. */}
             <label className="acm-flag-row" style={{
               display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0',
-              cursor: capstoneAllowed ? 'pointer' : 'default',
+              cursor: (capstoneAllowed && !capstoneForced) ? 'pointer' : 'default',
               opacity: capstoneAllowed ? 1 : 0.45,
             }}>
               <input type="checkbox" checked={form.isCapstone}
                 style={{ marginTop: 3, flex: '0 0 auto' }}
-                disabled={!capstoneAllowed}
+                disabled={!capstoneAllowed || capstoneForced}
                 onChange={() => pickFlag('isCapstone')} />
               <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
                 <strong>Capstone</strong>{' '}
                 <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
-                  — graduation project. A capstone has no fixed room or class time, so the
-                  room and meeting-time checks are skipped; it's still checked for instructor
-                  and student time clashes.
+                  — graduation project; has a time slot but no room, so only instructor and student clashes are checked.
                 </span>
+                {capstoneForced && (
+                  <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
+                    Required for 0-credit courses.
+                  </span>
+                )}
                 {!capstoneAllowed && (
                   <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
-                    Only available for Undergraduate → Senior courses.
+                    Only for Undergraduate → Senior courses.
                   </span>
                 )}
               </span>
@@ -424,12 +453,11 @@ export default function AddCourseModal({ onClose, showToast }) {
               <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
                 <strong>External</strong>{' '}
                 <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
-                  — off-campus internship (e.g., SWE 399 Summer Training); it isn't held on
-                  campus, so no scheduling-conflict checks apply.
+                  — off-campus course (e.g., internship); not scheduled on campus, so no conflict checks.
                 </span>
                 {!externalAllowed && (
                   <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
-                    Only available for Undergraduate → Junior courses.
+                    Only for Undergraduate → Junior courses.
                   </span>
                 )}
                 {/* NEW-FU-595 (Batch 27): one external course per term. */}

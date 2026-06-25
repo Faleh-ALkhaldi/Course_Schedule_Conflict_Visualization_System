@@ -34,6 +34,9 @@ const OP_TYPE_LABEL = {
   // NEW-FU-426 (Phase 105): placeholder-resource ops (parity with Suggest).
   'add-dummy-instructor':'Add Placeholder Instructor',
   'add-dummy-venue':     'Add Placeholder Venue',
+  // NEW-FU-635 (issue #3): office-hour ops (move is the preferred R-04 OH↔class fix).
+  'move-office-hour':    'Move Office Hour',
+  'assign-office-hours': 'Add Office Hours',
 };
 
 const OP_TYPE_COLOR = {
@@ -47,6 +50,9 @@ const OP_TYPE_COLOR = {
   // sidebar's "placeholder" badge); constructive, far better than a drop.
   'add-dummy-instructor':'#b45309',
   'add-dummy-venue':     '#b45309',
+  // NEW-FU-635 (issue #3): teal — non-destructive OH adjustments, same family as reassign.
+  'move-office-hour':    '#0f766e',
+  'assign-office-hours': '#0f766e',
 };
 
 export default function QuickFixModal({ scheduleId, onClose, onApplied, showToast }) {
@@ -94,6 +100,14 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
       else              next.add(id);
       return next;
     });
+  }
+
+  // NEW-FU-648: bulk select/deselect. When everything is already checked, clear all;
+  // otherwise check ALL proposed ops — INCLUDING drops. Drops still default to unchecked
+  // (the per-op default above), so pulling them in here is an explicit, deliberate action.
+  const allSelected = !!plan && plan.ops.length > 0 && selected.size === plan.ops.length;
+  function toggleAll() {
+    setSelected(() => allSelected ? new Set() : new Set((plan?.ops ?? []).map(o => o.id)));
   }
 
   async function handleApply() {
@@ -149,6 +163,16 @@ export default function QuickFixModal({ scheduleId, onClose, onApplied, showToas
               </strong>
               {' '}(if all ops applied)
             </div>
+
+            {plan.ops.length > 0 && (
+              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 24px 8px', fontSize: '.78rem', color: 'var(--slate-500)'}}>
+                <span>{selected.size} of {plan.ops.length} selected</span>
+                <button type="button" onClick={toggleAll}
+                  style={{background: 'none', border: '1px solid var(--slate-300)', borderRadius: 6, padding: '3px 12px', fontSize: '.78rem', fontWeight: 600, color: 'var(--text-secondary)', cursor: 'pointer'}}>
+                  {allSelected ? 'Deselect all' : 'Select all'}
+                </button>
+              </div>
+            )}
 
             <div style={{padding: '0 24px', maxHeight: '50vh', overflowY: 'auto'}}>
               {plan.ops.length === 0 && (

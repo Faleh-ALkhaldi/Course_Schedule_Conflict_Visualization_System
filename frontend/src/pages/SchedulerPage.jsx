@@ -63,6 +63,9 @@ import SuggestModal     from '../components/modals/SuggestModal.jsx';
 import DecisionModal    from '../components/modals/DecisionModal.jsx';
 import QuickFixModal    from '../components/modals/QuickFixModal.jsx';
 import { conflictTypesPlain } from '../utils/conflictText.js';
+// NEW-FU-639 (issue #3): detect when a DRAGGED office hour would land on top of the
+// instructor's class (R-04) and suggest a free slot — same pure helpers the OH modals use.
+import { findOfficeHourClassClashes, suggestFreeOfficeHour, clashLabel } from '../utils/officeHourConflict.js';
 // NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs in the chrome.
 import Ico from '../components/shared/Icons.jsx';
 import './SchedulerPage.css';
@@ -73,22 +76,6 @@ const DEPT_ID  = import.meta.env.VITE_DEPT_ID  || 'SWE-DEPT';
 // the SEMESTER_DISPLAY map in TopBar.jsx still recognises 'Fall-2025'
 // as a defensive fallback for any DB that wasn't migrated.
 const SEMESTER = import.meta.env.VITE_SEMESTER || '251';
-
-// NEW-FU-182: lightweight term-code → human-label decoder for the export
-// filename. Mirrors the YYT rules in backend/src/domain/term.js but stays
-// inline so SchedulerPage.jsx doesn't pull in an extra module. Returns
-// "Fall-2025" for "251", "Spring-2026" for "252", "Summer-2026" for "253",
-// etc. Falls through to the raw input when it doesn't match (legacy
-// labels like "Fall-2025" already pass through cleanly).
-function decodeTermLabel(code) {
-  if (typeof code !== 'string' || !/^\d{2}[123]$/.test(code)) return code || 'schedule';
-  const yy = parseInt(code.slice(0, 2), 10);
-  const t  = code[2];
-  const start = 2000 + yy;
-  if (t === '1') return `Fall-${start}`;
-  if (t === '2') return `Spring-${start + 1}`;
-  return `Summer-${start + 1}`;
-}
 
 // NEW-FU-171: helper to mirror the active term into the URL's ?term=
 // query param without forcing a navigation. Uses history.replaceState so
@@ -104,6 +91,40 @@ function syncUrlTerm(semester) {
   window.history.replaceState(null, '', url.toString());
 }
 
+// NEW-FU-639 (issue #4): the group key that identifies ONE section across all its meeting days
+// (course + section number + gender) — used to find a dragged card's siblings and to dim/preview them.
+function sectionGroupKey(s) {
+  return s && `${s.courseId ?? s.course_id}|${s.sectionNumber ?? s.section_number}|${s.gender ?? 'M'}`;
+}
+// NEW-FU-639 (issue #4): project where EVERY meeting of a dragged section group would land for a
+// drop on `day` at `newStartMin`, so the grid can preview the WHOLE group moving together (not just
+// the one grabbed card + a static text list). Mirrors handleDragEnd's branching exactly:
+//  • multi-day lecture dropped WITHIN its day-set → time move: each meeting keeps its day, shifts to
+//    the new start (same duration).
+//  • multi-day lecture dropped OUTSIDE its day-set → credit-aware restructure to the legal pattern
+//    containing the target day (targetPatternForDrag) at that pattern's required duration (e.g. a
+//    3-credit Sun/Tue/Thu @ 50 dropped on Monday → Mon/Wed @ 75).
+//  • single-day section / lab → moves as one block to the drop cell.
+// Returns [{ day, startMin, endMin }] for the projected meetings, or null if indeterminate.
+function projectGroupGhosts(sec, group, day, newStartMin, courses) {
+  const dur = timeToMin(sec.endTime ?? sec.end_time) - timeToMin(sec.startTime ?? sec.start_time);
+  if (!Number.isFinite(dur) || dur <= 0 || !Number.isFinite(newStartMin)) return null;
+  const draggedType = sec.sectionType ?? sec.section_type;
+  const groupDays = group.map(s => s.day);
+  const isMultiDayLec = draggedType !== 'Lab' && groupDays.length > 1;
+  if (isMultiDayLec && !groupDays.includes(day)) {
+    const course  = (courses || []).find(c => c.id === (sec.courseId ?? sec.course_id));
+    const credits = course?.credits ?? sec.credits;
+    const hasLab  = course?.has_lab ?? sec.hasLab ?? sec.has_lab ?? false;
+    const tgt = targetPatternForDrag(day, credits, hasLab, dur);
+    return tgt.days.map(d => ({ day: d, startMin: newStartMin, endMin: newStartMin + tgt.duration }));
+  }
+  if (isMultiDayLec) {
+    return group.map(s => ({ day: s.day, startMin: newStartMin, endMin: newStartMin + dur }));
+  }
+  return [{ day, startMin: newStartMin, endMin: newStartMin + dur }];
+}
+
 export default function SchedulerPage() {
   // NEW-FU-207: isArchived gates grid-level click + drag handlers so the
   // user can't open the section-edit modal or drag to reorder while
@@ -114,9 +135,10 @@ export default function SchedulerPage() {
           loadReference, loadView, saveSchedule, moveSection,
           // NEW-FU-283 (Phase 56): `venues` added so the audit effect
           // below can walk the loaded list.
-          sections, courses, venues, instructors, error, dispatch, unfinalizeSchedule, doLogout,
-          // NEW-FU-549 (Batch 16): undo/redo
-          undo, redo, recordMutation, clearHistory } = useApp();
+          sections, officeHours, courses, venues, instructors, error, dispatch, unfinalizeSchedule, doLogout,
+          // NEW-FU-549 (Batch 16): undo/redo. NEW-FU-639 (issue #6): recordRefCommand makes an
+          // OH drag-move an undoable step (it previously mutated the OH with no history entry).
+          undo, redo, recordMutation, recordRefCommand, clearHistory } = useApp();
   const reduceMotion = useReducedMotion();
 
   // NEW-FU-482 (Phase 116): a term is locked (read-only) when archived OR finalized — the
@@ -167,6 +189,14 @@ export default function SchedulerPage() {
   const [showQuickFix,  setShowQuickFix]  = useState(false);
   const [groupChangeModal, setGroupChangeModal] = useState(null); // { sec, newDay, newStartTime, duration }
   const [activeDrag,    setActiveDrag]    = useState(null); // { type:'section'|'course', id }
+  // NEW-FU-639 (issue #4): live preview of where the WHOLE dragged group will land, recomputed as
+  // the cursor moves over grid cells. `{ key, code, blocks:[{day,startMin,endMin}] }` → translucent
+  // ghost cards rendered by ScheduleGrid so the user SEES every meeting move together, not just one.
+  const [dragGhosts,    setDragGhosts]    = useState(null);
+  // NEW-FU-642 (issue #3): the dragged card's REAL rendered geometry (captured at drag start), so
+  // the drag preview matches the card's size in THIS view/mode (Overview small, Readable larger,
+  // Instructor/Venue) instead of ballooning to a fixed chip bigger than the target slot.
+  const [dragSize,      setDragSize]      = useState(null);
   // NEW-FU-217 (Phase 91): schedule-grid VIEW MODE. 'overview' = the default
   // fit-to-viewport view (whole week visible, dense cards shrink); 'readable' = fixed
   // legible card sizing that scrolls. Lifted here (the common ancestor of the header
@@ -235,7 +265,10 @@ export default function SchedulerPage() {
   // ?term=XXX query param via history.replaceState (no full navigation,
   // no page reload). The existing [view, filterId, schedule?.id] effect
   // below then refetches sections for the newly-active schedule.
-  // View-mode + filterId are preserved across the switch.
+  // NEW-FU-646: the VIEW-MODE is preserved across the switch, but the SELECTION
+  // (filterId) is NOT — the SET_SCHEDULE reducer resets it on a real term change
+  // because a per-term instructor/venue id is meaningless in the new term and was
+  // painting a phantom office-hours overlay. The new term starts with no selection.
   const handleSwitchTerm = async (term) => {
     // NEW-FU-561 (audit P1-7): the contract is a term OBJECT ({scheduleId, code,
     // status, archivedAt}), but TermPicker's archive/delete/rename-the-ACTIVE-term
@@ -398,6 +431,15 @@ export default function SchedulerPage() {
   // ── Shared DnD handlers (wraps both sidebar + grid) ────────────────────────
   function handleDragStart(e) {
     const id = String(e.active.id);
+    // NEW-FU-642/643 (issue #4): record the dragged card's ACTUAL rendered box so the overlay +
+    // ghosts size to it. The dnd-kit `active.rect.current.initial` proved unreliable here (often
+    // null → the overlay fell back to a fixed 150px chip), so measure the real DOM element by its
+    // data-section-id and only fall back to the dnd-kit rect. Non-section drags (oh-/course) match
+    // nothing → dragSize stays null (those overlays aren't size-matched).
+    let rect = null;
+    try { rect = document.querySelector(`[data-section-id="${CSS.escape(id)}"]`)?.getBoundingClientRect() || null; } catch { rect = null; }
+    if (!rect || !rect.width) { const r = e.active.rect?.current?.initial; if (r && r.width) rect = r; }
+    setDragSize(rect && rect.width ? { width: Math.round(rect.width), height: Math.round(rect.height) } : null);
     if (id.startsWith('oh-')) {
       setActiveDrag({ type: 'officeHour', id, data: e.active.data?.current?.officeHour });
     } else if (sections.some(s => s.id === id)) {
@@ -407,6 +449,23 @@ export default function SchedulerPage() {
     }
   }
 
+  // NEW-FU-639 (issue #4): as a section group is dragged over the grid, project where ALL its
+  // meetings would land and stash them so ScheduleGrid renders the whole group as ghost cards
+  // (every meeting moving together). Cleared when off-grid; only section group drags preview.
+  function handleDragOver(e) {
+    if (activeDrag?.type !== 'section') { if (dragGhosts) setDragGhosts(null); return; }
+    const overId = e.over ? String(e.over.id) : '';
+    if (!overId.includes('|')) { if (dragGhosts) setDragGhosts(null); return; }
+    const [day, minStr] = overId.split('|');
+    const sec = sections.find(s => s.id === activeDrag.id);
+    if (!sec) { if (dragGhosts) setDragGhosts(null); return; }
+    const key   = sectionGroupKey(sec);
+    const group = sections.filter(s => sectionGroupKey(s) === key);
+    const blocks = projectGroupGhosts(sec, group, day, parseInt(minStr), courses);
+    // NEW-FU-642 (issue #3): carry the dragged card's real width so the ghosts match its size.
+    setDragGhosts(blocks ? { key, code: sec.courseCode ?? sec.course_code ?? '', blocks, width: dragSize?.width ?? null } : null);
+  }
+
   // NEW-FU-613 (Batch 30 follow-up): preview a proposed move/restructure and, if it would create
   // ANY conflict, ask the user to confirm BEFORE it is applied. Returns true to PROCEED, false to
   // ABORT. Shared by BOTH the same-group time drag AND the cross-group day-change restructure so
@@ -414,29 +473,41 @@ export default function SchedulerPage() {
   // neither can silently create a conflict. `change` is the previewConflicts payload (sectionId +
   // the proposed days/startTime/endTime). Advisory: if the preview itself fails, returns true
   // (proceed — the backend + the grid still surface conflicts afterward).
+  // NEW-FU-642 (issue #2): returns a DECISION — { action:'proceed' } · { action:'suggest',
+  // startTime, endTime } · { action:'cancel' }. previewConflicts already computes the nearest
+  // conflict-free start (conflictFreeStart/End), so when the move would clash we offer that as a
+  // THIRD option (proceed-with-conflict · use the conflict-free slot · cancel) — identical in shape
+  // to the office-hour dialog, across Course / Instructor / Venue views and both move paths.
   async function confirmIfConflicts(change) {
     try {
       const { previewConflicts } = await import('../api/index.js');
       const prev = await previewConflicts(schedule.id, change);
       const clashes = prev?.conflicts ?? [];
-      if (!clashes.length) return true;
-      return await askDecision({
+      if (!clashes.length) return { action: 'proceed' };
+      const free = (prev?.conflictFreeStartExists && prev?.conflictFreeStart)
+        ? { startTime: prev.conflictFreeStart, endTime: prev.conflictFreeEnd } : null;
+      const choice = await askDecision({
         icon: <Ico name="alert" />,
         title: `This move creates ${clashes.length} conflict${clashes.length !== 1 ? 's' : ''}`,
         lead: clashes.slice(0, 3).map(c => c.description).join('  •  ')
               + (clashes.length > 3 ? `  •  +${clashes.length - 3} more` : ''),
         options: [
-          { label: 'Move anyway', value: true, tone: 'danger' },
-          { label: 'Cancel',      value: false, tone: 'neutral' },
+          { label: 'Move anyway', value: 'proceed', tone: 'danger' },
+          ...(free ? [{ label: `Use ${free.startTime}–${free.endTime} (conflict-free)`, value: 'suggest', tone: 'primary' }] : []),
+          { label: 'Cancel', value: 'cancel', tone: 'neutral' },
         ],
-        dismissValue: false,
+        dismissValue: 'cancel',
       });
-    } catch { return true; }
+      if (choice === 'suggest' && free) return { action: 'suggest', startTime: free.startTime, endTime: free.endTime };
+      return { action: choice === 'proceed' ? 'proceed' : 'cancel' };
+    } catch { return { action: 'proceed' }; }
   }
 
   async function handleDragEnd(e) {
     const prev = activeDrag;
     setActiveDrag(null);
+    setDragGhosts(null);   // NEW-FU-639 (issue #4): clear the group preview on drop
+    setDragSize(null);     // NEW-FU-642 (issue #3)
     const { active, over } = e;
     if (!over || !active) return;
     // NEW-FU-207: defensive no-op on archived view. The block-level
@@ -495,33 +566,38 @@ export default function SchedulerPage() {
 
         // If dropped onto a day OUTSIDE this multi-day section's pattern → confirm a restructure.
         if (isMultiDayLec && !sectionDays.includes(day)) {
-          setGroupChangeModal({ sec, newDay: day, newStartTime: startTime, duration, actualSiblingCount: sectionDays.length });
+          // NEW-FU-642 (issue #4): pass the section's TRUE current pattern/duration AND the exact
+          // target (the SAME targetPatternForDrag confirmGroupChange will apply) so the modal text
+          // is accurate — the old modal derived labels from a coarse STT/MW table and mislabeled a
+          // Tue/Thu 75-min section as "Sun/Tue/Thu, 50 min" and showed the wrong resulting pattern.
+          const _course  = courses.find(c => c.id === (sec.courseId ?? sec.course_id));
+          const _credits = _course?.credits ?? sec.credits;
+          const _hasLab  = _course?.has_lab ?? sec.hasLab ?? sec.has_lab ?? false;
+          const _tgt     = targetPatternForDrag(day, _credits, _hasLab, duration);
+          setGroupChangeModal({
+            sec, newDay: day, newStartTime: startTime, duration,
+            current: { days: [...sectionDays], duration },
+            target:  { days: _tgt.days, duration: _tgt.duration },
+          });
           return;
         }
 
-        // NEW-FU-4 + NEW-FU-8: coerce a cross-day drag into a time-only move
-        // ONLY when a sibling already occupies the target day. Checking real
-        // collisions (same course + same sectionNumber + target day) instead
-        // of "same day-group" lets a single-day section that happens to live
-        // on an STT/MW day still be freely moved to another day.
+        // NEW-FU-4 + NEW-FU-8: coerce a cross-day drag into a time-only move ONLY when a sibling
+        // of the SAME group already occupies the target day. NEW-FU-653: gender-scope the check —
+        // Male §01 and Female §01 are DISTINCT groups that may legally share a day, so a Male card
+        // dropped onto a day where only the Female §01 meets must NOT be coerced (it's a valid move).
         const hasSiblingOnTarget = sections.some(s =>
           s.id !== sec.id &&
           (s.courseId      ?? s.course_id)      === (sec.courseId      ?? sec.course_id) &&
           (s.sectionNumber ?? s.section_number) === (sec.sectionNumber ?? sec.section_number) &&
+          (s.gender ?? 'M') === (sec.gender ?? 'M') &&
           s.day === day
         );
+        // NEW-FU-653 (issue #1): silently coerce to a time-only move. The section already meets on
+        // that day, so the day change is a genuine no-op; the old "Day change ignored" toast was
+        // just noise that read like an error. The time update still applies.
         let effectiveDay = day;
-        if (hasSiblingOnTarget) {
-          effectiveDay = sec.day;
-          // NEW-FU-61: surface the day-coerce so the user knows why their
-          // requested day change "didn't take." Without this, the section
-          // visually snaps back to its origin day with no signal — confusing
-          // because the time change still applies.
-          showToast(
-            `Day change ignored — a section of this group already exists on ${day}. Time updated only.`,
-            'warn',
-          );
-        }
+        if (hasSiblingOnTarget) effectiveDay = sec.day;
 
         // NEW-FU-494 (Phase 119 item 4): R-06 window guard on drag-drop.
         // Prevents dragging a section outside its teaching window at the frontend
@@ -560,8 +636,9 @@ export default function SchedulerPage() {
           (s.sectionNumber ?? s.section_number) === (sec.sectionNumber ?? sec.section_number) &&
           (s.gender ?? 'M') === (sec.gender ?? 'M');
         const groupDays = sections.filter(sameGroup).map(s => s.day);
-        // Shared pre-apply conflict confirmation (NEW-FU-613). Cancel → return, card snaps back.
-        const ok = await confirmIfConflicts({
+        // Shared pre-apply conflict confirmation (NEW-FU-613/642). Cancel → return, card snaps back;
+        // Use-suggested → move the group to the conflict-free slot the backend found instead.
+        const moveDecision = await confirmIfConflicts({
           sectionId:     sec.id,
           courseId:      sec.courseId      ?? sec.course_id,
           instructorId:  sec.instructorId  ?? sec.instructor_id ?? null,
@@ -572,14 +649,16 @@ export default function SchedulerPage() {
           days:          groupDays.length ? groupDays : [effectiveDay],
           startTime, endTime,
         });
-        if (!ok) return;   // revert — card returns to its original day/time
+        if (moveDecision.action === 'cancel') return;   // revert — card returns to its original day/time
+        const mvStart = moveDecision.action === 'suggest' ? moveDecision.startTime : startTime;
+        const mvEnd   = moveDecision.action === 'suggest' ? moveDecision.endTime   : endTime;
 
         await moveSection(sec.id, {
           instructorId: sec.instructorId ?? sec.instructor_id,
           venueId:      sec.venueId      ?? sec.venue_id,
           day: effectiveDay,
-          startTime,
-          endTime,
+          startTime: mvStart,
+          endTime:   mvEnd,
         });
         // Reload to show all siblings at new time
         if (schedule) loadView(schedule.id, view, filterId);
@@ -590,20 +669,53 @@ export default function SchedulerPage() {
         });
       } else if (prev?.type === 'officeHour' && prev?.data) {
         const oh = prev.data;
+        const instrId = oh.instructor_id ?? filterId;
         const ohStart = oh.start_time ?? oh.startTime ?? '';
         const ohEnd   = oh.end_time   ?? oh.endTime   ?? '';
         const duration = timeToMin(ohEnd) - timeToMin(ohStart);
         const newEnd   = fromMinutes(timeToMin(startTime) + duration);
-        // NEW-FU-41: single atomic PUT replaces the prior create+delete dance.
-        // The old pattern silently produced duplicate OHs whenever the delete
-        // half failed (network blip, 5xx, race), and the duplicates then
-        // got R-04 -flagged against every overlapping section. One UPDATE
-        // means the row id is stable and conflict revalidation sees exactly
-        // one OH.
-        await api.updateInstructorOfficeHour(oh.instructor_id ?? filterId, oh.id, {
-          day, startTime, endTime: newEnd,
-        });
+        let proposed = { day, startTime, endTime: newEnd };
+
+        // NEW-FU-639 (issue #3): dragging an office hour onto a class slot used to silently
+        // create an R-04 conflict. Now, if the drop target overlaps THIS instructor's class
+        // meetings (`sections` is this teacher's classes in Instructor View), present the same
+        // 3-option decision the OH modals use: Move anyway (accept the conflict) · Use the
+        // nearest conflict-free slot (Quick-Fix-style suggestion) · Cancel (revert — no mutation).
+        const clashes = findOfficeHourClassClashes(proposed, sections);
+        if (clashes.length) {
+          const otherOH = (officeHours || []).filter(o => o.id !== oh.id);
+          const sug = suggestFreeOfficeHour(proposed, sections, otherOH);
+          const choice = await askDecision({
+            icon: <Ico name="alert" />,
+            title: 'This office hour overlaps a class',
+            lead: `Moving it to ${day} ${startTime}–${newEnd} overlaps ${clashLabel(clashes[0])}`
+                  + (clashes.length > 1 ? ` (and ${clashes.length - 1} more)` : '') + ' and will create a conflict.',
+            options: [
+              { label: 'Move anyway', value: 'proceed', tone: 'danger' },
+              ...(sug ? [{ label: `Use ${sug.day} ${sug.startTime}–${sug.endTime}`, value: 'suggest', tone: 'primary' }] : []),
+              { label: 'Cancel', value: 'cancel', tone: 'neutral' },
+            ],
+            dismissValue: 'cancel',
+          });
+          if (choice === 'cancel') return;            // revert — the OH snaps back, no mutation
+          if (choice === 'suggest' && sug) proposed = { day: sug.day, startTime: sug.startTime, endTime: sug.endTime };
+        }
+
+        // Capture the pre-move slot so the drag is one undoable step (NEW-FU-639, issue #6).
+        const before = { day: oh.day, startTime: String(ohStart).slice(0, 5), endTime: String(ohEnd).slice(0, 5) };
+        const after  = { ...proposed };
+        // NEW-FU-41: single atomic PUT replaces the prior create+delete dance — stable row id,
+        // so conflict revalidation sees exactly one OH (no duplicate from a failed delete half).
+        await api.updateInstructorOfficeHour(instrId, oh.id, after);
         if (schedule) loadView(schedule.id, view, filterId);
+        // NEW-FU-639 (issue #2/#6): a dragged office hour is now undoable, like every other edit.
+        // (applyCommand in AppContext reloads the view after running undo/redo, so the handlers
+        // only perform the mutation — matching the instructor/OH-modal command pattern.)
+        recordRefCommand && recordRefCommand({
+          label: 'move office hour',
+          undo: async () => { await api.updateInstructorOfficeHour(instrId, oh.id, before); },
+          redo: async () => { await api.updateInstructorOfficeHour(instrId, oh.id, after);  },
+        });
       }
     } catch(err) {
       // C-7: surface drag errors rather than silently swallowing them
@@ -611,7 +723,7 @@ export default function SchedulerPage() {
     }
   }
 
-  function handleDragCancel() { setActiveDrag(null); }
+  function handleDragCancel() { setActiveDrag(null); setDragGhosts(null); setDragSize(null); /* NEW-FU-639/642 */ }
 
   // ── Group change confirmation ──────────────────────────────────────────────
   async function confirmGroupChange() {
@@ -639,7 +751,7 @@ export default function SchedulerPage() {
     // as it was (the card never left its place). Confirm → fall through to the delete+recreate and
     // let the conflict surface. previewConflicts excludes this section's own (old) group by
     // identity, so the check is "does the new pattern clash with OTHER sections?".
-    const ok = await confirmIfConflicts({
+    const moveDecision = await confirmIfConflicts({
       sectionId:     sec.id,
       courseId:      sec.courseId      ?? sec.course_id,
       instructorId:  sec.instructorId  ?? sec.instructor_id ?? null,
@@ -651,43 +763,19 @@ export default function SchedulerPage() {
       startTime:     newStartTime,
       endTime:       newEndTime,
     });
-    if (!ok) return;   // aborted before any delete/create — section untouched
+    if (moveDecision.action === 'cancel') return;   // aborted before any mutation — section untouched
+    const appliedStart = moveDecision.action === 'suggest' ? moveDecision.startTime : newStartTime;
+    const appliedEnd   = moveDecision.action === 'suggest' ? moveDecision.endTime   : newEndTime;
 
-    // H-8 + NEW-FU-40: Create new sections FIRST so a failed create leaves
-    // the old group intact. Use ONE createSection call with the `days` array
-    // so the backend creates all rows in a single transaction (see
-    // ScheduleService.createSection — N inserts under one BEGIN/COMMIT).
-    // The previous version looped N HTTP calls; if call k of N failed, the
-    // first k-1 sections persisted AND the old group was never deleted —
-    // leaving the user with the original group PLUS orphaned partial-new
-    // sections. Now either ALL new days appear (then deleteSection runs) or
-    // none do (deleteSection never runs, old group stays clean).
+    // NEW-FU-642 (issue #4): ONE atomic restructure — the backend reconciles the day-set in a
+    // single transaction (keep shared days with their row id, delete removed, insert added),
+    // mirroring the group's instructor/venue/type/gender from the existing rows. This replaces the
+    // old create-all-new-days-THEN-delete-all-old-days dance, which 409'd "section already exists"
+    // whenever the new pattern shared any day with the old one (e.g. Tue/Thu → Sun/Tue keeps
+    // Tuesday). Atomic = no transient duplicate, no orphaned partial group on failure.
     try {
-      const { createSection, deleteSection } = await import('../api/index.js');
-      await createSection(schedule.id, {
-        courseId:      sec.courseId      ?? sec.course_id,
-        instructorId:  sec.instructorId  ?? sec.instructor_id,
-        venueId:       sec.venueId       ?? sec.venue_id,
-        sectionNumber: sec.sectionNumber ?? sec.section_number,
-        // NEW-FU-371 (Phase 98 item 2): forward the section TYPE so a
-        // cross-day-group move of a Lab section (§50–§99) re-creates as a Lab,
-        // not a Lec. Without this the backend used to default to 'Lec' and
-        // reject the §50 number with "must be in 01–49". Mirrors the payload
-        // SectionModal already sends; the backend now also derives type from
-        // the number as a second line of defence.
-        sectionType:   sec.sectionType   ?? sec.section_type,
-        // NEW-FU-562 (audit-2 P1-1): forward GENDER through this drag-triggered
-        // delete+recreate restructure. Without it the recreate defaulted to 'M' and
-        // silently flipped a female lecture section to male (identity = course+number+
-        // gender) — the same corruption fixed in the SectionModal path (P1-5), but this
-        // second restructure path (cross-day-group drag) was missed.
-        gender:        sec.gender        ?? sec.section_gender ?? 'M',
-        days:          newDays,
-        day:           newDays[0],
-        startTime:     newStartTime,
-        endTime:       newEndTime,
-      });
-      await deleteSection(sec.id);
+      const { restructureSection } = await import('../api/index.js');
+      await restructureSection(sec.id, { days: newDays, startTime: appliedStart, endTime: appliedEnd });
       recordMutation('move section');   // NEW-FU-549: one undo step for the restructure
       showToast(`✓ Section moved to ${tgt.days.map(d => d.slice(0,3)).join('/')} · ${tgt.duration} min.`, 'success');
       loadView(schedule.id, view, filterId);
@@ -761,9 +849,29 @@ export default function SchedulerPage() {
   }
   // NEW-FU-228 (Phase 97): open the same Schedule-Data modal straight on Import.
   function handleImport() {
-    if (!schedule) return;
+    if (!schedule || scheduleLocked) return;   // NEW-FU-644 (issue #3): import is a mutation — blocked when locked
     setExportInitialTab('import');
     setShowExport(true);
+  }
+
+  // NEW-FU-666: a clear, distinguishable download name.
+  //   • whole term → the TERM CODE (e.g. "281-schedule.pdf") so it's obvious which term;
+  //   • instructor → "instructor" + that instructor's NAME (they are instructors, NOT
+  //     "teachers") so multiple instructor files don't collide;
+  //   • venue      → "venue" + that venue's building-room name.
+  // Applied to every format (xlsx / docx / pdf / png).
+  function buildExportFilename(view, filterId, ext) {
+    const code = schedule.semester;
+    const slug = (s) => String(s || '').trim().replace(/[^A-Za-z0-9._]+/g, '-').replace(/^-+|-+$/g, '');
+    if (view === 'teacher') {
+      const name = instructors.find(i => String(i.id) === String(filterId))?.name || 'instructor';
+      return `${code}-instructor-${slug(name)}-schedule.${ext}`;
+    }
+    if (view === 'venue') {
+      const name = venues.find(v => String(v.id) === String(filterId))?.name || 'venue';
+      return `${code}-venue-${slug(name)}-schedule.${ext}`;
+    }
+    return `${code}-schedule.${ext}`;
   }
 
   async function doExport(exportView, exportFilterId, format = 'xlsx') {
@@ -773,10 +881,7 @@ export default function SchedulerPage() {
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
       a.href     = url;
-      // NEW-FU-182: human-readable term label; falls back to the raw semester
-      // string when decode fails (legacy non-YYT codes).
-      const labelPart = decodeTermLabel(schedule.semester);
-      a.download = `${labelPart}-${exportView}-schedule.${format}`;
+      a.download = buildExportFilename(exportView, exportFilterId, format);   // NEW-FU-666
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -787,33 +892,9 @@ export default function SchedulerPage() {
     }
   }
 
-  // PNG export — runs entirely in the browser. We capture the currently
-  // rendered schedule grid via html2canvas. Dynamic import keeps html2canvas
-  // out of the main bundle until the user actually requests an image.
-  async function doExportImage(exportView /* unused — we capture the live DOM */, _filterId) {
-    if (!schedule) return;
-    try {
-      const target = document.querySelector('[data-export-target="schedule-grid"]')
-                  ?? document.querySelector('.grid-host')
-                  ?? document.querySelector('main');
-      if (!target) {
-        showToast('Could not find the schedule grid to capture.', 'error');
-        return;
-      }
-      const { default: html2canvas } = await import('html2canvas');
-      const canvas = await html2canvas(target, { backgroundColor: '#ffffff', scale: 2 });
-      const labelPart = decodeTermLabel(schedule.semester);
-      const a = document.createElement('a');
-      a.href = canvas.toDataURL('image/png');
-      a.download = `${labelPart}-${exportView}-schedule.png`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      showToast('✓ Image downloaded.', 'success');
-    } catch (err) {
-      showToast(err.message || 'Image export failed.', 'error');
-    }
-  }
+  // NEW-FU-667: the PNG export is now generated SERVER-SIDE (a scoped, theme-independent grid
+  // rasterized from the same PDF the other formats use) and flows through doExport like every
+  // other format — so there is no longer a client-side html2canvas screenshot path here.
 
   function handleBlockClick(section) {
     // NEW-FU-207/482: no-op on archived OR finalized view (read-only).
@@ -855,10 +936,47 @@ export default function SchedulerPage() {
     }
   }
   function handleOHClick(oh) {
-    // NEW-FU-206: opens the modal even when archived; the modal renders
-    // itself in read-only mode (inputs disabled, Save/Delete disabled) so
-    // the admin can inspect OH details without mutating them.
+    // NEW-FU-644 (issue #3): a finalized/archived term is FULLY read-only — clicking an office-hour
+    // block must do NOTHING (no read-only modal). This supersedes FU-206's "open read-only to view"
+    // behaviour: the only permitted actions on a locked term are Unlock and Export. (Matches
+    // handleBlockClick, which already no-ops when scheduleLocked.)
+    if (scheduleLocked) return;
     setOhModal({ officeHour: oh, instructorId: filterId });
+  }
+  // NEW-FU-643 (issue #1): delete a SINGLE office-hour slot from the grid (the OH block's ×).
+  // Unlike the class × (deletes the whole section group), this removes ONLY this one OH slot and
+  // leaves the instructor's other office hours intact. Undoable (re-adds the exact slot), like the
+  // OH-manager delete; matches handleSectionDelete's confirm + reload pattern.
+  async function handleOHDelete(oh) {
+    if (!schedule || scheduleLocked) return;
+    const instrId = oh.instructor_id ?? filterId;
+    const start = String(oh.start_time ?? oh.startTime ?? '').slice(0, 5);
+    const end   = String(oh.end_time   ?? oh.endTime   ?? '').slice(0, 5);
+    const ok = await askDecision({
+      icon: <Ico name="alert" />,
+      title: 'Delete this office hour?',
+      lead: `${oh.day} ${start}–${end}. Only this slot is removed — the instructor's other office hours stay.`,
+      options: [
+        { label: 'Delete', value: true, tone: 'danger' },
+        { label: 'Cancel', value: false, tone: 'neutral' },
+      ],
+      dismissValue: false,
+    });
+    if (!ok) return;
+    try {
+      await api.deleteInstructorOfficeHour(instrId, oh.id);
+      if (schedule) loadView(schedule.id, view, filterId);
+      const snap = { day: oh.day, startTime: start, endTime: end };
+      let reId = null;
+      recordRefCommand && recordRefCommand({
+        label: 'delete office hour',
+        undo: async () => { const re = await api.addInstructorOfficeHour(instrId, snap); reId = re?.id; },
+        redo: async () => { if (reId) await api.deleteInstructorOfficeHour(instrId, reId); },
+      });
+      showToast('Office hour deleted.', 'info');
+    } catch (err) {
+      showToast('Delete failed: ' + (err.response?.data?.error ?? err.message), 'error');
+    }
   }
 
   function handleModalClose() {
@@ -878,7 +996,7 @@ export default function SchedulerPage() {
   // refuses to fetch a plan when archived (the backend's apply route is
   // gated by refuseIfActiveTermArchived).
   function handleQuickFix() {
-    if (!schedule) return;
+    if (!schedule || scheduleLocked) return;   // NEW-FU-644 (issue #3): Quick Fix mutates — blocked when locked
     setShowQuickFix(true);
   }
 
@@ -1207,12 +1325,24 @@ export default function SchedulerPage() {
     ? sections.find(s => s.id === activeDrag.id) : null;
   const activeCourse  = activeDrag?.type === 'course'
     ? courses.find(c => c.id === activeDrag.id) : null;
+  // NEW-FU-636 (issue #1): the dragged section's whole GROUP (same course+section+gender).
+  // A section moves as a unit across all its meeting days, so the overlay previews EVERY
+  // meeting and the grid dims the whole group — making it clear the entire group moves
+  // together and where the change will land (not just the one grabbed card).
+  const _grpKey = sectionGroupKey;   // NEW-FU-639 (issue #4): shared with the ghost projection
+  const activeGroupKey = activeSection ? _grpKey(activeSection) : null;
+  const DRAG_DAY_ORDER = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
+  const activeGroup = activeSection
+    ? sections.filter(s => _grpKey(s) === activeGroupKey)
+        .slice().sort((a, b) => DRAG_DAY_ORDER.indexOf(a.day) - DRAG_DAY_ORDER.indexOf(b.day))
+    : [];
 
   return (
     <DndContext
       sensors={sensors}
       collisionDetection={closestCenter}
       onDragStart={handleDragStart}
+      onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}
       onDragCancel={handleDragCancel}
     >
@@ -1322,9 +1452,12 @@ export default function SchedulerPage() {
                 <ScheduleGrid
                   onBlockClick={handleBlockClick}
                   onOHClick={handleOHClick}
+                  onOHDelete={handleOHDelete}
                   onSectionDelete={handleSectionDelete}
                   viewMode={view === VIEWS.COURSE ? viewMode : 'overview'}
                   uniformType={view !== VIEWS.COURSE}
+                  draggingGroupKey={activeGroupKey}  /* NEW-FU-636 (issue #1): dim the whole dragged group */
+                  dragGhosts={dragGhosts}            /* NEW-FU-639 (issue #4): preview every meeting moving together */
                 />
               </motion.div>
             </div>
@@ -1452,7 +1585,8 @@ export default function SchedulerPage() {
           sec={groupChangeModal.sec}
           newDay={groupChangeModal.newDay}
           newStartTime={groupChangeModal.newStartTime}
-          actualSiblingCount={groupChangeModal.actualSiblingCount}
+          current={groupChangeModal.current}   /* NEW-FU-642 (issue #4): accurate current + target */
+          target={groupChangeModal.target}
           onConfirm={confirmGroupChange}
           onCancel={() => setGroupChangeModal(null)}
         />
@@ -1461,7 +1595,6 @@ export default function SchedulerPage() {
       {showExport && (
           <ExportModal
             onExport={doExport}
-            onExportImage={doExportImage}
             onClose={() => setShowExport(false)}
             showToast={showToast}
             initialTab={exportInitialTab}
@@ -1474,19 +1607,34 @@ export default function SchedulerPage() {
       </div>
 
       <DragOverlay>
-        {activeSection && (
-          <div style={{
-            // NEW-FU-561 (audit P2-14): pin an explicit dark text color. Without it the
-            // chip inherited --text-primary (near-white in dark mode) on this pale-blue
-            // bg → ~1.02:1, invisible. Theme-independent, matches the course-overlay below.
-            background:'#e0f2fe', border:'2px solid #0284c7', color:'#0c4a6e',
-            borderRadius:6, padding:'6px 10px',
-            fontFamily:'var(--font-mono)', fontSize:'.78rem', fontWeight:600,
-            boxShadow:'0 4px 16px rgba(0,0,0,.2)',
-          }}>
-            {activeSection.courseCode ?? activeSection.course_code} §{activeSection.sectionNumber ?? activeSection.section_number}
-          </div>
-        )}
+        {activeSection && (() => {
+          // NEW-FU-642 (issue #3): size the overlay to the dragged card's REAL geometry so it
+          // matches the slot it's headed for (a tiny Overview card drags small; a Readable card
+          // drags larger) instead of ballooning to a fixed chip. Use the section's level colour so
+          // it reads as the same card. When the card is tall enough, append a "+N more" hint.
+          const lvl = LEVEL_COLORS[activeSection.academic_level] || {};
+          const small = dragSize && dragSize.height < 38;
+          return (
+            <div style={{
+              width: dragSize?.width ?? 150,
+              height: dragSize?.height ?? undefined,
+              boxSizing: 'border-box', overflow: 'hidden',
+              background: lvl.bg ?? '#e0f2fe', border: `2px solid ${lvl.border ?? '#0284c7'}`, color: lvl.text ?? '#0c4a6e',
+              borderRadius: 6, padding: small ? '1px 4px' : '4px 7px',
+              fontFamily: 'var(--font-mono)', fontWeight: 700, lineHeight: 1.25,
+              fontSize: small ? '.6rem' : '.72rem',
+              display: 'flex', flexDirection: 'column', justifyContent: 'center',
+              boxShadow: '0 6px 18px rgba(0,0,0,.32)',
+            }}>
+              <div style={{ fontWeight: 800, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {activeSection.courseCode ?? activeSection.course_code} §{activeSection.sectionNumber ?? activeSection.section_number}
+              </div>
+              {activeGroup.length > 1 && (!dragSize || dragSize.height > 46) && (
+                <div style={{ fontSize: '.6rem', fontWeight: 600, opacity: .82 }}>+{activeGroup.length - 1} more move together</div>
+              )}
+            </div>
+          );
+        })()}
         {activeCourse && (
           <div style={{
             background: LEVEL_COLORS[activeCourse.academic_level]?.bg ?? '#e0f2fe',

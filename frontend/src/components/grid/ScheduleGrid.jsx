@@ -211,7 +211,7 @@ function layoutSectionsForDay(sections, longestFirst = false) {
   }));
 }
 
-export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete, viewMode = 'overview', uniformType = false }) {
+export default function ScheduleGrid({ onBlockClick, onOHClick, onOHDelete, onSectionDelete, viewMode = 'overview', uniformType = false, draggingGroupKey = null, dragGhosts = null }) {
   // NEW-FU-221 (Phase 95): UNIFORM typography is decoupled from the readable LAYOUT.
   // Cards render uniform fixed fonts when EITHER the layout is Readable OR the parent
   // marked this a uniform view (Instructor/Venue — no overlaps, overview layout). The
@@ -247,6 +247,16 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete,
     for (const day of DAYS) m[day] = officeHours.filter(o => o.day === day);
     return m;
   }, [officeHours]);
+
+  // NEW-FU-639 (issue #4): the dragged group's projected meetings, bucketed by day, so each
+  // DayColumn can render translucent ghost cards where its meetings will land (the whole group
+  // visibly moving together). `dragGhosts` is null except mid-drag.
+  const ghostsByDay = useMemo(() => {
+    const m = {};
+    const blocks = dragGhosts?.blocks ?? [];
+    for (const day of DAYS) m[day] = blocks.filter(g => g.day === day);
+    return m;
+  }, [dragGhosts]);
 
   const layoutsByDay = useMemo(() => {
     const m = {};
@@ -438,6 +448,7 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete,
               conflictMap={conflictMap}
               onBlockClick={onBlockClick}
               onOHClick={onOHClick}
+              onOHDelete={onOHDelete}
               onSectionDelete={onSectionDelete}
               pxPerMin={pxPerMin}
               pixelOffsetAt={pixelOffsetAt}
@@ -445,6 +456,13 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onSectionDelete,
               viewMode={viewMode}
               uniform={cardUniform}
               maxLanes={maxLanesPerDay[day]}
+              draggingGroupKey={draggingGroupKey}  /* NEW-FU-636 (issue #1) FIX: DayColumn is a separate
+                  module-level component — it must RECEIVE draggingGroupKey, or its SectionBlock render
+                  references an out-of-scope variable (ReferenceError that crashed the whole app). */
+              ghosts={ghostsByDay[day] ?? []}      /* NEW-FU-639 (issue #4): same threading rule — pass
+                  the day's projected ghost meetings (DayColumn is module-level, not a closure). */
+              ghostCode={dragGhosts?.code ?? ''}
+              ghostWidth={dragGhosts?.width ?? null}  /* NEW-FU-642 (issue #3): match the dragged card's width */
             />
           ))}
         </div>
@@ -463,7 +481,7 @@ const DROP_STEP = 15;
 // now handled by the card itself (sb-pintiny code-only fit, see useFitCard), not by
 // reserving column width. So the constant + its per-day min usages are gone.
 
-function DayColumn({ day, height, layouts, officeHours, conflictMap, onBlockClick, onOHClick, onSectionDelete, pxPerMin, pixelOffsetAt, tier, viewMode, uniform, maxLanes }) {
+function DayColumn({ day, height, layouts, officeHours, conflictMap, onBlockClick, onOHClick, onOHDelete, onSectionDelete, pxPerMin, pixelOffsetAt, tier, viewMode, uniform, maxLanes, draggingGroupKey = null, ghosts = [], ghostCode = '', ghostWidth = null }) {
   const dropZones = [];
   for (let m = DISPLAY_START; m < DISPLAY_END; m += DROP_STEP) dropZones.push(m);
 
@@ -501,7 +519,8 @@ function DayColumn({ day, height, layouts, officeHours, conflictMap, onBlockClic
         const h = pixelOffsetAt(toMinutes(end)) - top;
         return (
           <div key={oh.id ?? i} style={{ position:'absolute', top, left:2, right:2, height: Math.max(h, 20), zIndex:2 }}>
-            <OfficeHourBlock officeHour={oh} onClick={() => onOHClick && onOHClick(oh)} />
+            <OfficeHourBlock officeHour={oh} onClick={() => onOHClick && onOHClick(oh)}
+              onDelete={onOHDelete ? () => onOHDelete(oh) : undefined} />
           </div>
         );
       })}
@@ -543,8 +562,33 @@ function DayColumn({ day, height, layouts, officeHours, conflictMap, onBlockClic
               height={height}
               tier={tier}
               uniform={uniform}
+              /* NEW-FU-636 (issue #1): dim every meeting of the group being dragged. */
+              dimmedForDrag={!!draggingGroupKey
+                && `${sec.courseId ?? sec.course_id}|${sec.sectionNumber ?? sec.section_number}|${sec.gender ?? 'M'}` === draggingGroupKey}
             />
           </div>
+        );
+      })}
+
+      {/* NEW-FU-639 (issue #4): translucent ghost cards at the PROJECTED landing positions of the
+          dragged group's meetings on this day — so the user sees the whole section move together.
+          pointerEvents:none so the drop zones underneath still receive the drag; zIndex above cards. */}
+      {ghosts.map((g, i) => {
+        const gTop = pixelOffsetAt(g.startMin);
+        const gH   = pixelOffsetAt(g.endMin) - gTop;
+        return (
+          <div key={'ghost-' + i} className="sg-drag-ghost" style={{
+            // NEW-FU-642 (issue #3): match the dragged card's real width when known (so ghosts are
+            // the same size as the originals), capped to the column; else span the column.
+            position:'absolute', top: gTop, left: 2, height: Math.max(gH, 20), zIndex: 6,
+            ...(ghostWidth ? { width: ghostWidth, maxWidth: 'calc(100% - 4px)' } : { right: 2 }),
+            pointerEvents:'none', borderRadius: 6,
+            border:'2px dashed var(--teal-400, #2dd4bf)', background:'rgba(45,212,191,0.16)',
+            display:'flex', alignItems:'center', justifyContent:'center',
+            fontFamily:'var(--font-mono)', fontSize:'.62rem', fontWeight:700,
+            letterSpacing:'.03em', textTransform:'uppercase', color:'var(--teal-200, #99f6e4)',
+            boxShadow:'0 2px 10px rgba(0,0,0,.18)',
+          }}>{ghostCode || 'moves here'}</div>
         );
       })}
     </div>

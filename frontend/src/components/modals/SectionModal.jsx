@@ -199,7 +199,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     ? patternFromDays(
         sections
           .filter(s => (s.courseId ?? s.course_id) === (existing.courseId ?? existing.course_id)
-                    && (s.sectionNumber ?? s.section_number) === (existing.sectionNumber ?? existing.section_number))
+                    && (s.sectionNumber ?? s.section_number) === (existing.sectionNumber ?? existing.section_number)
+                    // NEW-FU-654: gender is part of the group identity — a gender-split section's
+                    // M and F groups can hold different day-patterns, so deriving the pattern from
+                    // BOTH (gender-blind) mislabels the selector/validation for the edited gender.
+                    && (s.gender ?? 'M') === (existing.gender ?? 'M'))
           .map(s => s.day)
       )
     : null;
@@ -514,6 +518,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       s.id !== existing.id &&
       (s.courseId      ?? s.course_id)      === existingCourseId &&
       (s.sectionNumber ?? s.section_number) === existingSecNum &&
+      (s.gender ?? 'M') === (existing.gender ?? 'M') &&   // NEW-FU-654: gender-scope (M/F §01 are distinct groups)
       s.day === form.day
     );
     let effectiveDay = form.day;
@@ -542,7 +547,8 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       const origEnd   = String(existing.endTime ?? existing.end_time ?? computeEnd()).slice(0, 5);
       const origDays  = sections
         .filter(s => (s.courseId ?? s.course_id) === existingCourseId
-                  && (s.sectionNumber ?? s.section_number) === existingSecNum)
+                  && (s.sectionNumber ?? s.section_number) === existingSecNum
+                  && (s.gender ?? 'M') === (existing.gender ?? 'M'))   // NEW-FU-654: gender-scope the restore set
         .map(s => s.day);
       const restoreDays = origDays.length ? origDays : [existing.day];
       try {
@@ -1638,11 +1644,12 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                         </button>
                         ))}
                     </div>
-                    {durationError
-                      ? <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>{durationError}</span></p>
-                      : <p className="sm-hint">
-                          {form.sectionType} {DURATION_LIMITS_BY_TYPE[form.sectionType].min}–{DURATION_LIMITS_BY_TYPE[form.sectionType].max} min
-                        </p>}
+                    {/* NEW-FU-648: dropped the "Lec 50–75 min" caption — redundant (the duration
+                        pills already list the only legal choices) and it misread as a continuous
+                        50–75 range when the options are discrete. Keep the error when one applies. */}
+                    {durationError && (
+                      <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>{durationError}</span></p>
+                    )}
                   </div>
                   <div className="sm-field">
                     <label>End time</label>

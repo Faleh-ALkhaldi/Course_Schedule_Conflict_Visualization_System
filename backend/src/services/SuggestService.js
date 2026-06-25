@@ -52,6 +52,34 @@ function timesOverlap(s1, e1, s2, e2) {
   return toMin(s1) < toMin(e2) && toMin(s2) < toMin(e1);
 }
 
+// NEW-FU-655: 'add' mode section renumbering. In add mode the term's existing
+// sections are KEPT (no wipe), so the generated sections — which the task-
+// builder always numbers from the bottom of each type range (Lec '01'.., Lab
+// '50'..) — would collide with already-scheduled sections of the same
+// (course, gender, type). This helper hands out the NEXT free number per group,
+// climbing from the highest existing number so each appended section is unique
+// under the UNIQUE key (schedule_id, course_id, section_number, day, gender)
+// and stays inside the type-scoped CHECK (Lec 01–49, Lab 50–99).
+//
+//   baseMap      Map "courseId|gender|sectionType" -> highest number used so far.
+//                Seed it with the MAX existing DB number per group (or omit a
+//                group to start it at the range floor). The helper MUTATES it,
+//                advancing the group's counter on each call so siblings of the
+//                same group keep climbing.
+//   returns      the next number as a zero-padded 2-digit string.
+//
+// Pure (no DB / no I/O) so it can be unit-tested directly.
+function nextAddModeSectionNumber(baseMap, courseId, gender, sectionType) {
+  const key = `${courseId}|${gender}|${sectionType}`;
+  // Lab numbers live in 50–99 → an empty group starts at 50 (floor 49 + 1);
+  // Lec numbers live in 01–49 → an empty group starts at 01 (floor 0 + 1).
+  const floor = sectionType === 'Lab' ? 49 : 0;
+  const base = baseMap.has(key) ? baseMap.get(key) : floor;
+  const next = base + 1;
+  baseMap.set(key, next);
+  return String(next).padStart(2, '0');
+}
+
 // NEW-FU-241: pattern-aware slot generator. resolvePattern() returns
 // a { dayCombos, duration } shape: an ARRAY of day-combos (so the
 // ONE_DAY_* synthetic patterns can expand to 5 single-day candidates
@@ -217,6 +245,9 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
         category:       task.category,
         numSections:    task.totalSections,
         sectionType:    task.sectionType,
+        // NEW-FU-649: carry gender so R-04/R-05 apply the Male/Female paired-section exemption —
+        // a Male and a Female section sharing a venue/time must NOT count as a clash here.
+        gender:         task.gender ?? 'M',
         venueType:      venue?.type ?? null,
         hasLab:         task.hasLab,
         // NEW-FU-392 (Phase 37): include credits so the R-15 detector
@@ -323,7 +354,10 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
     if (sec.sectionType !== 'Lec') continue;
     if (!sec.credits) continue;
     if (!sec.startTime || !sec.endTime) continue;
-    const key = `${sec.courseId}|${sec.sectionNumber}`;
+    // NEW-FU-651: gender is part of the section identity (see ScheduleService/QuickFix R-15) — a
+    // Male and a Female section of the same number must EACH meet the credit minutes. Without
+    // gender the two genders' minutes were summed and the dry-run under-counted R-15.
+    const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;
     let g = grp15.get(key);
     if (!g) {
       g = { totalMinutes: 0, credits: Number(sec.credits), hasLab: Boolean(sec.hasLab) };
@@ -356,6 +390,7 @@ function makeVirtualRows(task, slot, scheduleId, instructorId) {
     academicLevel: task.academicLevel,
     category:      task.category,
     numSections:   task.totalSections,
+    gender:        task.gender ?? 'M',   // NEW-FU-649: M/F exemption visibility for the placement probe
   }));
 }
 
@@ -487,7 +522,7 @@ function scoreCombo(task, slot, instructorId, working, ohMap) {
 // NEW-FU-260: imported for recommend() to synthesize sensible per-course
 // defaults from the rule table — same source of truth the modal uses for
 // its pattern catalog (FU-240).
-const { legalDurationsForCourse, legalDayTemplatesForCourse } = require('../domain/sectionPattern');
+const { legalPatternsForCourse, decomposeLegacyName } = require('../domain/sectionPattern');
 const { filterCoursesForTerm } = require('../domain/courseTermValidity');
 const { CourseRepository } = require('../repositories/repositories');
 const courseRepo = new CourseRepository();
@@ -538,9 +573,15 @@ class SuggestService {
     // this term per the curriculum rules (SWE 412 after 252, SWE 399 outside
     // Summer) so they never surface in the Suggest modal / recommendations for
     // an out-of-window term.
-    const allCoursesRaw = await courseRepo.findAll();
     const schedSemRow = await query(`SELECT semester FROM schedules WHERE id = $1`, [scheduleId]);
     const recTermCode = schedSemRow.rows[0]?.semester ?? null;
+    // NEW-FU-651: recommend on THIS TERM's own courses (owner_semester = term), not the global
+    // template catalog. The old `findAll()` (no arg) returned the inert TEMPLATE library (owner
+    // NULL) post-isolation — different ids than the term's per-term course copies — so the
+    // recommendations never matched the modal's term-scoped list and the pre-fill / live
+    // auto-choose silently no-op'd (every course fell back to hardcoded defaults). findAll(term)
+    // returns the term's own courses, including just-created section-less ones (FU-650).
+    const allCoursesRaw = recTermCode ? await courseRepo.findAll(recTermCode) : await courseRepo.findAll();
     const allCourses = filterCoursesForTerm(allCoursesRaw, recTermCode);
     if (allCourses.length === 0) {
       return { recommendations: [], capacityWarnings: [] };
@@ -700,14 +741,19 @@ class SuggestService {
     function pickBestPattern(course) {
       const credits = Number(course.credits);
       const hasLab = Boolean(course.has_lab);
-      const durations = legalDurationsForCourse({ credits, hasLab });
+      // NEW-FU-648: build candidates from legalPatternsForCourse — the strict OFFERING catalog
+      // (single source of truth, mirrored on the frontend Suggest modal) — so a 3-credit
+      // with-lab course is offered ONLY its 2×50 lecture (never 2×75) and Suggest can't
+      // recommend an option the modal won't render. The validator (legalDurationsForCourse /
+      // legalDayTemplatesForCourse) stays lenient so legacy 75-min with-lab lectures already
+      // in the data remain editable.
       const candidates = [];
-      for (const duration of durations) {
-        const templates = legalDayTemplatesForCourse({ credits, hasLab, duration });
-        for (const tpl of templates) {
-          const { score, pickedDay } = scoreCandidate(tpl);
-          candidates.push({ duration, dayPattern: tpl, day: pickedDay, score });
-        }
+      for (const pat of legalPatternsForCourse({ credits, hasLab })) {
+        const decomp = decomposeLegacyName(pat.value);
+        if (!decomp) continue;
+        const { template, duration } = decomp;
+        const { score, pickedDay } = scoreCandidate(template);
+        candidates.push({ duration, dayPattern: template, day: pickedDay, score });
       }
       if (candidates.length === 0) {
         return { duration: 50, dayPattern: 'STT', day: null, score: 0 };
@@ -949,6 +995,18 @@ class SuggestService {
       };
     }
 
+    // NEW-FU-655: apply MODE — 'replace' (default) vs 'add'. Declared here so
+    // the seed/placement phase below can treat ALL existing sections as
+    // immovable in 'add' mode (nothing is wiped), not just the unchecked-course
+    // ones. Any value other than the literal 'add' is treated as 'replace' so
+    // the pre-FU-655 wipe-then-insert behaviour is the default.
+    //   • 'replace' — affected courses' existing sections are wiped, then the
+    //                 generated sections are written (unchanged legacy path).
+    //   • 'add'     — existing sections are KEPT; generated sections are APPENDED
+    //                 and renumbered per (course, gender, type) so they don't
+    //                 collide with the UNIQUE key.
+    const addMode = options.mode === 'add';
+
     // NEW-FU-26: reject if ANY requested courseId is unknown. Previously the
     // unknown IDs were silently skipped — and if NO IDs resolved, the in-tx
     // wipe further down would still run, destroying the schedule's sections
@@ -1029,8 +1087,13 @@ class SuggestService {
     // instructor, and venue) so runOneAttempt can pre-seed working[]
     // and the load balancers. Skipped when applyToCourseIds is absent
     // (legacy "wipe all" path — no immovables to seed).
+    // NEW-FU-655: in 'add' mode NOTHING is wiped — every existing section
+    // (including the applied courses') survives and must be seeded as immovable
+    // so the appended sections are placed without clashing with them. So we load
+    // the existing sections whenever applyToCourseIds is set (the legacy
+    // immovable-others case) OR add mode is on (immovable-everything).
     let existingSectionsForSeed = [];
-    if (Array.isArray(options.applyToCourseIds)) {
+    if (Array.isArray(options.applyToCourseIds) || addMode) {
       const existingRes = await query(`
         SELECT
           s.id, s.schedule_id, s.course_id, s.instructor_id, s.venue_id,
@@ -1044,11 +1107,13 @@ class SuggestService {
       // Convert to the same shape working[] expects (the Section domain
       // attributes the conflict engine reads — courseId, sectionNumber,
       // day, startTime, endTime, instructorId, venueId, sectionType,
-      // courseCode, academicLevel). Skip courses in the apply set — the
-      // wipe is about to delete them anyway.
-      const applySet = new Set(options.applyToCourseIds);
+      // courseCode, academicLevel). In 'replace' mode, skip courses in the
+      // apply set — the wipe is about to delete them anyway. In 'add' mode keep
+      // them all (no wipe happens), so the appended sections route around the
+      // existing ones.
+      const applySet = new Set(options.applyToCourseIds ?? []);
       for (const row of existingRes.rows) {
-        if (applySet.has(row.course_id)) continue;
+        if (!addMode && applySet.has(row.course_id)) continue;
         existingSectionsForSeed.push({
           id:            row.id,
           scheduleId:    row.schedule_id,
@@ -1130,45 +1195,89 @@ class SuggestService {
       // NEW-FU-252: also thread cfg.day through to the resolver so
       // ONE_DAY templates can be pinned to a specific weekday when
       // the user picked one in the modal.
-      const patternInput = cfg.dayPattern
-        ? { dayPattern: cfg.dayPattern, duration: cfg.duration, day: cfg.day }
+      // NEW-FU-651 (bulletproof): SNAP the requested (dayPattern, duration) to a LEGAL pattern for
+      // this course's (credits × has-lab). A stale or foreign cfg — e.g. a 2-day 50-min lecture on
+      // a 3-credit NO-lab course (only 100 min/week) — would otherwise be generated and instantly
+      // fire R-15 (insufficient minutes). The suggester must NEVER emit a lecture short of its
+      // credit-mandated minutes, regardless of what the payload asked for. Prefer a legal pattern
+      // that keeps the requested duration; otherwise fall back to the course's first legal pattern.
+      let lecTemplate = cfg.dayPattern, lecDuration = Number(cfg.duration);
+      if (cfg.dayPattern) {
+        const legalPats = legalPatternsForCourse({ credits: info.credits, hasLab: info.hasLab })
+          .map(p => decomposeLegacyName(p.value)).filter(Boolean);   // [{ template, duration }]
+        const exact = legalPats.some(p => p.template === lecTemplate && p.duration === lecDuration);
+        if (!exact && legalPats.length) {
+          const chosen = legalPats.find(p => p.duration === lecDuration) ?? legalPats[0];
+          lecTemplate = chosen.template;
+          lecDuration = chosen.duration;
+        }
+      }
+      const patternInput = lecTemplate
+        ? { dayPattern: lecTemplate, duration: lecDuration, day: cfg.day }
         : cfg.pattern;
       const lecSlots = generateSlots(patternInput, info.category, info.courseCode);  // NEW-FU-628: R-06-aware
       // Keep a string representation for the task's `pattern` field so
       // downstream observability (logs / records) stays string-typed.
-      const patternStr = cfg.dayPattern
-        ? `${cfg.dayPattern}_${cfg.duration}`
+      const patternStr = lecTemplate
+        ? `${lecTemplate}_${lecDuration}`
         : cfg.pattern;
-      for (let sec = 1; sec <= cfg.sections; sec++) {
-        tasks.push({
-          ...info,
-          sectionType:    'Lec',
-          sectionNumber:  String(sec).padStart(2, '0'),         // '01'..'49'
-          totalSections:  cfg.sections,
-          pattern:        patternStr,
-          slots:          lecSlots,
-        });
-      }
-      // NEW-FU-111: spawn paired Lab tasks for has_lab=true courses.
-      // Lab numbering starts at 50 and runs upward in the same N range
-      // as the Lec sections (1 Lec → §01 + §50, 2 Lec → §01,§02 + §50,§51).
+      // NEW-FU-649: PER-GENDER section generation. cfg carries maleSections + femaleSections;
+      // legacy callers that send only `sections` are treated as all-Male (unchanged behaviour).
+      // Each gender gets its own lecture sections numbered 01.. WITHIN that gender — the sections
+      // UNIQUE key includes gender, so Male §01 and Female §01 legitimately coexist. Lab courses
+      // get GENDER-MATCHED labs: because a lab holds more students, one lab serves up to 3 lectures,
+      // so labs-per-gender = ceil(lectures/3) (min 1 when that gender has ≥1 lecture). The R-04/R-05
+      // gender exemption (threaded into the conflict rows below) lets a Male and Female section share
+      // a slot without a false clash, so the greedy still lands a conflict-free arrangement.
+      const hasSplit    = cfg.maleSections != null || cfg.femaleSections != null;
+      const maleCount   = hasSplit ? Math.max(0, Number(cfg.maleSections)   || 0) : Math.max(0, Number(cfg.sections) || 1);
+      const femaleCount = hasSplit ? Math.max(0, Number(cfg.femaleSections) || 0) : 0;
+      // NEW-FU-651: per-gender LAB counts — EXPLICIT when the modal sends maleLabSections /
+      // femaleLabSections, else auto-derived ceil(lectures/3) (one lab per up to 3 lectures).
+      const labCountFor = (lecCount, explicit) =>
+        explicit != null ? Math.max(0, Number(explicit) || 0)
+                         : (lecCount >= 1 ? Math.ceil(lecCount / 3) : 0);
+      const maleLabCount   = info.hasLab ? labCountFor(maleCount,   cfg.maleLabSections)   : 0;
+      const femaleLabCount = info.hasLab ? labCountFor(femaleCount, cfg.femaleLabSections) : 0;
+      // NEW-FU-651: R-14 invariant PER GENDER — a gender with ≥1 lecture must have ≥1 lab and vice
+      // versa (a Male lab never covers Female lectures, and vice versa). The modal blocks the Run
+      // proactively; this is the backstop so a direct API call can't generate a lec-without-lab
+      // (or lab-without-lec) R-14 conflict — it returns a precise 400 instead.
       if (info.hasLab) {
-        // NEW-FU-252: honor cfg.labDay (single weekday) and
-        // cfg.labDuration (50 / 75 / 160 min) when the modal sent them.
-        // Defaults preserved when fields are absent.
-        const labSlots = generateLabSlots(info.category, {
-          day: cfg.labDay,
-          duration: cfg.labDuration,
-        }, info.courseCode);  // NEW-FU-628: R-06-aware
-        for (let sec = 1; sec <= cfg.sections; sec++) {
+        for (const [g, lec, lab] of [['Male', maleCount, maleLabCount], ['Female', femaleCount, femaleLabCount]]) {
+          if (lec > 0 && lab === 0) { const e = new Error(`${info.courseCode}: ${lec} ${g} lecture section${lec > 1 ? 's' : ''} but no ${g} lab — add a ${g} lab section.`); e.status = 400; throw e; }
+          if (lab > 0 && lec === 0) { const e = new Error(`${info.courseCode}: a ${g} lab but no ${g} lecture — add a ${g} lecture section.`); e.status = 400; throw e; }
+        }
+      }
+      // NEW-FU-252: honor cfg.labDay + cfg.labDuration when the modal sent them.
+      const labSlots = info.hasLab
+        ? generateLabSlots(info.category, { day: cfg.labDay, duration: cfg.labDuration }, info.courseCode)  // NEW-FU-628: R-06-aware
+        : null;
+      for (const [gender, count, labCount] of [['M', maleCount, maleLabCount], ['F', femaleCount, femaleLabCount]]) {
+        for (let sec = 1; sec <= count; sec++) {
           tasks.push({
             ...info,
-            sectionType:    'Lab',
-            sectionNumber:  String(49 + sec).padStart(2, '0'),   // '50'..'99'
-            totalSections:  cfg.sections,
-            pattern:        'LAB',                                // synthetic pattern label
-            slots:          labSlots,
+            sectionType:    'Lec',
+            gender,
+            sectionNumber:  String(sec).padStart(2, '0'),         // '01'..'49' (per gender)
+            totalSections:  count,
+            pattern:        patternStr,
+            slots:          lecSlots,
           });
+        }
+        // Gender-matched labs (explicit count or auto-derived ceil(lectures/3)).
+        if (info.hasLab && labCount >= 1) {
+          for (let i = 1; i <= labCount; i++) {
+            tasks.push({
+              ...info,
+              sectionType:    'Lab',
+              gender,
+              sectionNumber:  String(49 + i).padStart(2, '0'),    // '50'..'99' (per gender)
+              totalSections:  labCount,
+              pattern:        'LAB',                                // synthetic pattern label
+              slots:          labSlots,
+            });
+          }
         }
       }
     }
@@ -1369,9 +1478,13 @@ class SuggestService {
       // applyToCourseIds — i.e., the immovable ones. We thread it in
       // via the closure rather than as an explicit param to keep the
       // runOneAttempt signature small.
-      if (applySetForSeed && existingSectionsForSeed.length > 0) {
+      // NEW-FU-655: in 'add' mode NOTHING is wiped, so EVERY existing section is
+      // immovable (existingSectionsForSeed already includes the applied courses'
+      // sections in add mode) — seed them all so appended sections route around
+      // them. The per-section skip below only applies in 'replace' mode.
+      if ((addMode || applySetForSeed) && existingSectionsForSeed.length > 0) {
         for (const sec of existingSectionsForSeed) {
-          if (applySetForSeed.has(sec.courseId)) continue; // movable — skip
+          if (!addMode && applySetForSeed.has(sec.courseId)) continue; // movable (replace) — skip
           // Treat as already-placed: feeds into the working[] set so
           // scoreCombo's conflict engine sees it, and bumps instrLoad /
           // venueLoad / slotUsage so the balancer knows about it.
@@ -1723,6 +1836,8 @@ class SuggestService {
     const applyToCourseIds = Array.isArray(options.applyToCourseIds)
       ? new Set(options.applyToCourseIds)
       : null;
+    // NEW-FU-655: `addMode` is declared once near Step 1 (used by the seed
+    // phase above) and reused here for the wipe/insert decisions.
 
     // ── Step 5: write to database (atomic: delete old + insert new) ───────
     // C-4: Both the delete and all inserts run in one transaction so a crash
@@ -1789,11 +1904,15 @@ class SuggestService {
             applyToCourseIds: [],
           });
         }
-        await client.query(
-          `DELETE FROM sections WHERE schedule_id = $1 AND course_id = ANY($2)`,
-          [scheduleId, [...applyToCourseIds]]
-        );
-      } else {
+        // NEW-FU-655: 'add' mode KEEPS the existing sections — skip the wipe and
+        // append the generated ones (renumbered below). 'replace' wipes first.
+        if (!addMode) {
+          await client.query(
+            `DELETE FROM sections WHERE schedule_id = $1 AND course_id = ANY($2)`,
+            [scheduleId, [...applyToCourseIds]]
+          );
+        }
+      } else if (!addMode) {
         await client.query(`DELETE FROM sections WHERE schedule_id = $1`, [scheduleId]);
       }
 
@@ -1846,9 +1965,54 @@ class SuggestService {
         }
       }
 
+      // NEW-FU-655: in 'add' mode the existing sections were NOT wiped, so the
+      // generated section numbers (Lec '01'.., Lab '50'..) would collide with
+      // any already-scheduled section of the same (course, gender, type). Build
+      // a per-(courseId|gender|type) base = the HIGHEST existing number in that
+      // type's range (Lec 01–49, Lab 50–99), so each new section is renumbered
+      // to existing-max + 1, existing-max + 2, … — preserving the UNIQUE key
+      // (schedule_id, course_id, section_number, day, gender) and the type-
+      // scoped CHECK. 'replace' mode skips this entirely (it wiped first, so the
+      // generator's natural 01.. / 50.. numbering is already collision-free).
+      const addModeBase = new Map(); // "courseId|gender|Lec|Lab" -> max existing number (int)
+      if (addMode) {
+        const courseIds = applyToCourseIds
+          ? [...applyToCourseIds]
+          : [...new Set(assignments.map(a => a.task.courseId))];
+        if (courseIds.length) {
+          const existing = await client.query(
+            `SELECT course_id, gender, section_type, MAX(section_number::int) AS max_num
+               FROM sections
+              WHERE schedule_id = $1 AND course_id = ANY($2)
+              GROUP BY course_id, gender, section_type`,
+            [scheduleId, courseIds]
+          );
+          for (const row of existing.rows) {
+            addModeBase.set(`${row.course_id}|${row.gender}|${row.section_type}`, Number(row.max_num) || 0);
+          }
+        }
+      }
+      // Memoize each task's renumbered value so its multiple per-day rows stay
+      // consistent and successive new sections of the same group keep climbing.
+      const addModeAssigned = new Map(); // task object -> renumbered section_number string
+
       for (const { task, slot, instructor, venue } of assignments) {
         // NEW-FU-262: skip tasks for courses not in the apply filter.
         if (applyToCourseIds && !applyToCourseIds.has(task.courseId)) continue;
+
+        // NEW-FU-655: compute the renumbered section_number for this task once
+        // (add mode only) and reuse it across all of its day rows.
+        let effectiveSectionNumber = task.sectionNumber;
+        if (addMode) {
+          if (addModeAssigned.has(task)) {
+            effectiveSectionNumber = addModeAssigned.get(task);
+          } else {
+            effectiveSectionNumber = nextAddModeSectionNumber(
+              addModeBase, task.courseId, task.gender ?? 'M', task.sectionType ?? 'Lec'
+            );
+            addModeAssigned.set(task, effectiveSectionNumber);
+          }
+        }
 
         for (const day of slot.days) {
           // NEW-FU-111: include section_type so the inserted rows satisfy
@@ -1860,16 +2024,17 @@ class SuggestService {
           await client.query(`
             INSERT INTO sections
               (schedule_id, course_id, instructor_id, venue_id,
-               section_number, day, start_time, end_time, section_type)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+               section_number, day, start_time, end_time, section_type, gender)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
           `, [
             scheduleId, task.courseId,
             // NEW-FU-425 (Phase 104 item 2): remap synthetic dummy ids → the real
             // rows just persisted; real ids pass through unchanged.
             instructor?.id ? (dummyIdMap.get(instructor.id) ?? instructor.id) : null,
             venue?.id ? (dummyIdMap.get(venue.id) ?? venue.id) : null,
-            task.sectionNumber, day, slot.startTime, slot.endTime,
+            effectiveSectionNumber, day, slot.startTime, slot.endTime,  // NEW-FU-655: add-mode renumbered
             task.sectionType ?? 'Lec',
+            task.gender ?? 'M',   // NEW-FU-649: persist the per-gender section
           ]);
         }
       }
@@ -2326,3 +2491,6 @@ module.exports = new SuggestService();
 // window (SWE 412 full-day vs. the strict UG/GR window). Not used by production callers.
 module.exports._generateSlots = generateSlots;
 module.exports._generateLabSlots = generateLabSlots;
+// NEW-FU-655: expose the pure 'add' mode section-renumbering helper so the
+// collision-avoidance numbering can be unit-tested without a live DB.
+module.exports._nextAddModeSectionNumber = nextAddModeSectionNumber;

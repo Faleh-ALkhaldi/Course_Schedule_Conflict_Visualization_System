@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import * as api from '../../api';
 import './TermPicker.css';
@@ -13,6 +13,13 @@ export function DeleteTermModal({ term, activeCode, onClose, onDeleted }) {
   const [typed, setTyped] = useState('');
   const [busy, setBusy]   = useState(false);
   const [error, setError] = useState(null);
+  const [hint, setHint]   = useState('');   // NEW-FU-656: transient "only English letters/numbers" hint
+  const hintTimer = useRef(null);
+  function flashHint(msg) {
+    setHint(msg);
+    if (hintTimer.current) clearTimeout(hintTimer.current);
+    hintTimer.current = setTimeout(() => setHint(''), 2500);
+  }
 
   const expected = `DELETE ${term.code}`;
   const ok = typed === expected;
@@ -67,10 +74,20 @@ export function DeleteTermModal({ term, activeCode, onClose, onDeleted }) {
               type="text"
               className="tp-modal-input"
               value={typed}
-              onChange={e => setTyped(e.target.value)}
+              onChange={e => {
+                // NEW-FU-656: the confirmation is "DELETE <code>" — accept ONLY English letters A–Z and
+                // digits 0–9 (plus the single space), auto-UPPERCASE so "delete 272" / "DELEte 272" matches,
+                // and never register anything else (Arabic letters, symbols, non-English numerals). Flash a
+                // hint when a disallowed char is dropped so the user knows why their keystroke didn't appear.
+                const upper   = e.target.value.toUpperCase();
+                const cleaned = upper.replace(/[^A-Z0-9 ]/g, '');
+                if (cleaned.length < upper.length) flashHint('Only English letters and numbers are allowed.');
+                setTyped(cleaned);
+              }}
               placeholder={expected}
               autoFocus
             />
+            {hint && <div className="tp-input-hint">{hint}</div>}
             {error && <div className="tp-error">{error}</div>}
             <div className="tp-modal-actions">
               <button type="button" className="tp-btn-secondary" onClick={onClose} disabled={busy}>Cancel</button>

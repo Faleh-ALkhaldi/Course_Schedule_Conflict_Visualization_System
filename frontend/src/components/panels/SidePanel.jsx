@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 // NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
 import Ico from '../shared/Icons.jsx';
 import { useDraggable } from '@dnd-kit/core';
@@ -11,9 +11,10 @@ import AddVenueModal      from '../modals/AddVenueModal.jsx';
 // text never crosses the ellipsis threshold. Wraps the same hook the
 // grid uses (SectionBlock).
 import { useFitText } from '../../hooks/useFitText.js';
-// NEW-FU-298 (Phase 60): content-aware rendering. Picks "KHALID\nALJASSER"
-// or "K. ALJASSER" etc. based on the sidebar row's measured width.
-import { useRenderStrategy } from '../../hooks/useRenderStrategy.js';
+// NEW-FU-633 (issue #4): removed the useRenderStrategy import — FilterName no longer
+// multi-line-wraps/shrinks names; sidebar names are single-line ellipsis now. (useFitText
+// is still used by DraggableCourse for course-card name fitting.)
+import OfficeHoursManagerModal from '../modals/OfficeHoursManagerModal.jsx'; // NEW-FU-637 (issue #5): dedicated OH subscreen
 import './SidePanel.css';
 
 const LEVEL_ORDER = ['Freshman','Sophomore','Junior','Senior','Graduate'];
@@ -30,14 +31,65 @@ const LEVEL_ORDER = ['Freshman','Sophomore','Junior','Senior','Graduate'];
 // ~2.8:1 on the light sidebar (#F4F5F6) — under WCAG AA for this 0.62rem label. --danger-* /
 // --warn-* are defined per-theme (light #b91c1c-on-#fee2e2, dark #fca5a5-on-#3a1a1a), so the
 // label stays accessible in BOTH modes.
+// NEW-FU-642 (issue #1b): every instructor-list flag now has a DISTINCT colour — no two share a
+// hue (the old 'no data' and 'no hours' were both rose). empty=rose, oh-only=amber, no-oh=violet.
+// (venue lives in the separate Venue list, never beside these, so its rose is unambiguous there.)
+// NEW-FU-643 (issue #3): measure rendered text width off-DOM via one shared canvas (cheap, exact).
+function measureTextWidth(text, font) {
+  const c = (measureTextWidth._c || (measureTextWidth._c = document.createElement('canvas')));
+  const ctx = c.getContext('2d');
+  ctx.font = font;
+  return ctx.measureText(text || '').width;
+}
+// Choose ONE font size at which the LONGEST instructor name fits the available name width, and use
+// it for ALL names (uniform). This guarantees every name — however long — renders fully on one line
+// without clipping or wrapping. Re-measures whenever the list resizes; a readable floor keeps it
+// from going tiny, and a small safety factor avoids a 1px clip. `listRef` is the instructor <ul>.
+function useUniformNameFont(names, listRef) {
+  const [fz, setFz] = useState(13);
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el || !names || !names.length) { setFz(13); return; }
+    const BASE = 13, FLOOR = 9, OVERHEAD = 112, SAFETY = 1.06;
+    // NEW-FU-644 (issue #1a): wrap the WHOLE measurement in try/catch. Last round a throw inside
+    // compute() (e.g. a canvas/getComputedStyle hiccup) left the size stuck at the 13px default —
+    // "the code was served" yet names still clipped. Now any failure falls back to BASE cleanly,
+    // and the success path actually shrinks. The widened Instructor/Venue panel (FU-644 #1b) means
+    // current names fit at BASE; this is the safety net for an extreme name.
+    const compute = () => {
+      try {
+        const family = getComputedStyle(el).fontFamily || 'sans-serif';
+        const font = `600 ${BASE}px ${family}`;
+        let longest = 0;
+        for (const n of names) { const w = measureTextWidth(n, font); if (w > longest) longest = w; }
+        if (!(longest > 0)) { setFz(BASE); return; }
+        // Available name width ≈ list width minus the per-row chrome (avatar + gaps + selected
+        // check + clock/× actions). A generous OVERHEAD makes the size only ever SMALLER.
+        const avail = Math.max(80, el.clientWidth - OVERHEAD);
+        let px = Math.min(BASE, (avail / (longest * SAFETY)) * BASE);
+        px = Math.max(FLOOR, px);
+        setFz(Math.round(px * 10) / 10);
+      } catch { setFz(BASE); }
+    };
+    compute();
+    let ro = null;
+    try { ro = new ResizeObserver(compute); ro.observe(el); } catch { /* no RO → keep the static fit */ }
+    return () => { if (ro) ro.disconnect(); };
+  }, [names, listRef]);
+  return fz;
+}
+
 const STATUS_FLAG_CFG = {
-  empty:     { tone: 'danger', icon: 'alert', label: 'no data',  title: 'No classes or office hours yet — click this instructor, then "+ Office Hours" below to add office hours.' },
+  empty:     { tone: 'danger', icon: 'info',  label: 'no data',  title: 'No classes or office hours yet — click this instructor, then "+ Office Hours" below to add office hours.' },
   'oh-only': { tone: 'warn',   icon: 'clock', label: 'no class', title: 'Has office hours but no classes — drag a course onto the grid to assign a class.' },
+  // NEW-FU-640 (issue #5): teaching but no office hours (the R-13 case).
+  'no-oh':   { tone: 'violet', icon: 'alert', label: 'no hours', title: 'Teaching but has no office hours — click the clock button to add at least one (every teaching instructor needs office hours).' },
   venue:     { tone: 'danger', icon: 'alert', label: 'no class', title: 'No classes assigned to this venue.' },
 };
 const STATUS_FLAG_TONE = {
   danger: { fg: 'var(--danger-fg)', bg: 'var(--danger-bg)' },
   warn:   { fg: 'var(--warn-fg)',   bg: 'var(--warn-bg)' },
+  violet: { fg: 'var(--violet-fg)', bg: 'var(--violet-bg)' },
 };
 function StatusFlag({ type }) {
   const cfg = type && STATUS_FLAG_CFG[type];
@@ -45,9 +97,12 @@ function StatusFlag({ type }) {
   const tone = STATUS_FLAG_TONE[cfg.tone];
   return (
     <span className="sp-status-flag" title={cfg.title}
-      style={{ display:'inline-flex', alignItems:'center', gap:3, marginLeft:6, padding:'1px 6px',
-        borderRadius:6, fontSize:'0.62rem', fontWeight:700, letterSpacing:'0.02em', whiteSpace:'nowrap',
-        color:tone.fg, background:tone.bg, border:`1px solid ${tone.fg}`, flexShrink:0 }}>
+      /* NEW-FU-633 (issue #4): compact inline pill — tighter padding/gap, fixed line-height
+         so it never adds row height or clips its 1em icon; flex-shrink:0 keeps it whole while
+         the name ellipsizes. */
+      style={{ display:'inline-flex', alignItems:'center', gap:2, marginLeft:4, padding:'0 5px',
+        borderRadius:5, fontSize:'0.6rem', fontWeight:700, lineHeight:1.55, letterSpacing:'0.01em',
+        whiteSpace:'nowrap', color:tone.fg, background:tone.bg, border:`1px solid ${tone.fg}`, flexShrink:0 }}>
       <Ico name={cfg.icon} /> {cfg.label}
     </span>
   );
@@ -90,14 +145,32 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
   // tells us, for THIS term, which instructors have ≥1 class, which venues have ≥1 class, and
   // which instructors have any office hours — so the user can triage the list WITHOUT opening
   // each one. instructorFlag(): 'empty' (no classes AND no office hours) | 'oh-only' (office
-  // hours but no classes) | null (has classes). venueFlag(): 'empty' (no classes) | null.
+  // hours but no classes) | 'no-oh' (teaching but no office hours) | null (fully set up).
+  // venueFlag(): 'venue' (no classes) | null.
   const instrWithClasses = React.useMemo(() => new Set(coverage?.instructorIdsWithClasses ?? []), [coverage]);
   const instrWithOH      = React.useMemo(() => new Set(coverage?.instructorIdsWithOfficeHours ?? []), [coverage]);
   const venueWithClasses = React.useMemo(() => new Set(coverage?.venueIdsWithClasses ?? []), [coverage]);
   // No flags until coverage has loaded (avoids a first-paint flash of "all empty").
-  const instructorFlag = (id) =>
-    !coverage ? null : (instrWithClasses.has(id) ? null : (instrWithOH.has(id) ? 'oh-only' : 'empty'));
+  // NEW-FU-640 (issue #5): a THIRD flag — an instructor who IS teaching but has NO office hours
+  // (the R-13 soft conflict). Previously a teaching instructor showed no flag at all, so this
+  // missing-OH state was invisible in the sidebar (only the conflicts panel surfaced it).
+  const instructorFlag = (id) => {
+    if (!coverage) return null;
+    const hasClass = instrWithClasses.has(id), hasOH = instrWithOH.has(id);
+    if (hasClass) return hasOH ? null : 'no-oh';      // teaching → flag ONLY if it has no office hours
+    return hasOH ? 'oh-only' : 'empty';               // not teaching → 'no class' / 'no data'
+  };
   const venueFlag = (id) => (!coverage ? null : (venueWithClasses.has(id) ? null : 'venue'));
+
+  // NEW-FU-643 (issue #3): one dynamic, uniform font size for ALL instructor names — sized so the
+  // LONGEST fits fully on one line at the current panel width. Sort once here so the same order
+  // feeds both the fit measurement and the render.
+  const instrListRef = useRef(null);
+  const sortedInstructors = useMemo(
+    () => [...instructors].sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' })),
+    [instructors]);
+  const instrNames = useMemo(() => sortedInstructors.map(i => i.name || ''), [sortedInstructors]);
+  const nameFontSize = useUniformNameFont(instrNames, instrListRef);
 
   const [collapsed, setCollapsed] = useState(false);
   const [openForm, setOpenForm] = useState(null); // 'section'|'instructor'|'venue'|'course'
@@ -161,102 +234,15 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
     }
   }
 
-  // ── Office Hours form (still inline — scoped to a selected instructor) ────
-  // NEW-FU-280 (Phase 56): instrForm + venueForm + courseForm + their
-  // handlers all moved into dedicated modal components
-  // (AddInstructorModal / AddVenueModal / AddCourseModal). The OH form
-  // stays inline because it only appears when a specific instructor is
-  // filtered — a narrow, contextual form, not a top-level "add entity"
-  // flow.
-  const [ohForm,    setOhForm]    = useState({ day:'Sunday', startTime:'10:00', endTime:'11:00' });
-  const [ohList,    setOhList]    = useState([]);
-  const [ohLoading, setOhLoading] = useState(false);
-
-  // Load office hours when an instructor is selected, AND re-sync whenever the
-  // grid's office-hour data changes. NEW-FU-566 (audit-2 P2-7): the sidebar list
-  // kept its OWN fetch keyed only on [filterId, view], so an OH edited or deleted
-  // through OfficeHourModal (opened from a grid block) refreshed the grid via
-  // loadView but left this list stale until the instructor was re-selected.
-  // Depending on `officeHours` (the context value loadView refreshes on every OH
-  // mutation) re-runs this fetch so the authoritative list stays in sync. The
-  // fetch only WRITES local ohList — it never dispatches officeHours — so there's
-  // no feedback loop.
-  React.useEffect(() => {
-    if (view === VIEWS.TEACHER && filterId) {
-      setOhLoading(true);
-      api.getInstructorOfficeHours(filterId)
-        .then(data => setOhList(Array.isArray(data) ? data : []))
-        .catch(() => setOhList([]))
-        .finally(() => setOhLoading(false));
-    } else {
-      setOhList([]);
-    }
-  }, [filterId, view, officeHours]);
-
-  // NEW-FU-617 (Batch 32): when an instructor is selected in Teacher view, scroll the Office
-  // Hours editor INTO VIEW. It renders below the (long, scrollable) instructor list, so on a
-  // click near the top it sat off-screen and users thought they couldn't add office hours at
-  // all. Bringing it into view makes the next step obvious. Only fires on a real selection.
-  const ohSectionRef = React.useRef(null);
-  React.useEffect(() => {
-    if (view === VIEWS.TEACHER && filterId && ohSectionRef.current) {
-      ohSectionRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-  }, [filterId, view]);
-
-  // NEW-FU-496 (Phase 120): office hours are 08:00–16:00. clampOH keeps the
-  // inputs inside the window (runtime prevention); handleAddOH checks the window
-  // FIRST (priority + named) then ordering, so the secretary is never left guessing.
-  const OH_MIN = '08:00', OH_MAX = '16:00';
-  const clampOH = v => !v ? v : (v < OH_MIN ? OH_MIN : v > OH_MAX ? OH_MAX : v);
-  const ohOutOfWindow = t => t && (t < OH_MIN || t > OH_MAX);
-
-  async function handleAddOH(e) {
-    e.preventDefault();
-    if (!filterId) return;
-    // NEW-FU-496 (Phase 120): window check first (names 8:00 AM–4:00 PM), then order.
-    if (ohOutOfWindow(ohForm.startTime) || ohOutOfWindow(ohForm.endTime)) {
-      setFormError('Office hours can only be between 8:00 AM and 4:00 PM.');
-      return;
-    }
-    if (ohForm.endTime <= ohForm.startTime) {
-      setFormError('End time must be after start time (office hours are 8:00 AM–4:00 PM).');
-      return;
-    }
-    setBusy(true); setFormError('');
-    try {
-      const oh = await api.addInstructorOfficeHour(filterId, ohForm);
-      setOhList(prev => [...prev, oh]);
-      setOhForm({ day:'Sunday', startTime:'10:00', endTime:'11:00' });
-      setOpenForm(null);
-      // Reload view to show new office hour block on grid
-      if (schedule) loadView(schedule.id, view, filterId);
-    } catch(err) {
-      setFormError(err.response?.data?.error || 'Failed to add office hour.');
-    } finally { setBusy(false); }
-  }
-
-  async function handleDeleteOH(ohId) {
-    if (!filterId) return;
-    // NEW-FU-45: confirm before deleting, matching the existing
-    // instructor / venue / course / section delete UX. A single click on
-    // the small "×" used to nuke an office hour with no undo.
-    const oh = ohList.find(o => o.id === ohId);
-    const label = oh
-      ? `${oh.day} ${(oh.start_time ?? oh.startTime ?? '').substring(0,5)}–${(oh.end_time ?? oh.endTime ?? '').substring(0,5)}`
-      : 'this office hour';
-    if (!await confirm({ title: `Delete the ${label} office hour?`, confirmLabel: 'Delete' })) return;
-    try {
-      await api.deleteInstructorOfficeHour(filterId, ohId);
-      setOhList(prev => prev.filter(o => o.id !== ohId));
-      if (schedule) loadView(schedule.id, view, filterId);
-    } catch (err) {
-      showToast && showToast(
-        err.response?.data?.error || 'Failed to delete office hours.',
-        'error',
-      );
-    }
-  }
+  // ── Office Hours (NEW-FU-637, issue #5) ──────────────────────────────────────
+  // Office-hour viewing/editing moved OUT of the sidebar into a dedicated subscreen
+  // (OfficeHoursManagerModal), opened by a per-instructor "Office Hours" button — a control
+  // DISTINCT from clicking the name. Clicking a name now only shows the schedule and no longer
+  // force-scrolls the sidebar (the old FU-617 scrollIntoView + the inline form/list are gone).
+  // The modal owns its own fetch/add/edit/delete, enforces the 08:00–16:00 window, the OH↔OH
+  // overlap guard, and the #2b OH↔class up-front confirmation, and is read-only when finalized/
+  // archived. `ohManagerFor` is the instructor currently being managed (null = closed).
+  const [ohManagerFor, setOhManagerFor] = useState(null);
 
   function selectFilter(id) {
     if (!schedule) return;
@@ -279,8 +265,10 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
   const hardCount = conflicts.filter(c => c.severity === 'Hard').length;
   const softCount = conflicts.filter(c => c.severity === 'Soft' && !c.confirmed).length;
 
+  // NEW-FU-644 (issue #1b): WIDER panel (sp-wide) in Instructor & Venue views — sparse,
+  // non-overlapping grids, so long instructor names get room; Course View keeps the narrow width.
   return (
-    <aside className={`sp-root${collapsed ? ' sp-collapsed' : ''}`}>
+    <aside className={`sp-root${collapsed ? ' sp-collapsed' : ''}${(view === VIEWS.TEACHER || view === VIEWS.VENUE) ? ' sp-wide' : ''}`}>
       <button
         className="sp-collapse-btn"
         onClick={() => setCollapsed(c => !c)}
@@ -581,13 +569,21 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
               showToast={showToast}
             />
           )}
+          {/* NEW-FU-637 (issue #5): dedicated office-hours subscreen for one instructor. */}
+          {ohManagerFor && (
+            <OfficeHoursManagerModal
+              instructor={ohManagerFor}
+              onClose={() => setOhManagerFor(null)}
+              showToast={showToast}
+            />
+          )}
 
-          <ul className="sp-list">
-            {/* NEW-FU-420 (Phase 104 item 6): always render alphabetically,
-                case-insensitively — a newly-added instructor is appended to
-                state, so sorting at render keeps the list ordered without a
-                re-fetch. */}
-            {[...instructors].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })).map(instr => (
+          {/* NEW-FU-643 (issue #3): ref + the computed uniform name font size, applied to every
+              .sp-filter-name via the --sp-name-fz variable so all names share one fitting size. */}
+          <ul className="sp-list" ref={instrListRef} style={{ '--sp-name-fz': `${nameFontSize}px` }}>
+            {/* NEW-FU-420 (Phase 104 item 6): always render alphabetically, case-insensitively —
+                a newly-added instructor is appended to state, so sorting keeps the list ordered. */}
+            {sortedInstructors.map(instr => (
               <li key={instr.id}>
                 <button
                   className={`sp-filter-item ${filterId===instr.id?'selected':''}`}
@@ -602,12 +598,33 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   {/* NEW-FU-421 (Phase 104 item 7): avatar = FIRST name's initial
                       (was .pop() → last name). */}
                   <span className={`sp-avatar${instr.is_dummy ? ' sp-avatar-dummy' : ''}`}>{((instr.name || '').trim().split(/\s+/)[0] || '?').charAt(0)}</span>
-                  <FilterName>{instr.name}</FilterName>
-                  {/* NEW-FU-425 (Phase 104 item 2): clearly label placeholder instructors. */}
-                  {instr.is_dummy && <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real instructor to replace it">dummy</span>}
-                  {/* NEW-FU-608 (Batch 30 item 1): triage flag — no classes (±office hours). */}
-                  <StatusFlag type={instructorFlag(instr.id)} />
+                  {/* NEW-FU-642 (issue #1a): name on its OWN line (always full, never clipped by a
+                      flag); the triage flag sits on a SECOND line below it — so a long name like
+                      "NUHA ABDULRAHMAN ALBADI" renders complete while the readable text flag stays
+                      visible and never steals the name's horizontal width. */}
+                  <span className="sp-filter-textcol">
+                    <span className="sp-filter-nameline">
+                      <FilterName>{instr.name}</FilterName>
+                      {/* NEW-FU-425 (Phase 104 item 2): clearly label placeholder instructors. */}
+                      {instr.is_dummy && <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real instructor to replace it">dummy</span>}
+                    </span>
+                    {/* NEW-FU-608 (Batch 30 item 1): triage flag — no classes / no office hours. */}
+                    <StatusFlag type={instructorFlag(instr.id)} />
+                  </span>
                   {filterId===instr.id && <span className="sp-check"><Ico name="check" /></span>}
+                </button>
+                {/* NEW-FU-637 (issue #5): distinct control to MANAGE office hours. Selects the
+                    instructor so the schedule + its sections load (for the #2b check), then opens
+                    the subscreen. NEW-FU-644 (issue #3): DISABLED on a finalized/archived term —
+                    no sub-screen opens when locked (only Unlock + Export are permitted). */}
+                {/* NEW-FU-641 (issue #1): the clock + × controls live in a FIXED, non-shrinking
+                    actions group so they can never be pushed off-frame by a long instructor name. */}
+                <span className="sp-filter-actions">
+                <button type="button" className="sp-oh-btn"
+                  title={isArchived ? lockedTitle : 'Manage office hours'}
+                  disabled={isArchived}
+                  onClick={() => { selectFilter(instr.id); setOhManagerFor(instr); }}>
+                  <Ico name="clock" />
                 </button>
                 <button className="sp-del-btn"
                   title={isArchived ? lockedTitle : 'Remove instructor'}
@@ -628,79 +645,13 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                       );
                     }
                   }}>×</button>
+                </span>
               </li>
             ))}
           </ul>
-
-          {/* Office Hours for selected instructor. NEW-FU-617 (Batch 32): ref so a selection
-              scrolls it into view; heading names WHOSE office hours these are (since the view
-              may have scrolled away from the instructor row). */}
-          {filterId && (
-            <div className="sp-oh-section" ref={ohSectionRef}>
-              <div className="sp-heading-row" style={{marginTop:10}}>
-                <span className="sp-heading">
-                  Office Hours{(() => { const n = instructors.find(i => i.id === filterId)?.name; return n ? ` — ${n}` : ''; })()}
-                </span>
-                <button className="sp-add-btn"
-                  onClick={()=>setOpenForm(openForm==='oh'?null:'oh')}
-                  disabled={isArchived}
-                  title={isArchived ? lockedTitle : 'Add office hour'}><Ico name="plus" /></button>
-              </div>
-
-              {openForm === 'oh' && (
-                <form className="sp-form" onSubmit={handleAddOH}>
-                  <select value={ohForm.day} onChange={e=>setOhForm(f=>({...f,day:e.target.value}))}>
-                    {DAYS.map(d=><option key={d} value={d}>{d}</option>)}
-                  </select>
-                  <div style={{display:'flex',gap:6}}>
-                    <input type="time" min={OH_MIN} max={OH_MAX} value={ohForm.startTime}
-                      onChange={e=>setOhForm(f=>({...f,startTime:clampOH(e.target.value)}))} required />
-                    <input type="time" min={OH_MIN} max={OH_MAX} value={ohForm.endTime}
-                      onChange={e=>setOhForm(f=>({...f,endTime:clampOH(e.target.value)}))} required />
-                  </div>
-                  {formError && <div className="sp-form-error">{formError}</div>}
-                  <div className="sp-form-actions">
-                    <button type="button" onClick={()=>setOpenForm(null)}>Cancel</button>
-                    <button type="submit" className="sp-submit" disabled={busy}>{busy?'…':'Add'}</button>
-                  </div>
-                </form>
-              )}
-
-              {/* NEW-FU-566 (audit-2 P2-7): only show the spinner on the FIRST
-                  load (empty list). Silent re-syncs of an already-populated list
-                  keep the rows visible instead of flashing "Loading…". */}
-              {ohLoading && ohList.length === 0 && <p className="sp-empty">Loading…</p>}
-              {/* NEW-FU-617 (Batch 32): empty state is a clear, clickable call-to-action that
-                  opens the add-office-hour form — so a user who selected an instructor with no
-                  office hours knows exactly what to do next (and can act in one click). */}
-              {!ohLoading && ohList.length === 0 && openForm !== 'oh' && (
-                <button type="button" className="sp-oh-empty-cta"
-                  onClick={() => !isArchived && setOpenForm('oh')}
-                  disabled={isArchived}
-                  title={isArchived ? lockedTitle : 'Add the first office hour for this instructor'}
-                  style={{ display:'flex', alignItems:'center', gap:6, width:'100%', marginTop:4,
-                    padding:'8px 10px', borderRadius:8, border:'1px dashed var(--teal-500, #14b8a6)',
-                    background:'transparent', color:'var(--teal-500, #14b8a6)', cursor: isArchived ? 'default':'pointer',
-                    fontSize:'0.78rem', textAlign:'left', opacity: isArchived ? 0.5 : 1 }}>
-                  <Ico name="plus" /> No office hours yet — click to add one
-                </button>
-              )}
-              <ul className="sp-list">
-                {ohList.map(oh => (
-                  <li key={oh.id} className="sp-oh-item">
-                    <span className="sp-oh-day">{oh.day}</span>
-                    <span className="sp-oh-time">
-                      {(oh.start_time??oh.startTime??'').substring(0,5)}–{(oh.end_time??oh.endTime??'').substring(0,5)}
-                    </span>
-                    <button className="sp-del-btn"
-                      title={isArchived ? lockedTitle : 'Remove office hour'}
-                      disabled={isArchived}
-                      onClick={()=>handleDeleteOH(oh.id)}>×</button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          {/* NEW-FU-637 (issue #5): the inline office-hours editor was removed from the sidebar.
+              Office hours are now managed via the per-instructor "Office Hours" button (above),
+              which opens the dedicated OfficeHoursManagerModal (rendered at the foot of this panel). */}
         </div>
       )}
 
@@ -755,13 +706,22 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                      : v.type === 'Multipurpose' ? 'MULTI'
                      : 'HALL'}
                   </span>
-                  <FilterName role="venue">{v.name}</FilterName>
-                  {/* NEW-FU-425 (Phase 104 item 2): clearly label placeholder venues. */}
-                  {v.is_dummy
-                    ? <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real venue to replace it">dummy</span>
-                    : <span className="sp-venue-cap">cap.{v.capacity}</span>}
-                  {/* NEW-FU-608 (Batch 30 item 1): triage flag — venue with no classes. */}
-                  <StatusFlag type={venueFlag(v.id)} />
+                  {/* NEW-FU-648: mirror the instructor row's two-line layout (FU-642) — venue name on
+                      its OWN line (never wrapped or squeezed by the cap + flag), with capacity and the
+                      triage flag on a second line below. Fixes the broken venue rows where long names
+                      like "04-001-A" wrapped to 2–3 lines and shoved the cap/flag out of place. */}
+                  <span className="sp-filter-textcol">
+                    <span className="sp-filter-nameline">
+                      <FilterName>{v.name}</FilterName>
+                      {/* NEW-FU-425 (Phase 104 item 2): clearly label placeholder venues. */}
+                      {v.is_dummy && <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real venue to replace it">dummy</span>}
+                    </span>
+                    <span className="sp-venue-metaline">
+                      {!v.is_dummy && <span className="sp-venue-cap">cap.{v.capacity}</span>}
+                      {/* NEW-FU-608 (Batch 30 item 1): triage flag — venue with no classes. */}
+                      <StatusFlag type={venueFlag(v.id)} />
+                    </span>
+                  </span>
                   {filterId===v.id && <span className="sp-check"><Ico name="check" /></span>}
                 </button>
                 <button className="sp-del-btn"
@@ -867,17 +827,11 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
 // row first picks its display string via the strategy ladder, then
 // useFitText sizes whatever was picked. `role` selects between the
 // instructor and venue pickers (different text structures).
-function FilterName({ children, role = 'instructor' }) {
-  const ref = React.useRef(null);
-  // NEW-FU-305 (Phase 63): floor lowered 6 → 4 px. The user's
-  // "never break a word" rule needs more shrink room for the
-  // rare long single names that overflow even a sidebar row.
-  const display = useRenderStrategy(children, ref, role);
-  useFitText(ref, { minPx: 4 });
-  return (
-    <span className="sp-filter-name" ref={ref}
-      style={{ whiteSpace: 'pre-line' }}>{display}</span>
-  );
+function FilterName({ children }) {
+  // NEW-FU-633 (issue #4): one-line ellipsis (driven by .sp-filter-name CSS). The prior
+  // useRenderStrategy + useFitText shrink-and-wrap (FU-298/305) produced multi-line,
+  // shrunk names; the full name + email now live in the parent row's title tooltip.
+  return <span className="sp-filter-name">{children}</span>;
 }
 
 // ── DraggableCourse ──────────────────────────────────────────────────────────

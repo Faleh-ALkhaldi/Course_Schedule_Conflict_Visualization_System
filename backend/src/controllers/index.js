@@ -18,6 +18,12 @@ const suggestSvc = require('../services/SuggestService');
 const sectionPattern = require('../domain/sectionPattern');
 const { filterCoursesForTerm, isCourseAllowedInTerm, disallowReason } = require('../domain/courseTermValidity');
 const { courseCodeError, courseNameError, courseFlagError, creditsFlagError, courseCodeLevelError, titleCaseCourseName } = require('../domain/courseFormat');
+// NEW-FU-661: instructor name + email format are now a shared domain module (single
+// source of truth) so the import-field validator enforces the SAME rules the API does.
+const { instructorNameError, emailError } = require('../domain/instructorFormat');
+// NEW-FU-662: pre-parse upload SAFETY gate (magic bytes, zip-bomb / macro / entry caps) +
+// a parse timeout, so a hostile file is stopped before any parser/transaction runs.
+const uploadSafety = require('../domain/uploadSafety');
 const { R06_TIME_EXEMPT_COURSES, TIME_WINDOWS, teachingWindowFor } = require('../config/constants'); // NEW-FU-497 (Phase 121); teachingWindowFor NEW-FU-621 (audit #2)
 const { ScheduleRepository, VenueRepository, CourseRepository } = require('../repositories/repositories');
 const InstructorRepository = require('../repositories/InstructorRepository');
@@ -448,6 +454,52 @@ const createSection = ah(async (req, res) => {
   res.status(201).json({ section, conflicts: conflictResult });
 });
 
+// NEW-FU-642 (issue #4): atomically restructure a section group to a new day-pattern + time.
+// Used by the cross-day-group drag ("Change Day Group"). Validates the new pattern/window the
+// same way createSection does, then reconciles the day-set in ONE transaction (keep shared days,
+// delete removed, insert added) so a pattern that shares a day with the old one no longer 409s
+// with a duplicate-section error (the create-then-delete ordering bug).
+const restructureSection = ah(async (req, res) => {
+  const { sectionId } = req.params;
+  const { days, startTime, endTime } = req.body;
+  if (!isUuid(sectionId)) return badRequest(res, 'sectionId must be a UUID.');
+  if (!Array.isArray(days) || days.length === 0) return badRequest(res, 'At least one day is required.');
+  for (const d of days) if (!isDay(d)) return badRequest(res, `Invalid day: "${d}".`);
+  if (!isTime(startTime) || !isTime(endTime)) return badRequest(res, 'startTime and endTime must be HH:MM.');
+  if (startTime >= endTime) return badRequest(res, 'endTime must be after startTime.');
+
+  // Load the section + its course metadata to validate the new pattern/window (same gates as create).
+  const secRow = (await query(
+    `SELECT s.section_type, s.gender, c.course_code, c.credits, c.has_lab, c.category, c.is_capstone, c.is_external
+     FROM sections s JOIN courses c ON c.id = s.course_id WHERE s.id = $1`, [sectionId])).rows[0];
+  if (!secRow) return res.status(404).json({ error: 'Section not found.' });
+
+  // R-06 teaching window (same source + exemptions as createSection).
+  if (!secRow.is_external && !R06_TIME_EXEMPT_COURSES.has(secRow.course_code)) {
+    const hm = t => { const [h, mn] = String(t).split(':').map(Number); return (h || 0) * 60 + (mn || 0); };
+    const win = TIME_WINDOWS[(secRow.category === 'GR' && !secRow.is_capstone) ? 'GR' : 'UG'];
+    if (hm(startTime) < win.start || hm(endTime) > win.end) {
+      const lbl = secRow.is_capstone ? '07:00–17:10 (Capstone)'
+                : secRow.category === 'GR' ? '17:20–22:00 (Graduate)' : '07:00–17:10 (Undergraduate)';
+      return badRequest(res, `${secRow.course_code} must be scheduled within ${lbl} (got ${startTime}–${endTime}).`);
+    }
+  }
+  // KFUPM pattern validator (credits × day-pattern × duration).
+  const patternCheck = sectionPattern.validateSectionPattern({
+    credits: Number(secRow.credits), hasLab: Boolean(secRow.has_lab),
+    sectionType: secRow.section_type, days, startTime, endTime,
+  });
+  if (!patternCheck.ok) return badRequest(res, patternCheck.error);
+
+  try {
+    const { section, conflictResult } = await schedSvc.restructureSectionGroup(sectionId, { days, startTime, endTime });
+    res.json({ section, conflicts: conflictResult });
+  } catch (err) {
+    if (err.status === 409) return res.status(409).json({ error: err.message });
+    throw err;
+  }
+});
+
 const updateSection = ah(async (req, res) => {
   const { sectionId } = req.params;
   const { instructorId, venueId, day, startTime, endTime, sectionNumber, sectionType, infoOnly } = req.body;
@@ -558,12 +610,19 @@ const updateSection = ah(async (req, res) => {
     // pattern so a legitimate UI edit never trips this — it's the root-cause backstop).
     {
       const grpRow = await query(
+        // NEW-FU-653: gender-SCOPE the group day-set. A section group's identity is
+        // (course, section_number, GENDER) — the per-gender feature (FU-649) gives Male §01 and
+        // Female §01 INDEPENDENT day-patterns (e.g. M = Sun/Tue, F = Tue/Thu). Without the gender
+        // filter this subquery unions BOTH genders' days (Sun+Tue+Thu), which is no legal pattern,
+        // so EVERY time-move of one gender's section was rejected with a bogus "isn't a valid
+        // pattern" 400. Scoping to s.gender validates only the moved group's own days.
         `SELECT c.credits, c.has_lab, s.section_type,
                 (SELECT array_agg(DISTINCT s2.day)
                    FROM sections s2
                   WHERE s2.schedule_id = s.schedule_id
                     AND s2.course_id = s.course_id
-                    AND s2.section_number = s.section_number) AS group_days
+                    AND s2.section_number = s.section_number
+                    AND s2.gender = s.gender) AS group_days
            FROM sections s JOIN courses c ON c.id = s.course_id WHERE s.id = $1`,
         [sectionId]
       );
@@ -770,8 +829,16 @@ const previewConflicts = ah(async (req, res) => {
   const fromMin = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
   const durMin = hm(endTime) - hm(startTime);
 
-  // Build the proposed group at a given start minute and return the conflicts that
-  // INVOLVE it, using the real engine over (others + proposed).
+  // NEW-FU-655: a move CREATES a conflict iff it's present WITH the proposed section but ABSENT from the
+  // baseline (everyone EXCEPT the moved group). The old "involves a proposed row id" filter silently MISSED
+  // conflicts whose deduped representative referenced a real (non-proposed) row — e.g. a gender-split section
+  // where R-02's repB picks the non-overlapping opposite-gender row (Female §01), so neither id was a proposed
+  // id, the R-02 slipped past, and NO confirm dialog appeared (the conflicting drag applied silently).
+  // Diffing against the baseline is representative-independent and catches every conflict the move creates.
+  const baseKeys = new Set(
+    engine.evaluateAll(others, ohMap).conflicts.map(c => `${c.ruleId}|${c.description}`)
+  );
+  // Build the proposed group at a given start minute and return the conflicts the move CREATES.
   const evalAt = (startMin) => {
     const proposed = days.map((day, i) => mk({
       id: `__preview__${i}`, schedule_id: scheduleId, course_id: courseId,
@@ -790,9 +857,8 @@ const previewConflicts = ah(async (req, res) => {
       // "§12" vs "§02") the grid never showed.
       gender: selfGender || 'M', is_external: course.is_external,
     }));
-    const ids = new Set(proposed.map(p => p.id));
     const result = engine.evaluateAll([...others, ...proposed], ohMap);
-    return result.conflicts.filter(c => ids.has(c.sectionAId) || ids.has(c.sectionBId));
+    return result.conflicts.filter(c => !baseKeys.has(`${c.ruleId}|${c.description}`));
   };
 
   // Conflicts for the EXACT proposed change.
@@ -1012,8 +1078,11 @@ const getConflicts = ah(async (req, res) => {
 });
 
 // ── Export ────────────────────────────────────────────────────────────────────
-const ALLOWED_EXPORT_FORMATS = new Set(['xlsx', 'pdf', 'docx']);
+const ALLOWED_EXPORT_FORMATS = new Set(['xlsx', 'pdf', 'docx', 'png']);   // NEW-FU-667: PNG now server-rendered (scoped + theme-independent)
 const ALLOWED_IMPORT_FORMATS = new Set(['xlsx', 'pdf', 'docx']);
+// NEW-FU-660: the three merge modes the scoped-import dialog can choose. Any other
+// value (or none) means the first "preview" call — merge-if-clean, else ask.
+const ALLOWED_MERGE_MODES = new Set(['entity-only', 'with-conflicts', 'conflict-free']);
 
 // Map a MIME type / extension to our internal format slug. Lets the user upload
 // a file without specifying ?format= and have the right parser picked.
@@ -1041,12 +1110,48 @@ const importSchedule = ah(async (req, res) => {
     });
   }
   try {
-    const result    = await exportSvc.importBuffer(req.file.buffer, req.params.scheduleId, format);
+    // NEW-FU-662: SAFETY gate FIRST — verify the file's real signature (magic bytes), reject
+    // a renamed/spoofed/polyglot file, and reject zip bombs / macro-bearing / over-large
+    // Office archives BEFORE any parser allocates memory. Then parse under a hard timeout so
+    // a pathological file can never wedge the request. (err.status flows to the catch below.)
+    uploadSafety.assertSafeUpload(req.file.buffer, format);
+
+    // NEW-FU-660: parse first so we can read the file's SCOPE and route accordingly:
+    //   • full (whole-term file)      → REPLACE the current term (keeps the CURRENT
+    //                                    term's name; the file's term code is ignored).
+    //   • instructor / venue (scoped) → MERGE that entity into the current term. A
+    //     clean merge commits immediately; a conflicting merge returns needsDecision so
+    //     the UI can offer the 3 options (?mode=entity-only|with-conflicts|conflict-free).
+    const parsed = await uploadSafety.withParseTimeout(exportSvc.parseRows(req.file.buffer, format));
+    const fileScope = (parsed && parsed.scope) || 'full';
+
+    if (fileScope === 'instructor' || fileScope === 'venue') {
+      const ScopedImport = require('../services/ScopedImportService');
+      const rawMode = (req.query.mode || '').toLowerCase();
+      const mode = ALLOWED_MERGE_MODES.has(rawMode) ? rawMode : undefined;
+      const result = await ScopedImport.mergeScopedImport(req.params.scheduleId, parsed, mode);
+      if (result.needsDecision) return res.json({ ...result, format });   // no DB change — UI shows the dialog
+      const conflicts = await schedSvc.revalidateSchedule(req.params.scheduleId);
+      return res.json({ ...result, format, conflicts });
+    }
+
+    // Whole-term file → the proven full-replace path.
+    const result    = await exportSvc.commitRows(
+      parsed.rows || [], req.params.scheduleId,
+      parsed.officeHours || [], parsed.instructors || [], parsed.venues || []);
     const conflicts = await schedSvc.revalidateSchedule(req.params.scheduleId);
     res.json({ ...result, format, conflicts });
   } catch (err) {
+    // Validation errors we raised on purpose carry a status + a user-facing message.
     if (err.status) return res.status(err.status).json({ error: err.message });
-    throw err;
+    // NEW-FU-659: anything else is an internal parser/library failure on an unreadable
+    // or non-schedule file (e.g. a corrupt PDF, a renamed file). NEVER surface its raw
+    // text — module paths, stack traces or "fake worker" noise leaked to the user
+    // before. Log it for us and return one clear, actionable message instead.
+    console.error('[import] could not read the uploaded file:', err);
+    return res.status(422).json({
+      error: `We couldn't read this ${format.toUpperCase()} file. Make sure it's an Excel (.xlsx), Word (.docx), or PDF schedule exported from this app, and that it hasn't been edited, then try again.`,
+    });
   }
 });
 
@@ -1069,8 +1174,19 @@ const exportSchedule = ah(async (req, res) => {
     scheduleId, filter, schedule.semester, format
   );
   res.setHeader('Content-Type', mime);
+  // NEW-FU-666: a clear, distinguishable filename for direct-API callers — the TERM CODE for a
+  // whole-term file, and the entity's NAME for an instructor ("instructor", not "teacher") or
+  // venue file, so multiple scoped files never collide. (The web UI sets its own a.download.)
   const safeSemester = exportSvc.safeFilenamePart(schedule.semester) || 'schedule';
-  res.setHeader('Content-Disposition', `attachment; filename="${safeSemester}-schedule.${ext}"`);
+  let fname = `${safeSemester}-schedule.${ext}`;
+  if (filter.type === 'instructor') {
+    const ins = await instrRepo.findById(filter.id);
+    fname = `${safeSemester}-instructor-${exportSvc.safeFilenamePart(ins?.name) || 'instructor'}-schedule.${ext}`;
+  } else if (filter.type === 'venue') {
+    const ven = await venueRepo.findById(filter.id);
+    fname = `${safeSemester}-venue-${exportSvc.safeFilenamePart(ven?.name) || 'venue'}-schedule.${ext}`;
+  }
+  res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
   if (workbook) {
     await workbook.xlsx.write(res);
     res.end();
@@ -1179,6 +1295,9 @@ const createCourse = ah(async (req, res) => {
     credits, academicLevel, category, numSections,
     hasLab,
     isCapstone, isExternal,
+    // NEW-FU-645 (per-term isolation): stamp the active term so a new course is this term's PRIVATE
+    // copy (parity with createInstructor/createVenue). Falls back to body.ownerSemester then null.
+    ownerSemester: req.activeTerm?.code || req.body.ownerSemester || null,
   });
   res.status(201).json(course);
 });
@@ -1340,25 +1459,15 @@ const getSuggestedOfficeHour = ah(async (_req, res) => { res.json(await suggeste
 // enforces the SAME English-charset + real-full-name rules createInstructor does — the
 // server-side backstop must not be bypassable via PUT. Returns an error message or null.
 // Solver "NEW INSTRUCTOR <n>" placeholders are exempt (minted programmatically).
-function instructorNameError(name) {
-  const trimmed = String(name ?? '').trim();
-  if (/^NEW INSTRUCTOR \d+$/i.test(trimmed)) return null;
-  if (!/^[A-Za-z\s'-]+$/.test(trimmed))
-    return 'name may contain only letters, spaces, hyphens and apostrophes.';
-  const parts = trimmed.split(/\s+/).filter(Boolean);
-  if (parts.length < 2 || !parts.every(p => /^[A-Za-z][A-Za-z'-]*$/.test(p)))
-    return 'Enter a full name — at least a first and last name (English letters only, separated by a space).';
-  return null;
-}
+// NEW-FU-661: instructorNameError moved to domain/instructorFormat.js (shared with the
+// import-field validator). Imported at the top of this file.
 
 const createInstructor = ah(async (req, res) => {
   const { name, email } = req.body;
   if (!name || !email)
     return badRequest(res, 'name and email are required.');
-  // NEW-M8: light-touch email validation. RFC-compliant validation is famously
-  // hard; this catches the worst typos and lets PG's unique check do the rest.
-  if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    return badRequest(res, 'email must look like name@host.tld.');
+  // NEW-M8: light-touch email validation (now via the shared emailError).
+  { const ee = emailError(email); if (ee) return badRequest(res, ee); }
   // NEW-FU-46: enforce DB VARCHAR limits before pg sees the value.
   if (!isBoundedString(name,  120)) return badLength(res, 'name',  120);
   if (!isBoundedString(email, 120)) return badLength(res, 'email', 120);
@@ -1418,8 +1527,7 @@ const updateInstructor = ah(async (req, res) => {
   const { name, email } = req.body;
   // NEW-M8: validate email format and uuid.
   if (!isUuid(req.params.instructorId)) return badRequest(res, 'instructorId must be a UUID.');
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
-    return badRequest(res, 'email must look like name@host.tld.');
+  if (email != null && email !== '') { const ee = emailError(email); if (ee) return badRequest(res, ee); }
   // NEW-FU-46: enforce DB VARCHAR limits when these fields are provided.
   if (name  != null && !isBoundedString(name,  120)) return badLength(res, 'name',  120);
   if (email != null && !isBoundedString(email, 120)) return badLength(res, 'email', 120);
@@ -1898,6 +2006,19 @@ const suggestSchedule = ah(async (req, res) => {
       // with parseInt() so the asymmetry is invisible at the storage layer.
       cfg.sections = n;
     }
+    // NEW-FU-649: per-gender section counts. Each is an optional whole number 0–10; their SUM
+    // must be 1–10 (at least one section; same cap as the legacy single count). When either is
+    // supplied the service uses the gender split; otherwise it falls back to `sections` (all-Male).
+    if (cfg.maleSections != null || cfg.femaleSections != null) {
+      const m = cfg.maleSections != null ? parseInt(cfg.maleSections, 10) : 0;
+      const f = cfg.femaleSections != null ? parseInt(cfg.femaleSections, 10) : 0;
+      if (!Number.isInteger(m) || m < 0 || m > 10 || !Number.isInteger(f) || f < 0 || f > 10)
+        return res.status(400).json({ error: 'Male/Female section counts must be whole numbers between 0 and 10.' });
+      if (m + f < 1 || m + f > 10)
+        return res.status(400).json({ error: 'Total sections (Male + Female) must be between 1 and 10.' });
+      cfg.maleSections = m;
+      cfg.femaleSections = f;
+    }
   }
   // NEW-FU-262: forward optional applyToCourseIds — when supplied,
   // only those courses' sections are wiped+replaced; others stay
@@ -1948,10 +2069,20 @@ const suggestSchedule = ah(async (req, res) => {
   // every section instead of dropping. Forwarded to both the relaxation and the
   // direct apply below.
   const { allowDummyResources } = req.body;
+  // NEW-FU-655: apply MODE — 'replace' (default) wipes the affected courses'
+  // existing sections then writes the generated ones (pre-FU-655 behaviour);
+  // 'add' KEEPS the existing sections and APPENDS the generated ones (renumbered
+  // so they don't collide). Default 'replace' preserves today's behaviour for
+  // every existing caller that omits `mode`.
+  const { mode } = req.body;
+  if (mode != null && mode !== 'replace' && mode !== 'add') {
+    return res.status(400).json({ error: "mode must be 'replace' or 'add'." });
+  }
   const opts = {
     applyToCourseIds: applyToCourseIds ?? undefined,
     maxConflictsPerSection: maxConflictsPerSection ?? undefined,
     allowDummyResources: allowDummyResources === true,
+    mode: mode === 'add' ? 'add' : 'replace',
   };
   if (relaxIfConflicts) {
     // NEW-FU-372 (Phase 36): suggestWithRelaxation now guarantees its
@@ -2048,7 +2179,8 @@ const quickFixApply = ah(async (req, res) => {
     'add-dummy-instructor', 'add-dummy-venue',
     // NEW-FU-561 (audit P1-8): QuickFixService emits this (Phase 109 / FU-460) but it
     // was never added here, so quickFixApply 400'd and aborted ANY plan containing it.
-    'assign-office-hours'];
+    'assign-office-hours',
+    'move-office-hour'];   // NEW-FU-635 (issue #3): relocate an office hour to fix an OH↔class overlap
   // These metadata ops act on a course or venue row, not a section, so they
   // carry courseId / venueId instead of sectionId.
   const COURSE_LEVEL_OPS = new Set(['mark-venue-exempt', 'untag-has-lab']);
@@ -2072,6 +2204,14 @@ const quickFixApply = ah(async (req, res) => {
     if (INSTRUCTOR_LEVEL_OPS.has(o.type)) {
       if (typeof o.instructorId !== 'string') return 'assign-office-hours op requires instructorId: string.';
       if (!o.officeHours || typeof o.officeHours !== 'object') return 'assign-office-hours op requires officeHours: object.';
+      return null;
+    }
+    // NEW-FU-635 (issue #3): move-office-hour is instructor-scoped + section-less; it carries
+    // the OH row id + the new time. Validate that shape before the section-scoped checks below.
+    if (o.type === 'move-office-hour') {
+      if (typeof o.instructorId !== 'string') return 'move-office-hour op requires instructorId: string.';
+      if (typeof o.officeHourId !== 'string') return 'move-office-hour op requires officeHourId: string.';
+      if (!isHHMM(o.toStart) || !isHHMM(o.toEnd)) return 'move-office-hour op requires toStart and toEnd as HH:MM strings.';
       return null;
     }
     if (typeof o.sectionId !== 'string') return 'op.sectionId must be a string.';
@@ -2114,7 +2254,7 @@ const quickFixApply = ah(async (req, res) => {
   // office_hours — all admin-only via their direct routes. This endpoint is scheduler-
   // accessible, so without this gate a non-admin could escalate via Quick Fix. Section-level
   // ops stay open to schedulers. Recurse into compound sub-ops so a global op can't hide.
-  const GLOBAL_OPS = new Set([...COURSE_LEVEL_OPS, ...VENUE_LEVEL_OPS, ...INSTRUCTOR_LEVEL_OPS]);
+  const GLOBAL_OPS = new Set([...COURSE_LEVEL_OPS, ...VENUE_LEVEL_OPS, ...INSTRUCTOR_LEVEL_OPS, 'move-office-hour']); // NEW-FU-635: move-OH mutates office_hours (global) → admin-gate it
   const hasGlobalOp = (o) => GLOBAL_OPS.has(o.type) || (o.type === 'compound' && (o.subOps || []).some(hasGlobalOp));
   if (ops.some(hasGlobalOp) && req.user?.role !== 'admin') {
     return res.status(403).json({ error: 'These fixes change shared course/venue/instructor data and require an admin.' });
@@ -2148,9 +2288,14 @@ const searchTerms = ah(async (req, res) => {
 });
 
 const createTerm = ah(async (req, res) => {
-  const { code, startsAt, endsAt } = req.body;
+  const { code, startsAt, endsAt, seedMode } = req.body;
   if (typeof code !== 'string') {
     return res.status(400).json({ error: 'code must be a string matching ^\\d{2}[123]$.' });
+  }
+  // NEW-FU-656: optional seed mode. 'copy' (default) seeds from the nearest same-season term;
+  // 'blank' creates an empty term. Reject anything else so the wire payload stays predictable.
+  if (seedMode !== undefined && seedMode !== 'copy' && seedMode !== 'blank') {
+    return res.status(400).json({ error: "seedMode must be 'copy' or 'blank'." });
   }
   // NEW-FU-232: startsAt/endsAt are optional. The service silently
   // ignores them when the code has a known override (override wins);
@@ -2165,7 +2310,7 @@ const createTerm = ah(async (req, res) => {
   try {
     const term = await termSvc.createTerm({
       code, createdBy: req.user?.id,
-      startsAt, endsAt,
+      startsAt, endsAt, seedMode,
     });
     res.status(201).json(term);
   } catch (e) {
@@ -2264,7 +2409,7 @@ module.exports = {
   login, logout,
   listSchedules, createSchedule,
   getScheduleCoverage,
-  getSections, createSection, updateSection, deleteSection, extendSection, previewConflicts,
+  getSections, createSection, updateSection, deleteSection, extendSection, restructureSection, previewConflicts,
   autoFixAround, autoFixAroundApply,
   quickFixPlan, quickFixApply,
   importSchedule, upload,

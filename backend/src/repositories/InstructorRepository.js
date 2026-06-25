@@ -13,14 +13,13 @@ class InstructorRepository {
       // this term (owner_semester) even if not yet assigned — so a just-created
       // instructor stays visible in its term before any section references it.
       const res = await query(
-        `SELECT DISTINCT i.id, i.name, i.email, i.is_dummy, i.created_at, i.updated_at
+        // NEW-FU-666: the term's OWN instructors only (mirrors the venue findAll fix). The old
+        // "assigned to a section OR owned by the term" pair would list an instructor twice if a
+        // section ever pointed at a non-term-owned copy of the same name; scoping strictly to
+        // owner_semester guarantees the term shows exactly its own instructors, once each.
+        `SELECT i.id, i.name, i.email, i.is_dummy, i.created_at, i.updated_at
          FROM instructors i
-         WHERE i.id IN (
-                 SELECT s.instructor_id FROM sections s
-                 JOIN schedules sc ON sc.id = s.schedule_id
-                 WHERE sc.semester = $1
-               )
-            OR i.owner_semester = $1
+         WHERE i.owner_semester = $1
          ORDER BY i.name`,
         [termCode]
       );
@@ -48,7 +47,7 @@ class InstructorRepository {
       `SELECT id, name, email, is_dummy, created_at, updated_at
        FROM instructors
        WHERE is_dummy = false
-         AND (owner_semester IS NULL OR owner_semester = $1)
+         AND owner_semester = $1   -- NEW-FU-645: per-term only; templates (NULL) are not assignable
        ORDER BY name`,
       [termCode]
     );

@@ -17,6 +17,9 @@ const EXPORT_FORMATS = [
   { id: 'png',  label: 'Image',  ext: '.png',  desc: 'Snapshot of the current view (rendered in browser).' },
 ];
 
+// NEW-FU-666: end-user venue-type labels for the picker (never the code-base "LectureHall").
+const VENUE_TYPE_LABEL = { LectureHall: 'Lecture Hall', Laboratory: 'Laboratory', Multipurpose: 'Multipurpose' };
+
 const IMPORT_FORMATS = [
   { id: 'xlsx', label: 'Excel', accept: '.xlsx' },
   { id: 'docx', label: 'Word',  accept: '.docx' },
@@ -35,7 +38,7 @@ function inferImportFormat(file) {
   return null;
 }
 
-export default function ExportModal({ onExport, onExportImage, onClose, showToast, initialTab = 'export' }) {
+export default function ExportModal({ onExport, onClose, showToast, initialTab = 'export' }) {
   useFocusTrap();
   // NEW-FU-35: Escape dismisses the modal, matching the established pattern
   // in SoftConflictModal / OfficeHourModal / GroupChangeModal.
@@ -58,6 +61,10 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
   const [venueId,  setVenueId]  = useState('');
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null);
+  // NEW-FU-660: when a scoped (instructor/venue) file would create conflicts, the
+  // backend returns { needsDecision } instead of merging; we stash it here to render
+  // the 3-option dialog. Picking an option re-imports the same staged file with a mode.
+  const [decision, setDecision] = useState(null);
   // NEW-H7: stage the picked file instead of uploading immediately. The user
   // must explicitly click "Import" — picking the wrong file no longer wipes
   // the schedule.
@@ -117,18 +124,10 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
     if (choice === 'teacher' && !instrId) return;
     if (choice === 'venue'   && !venueId) return;
 
-    // PNG renders in the browser by capturing the live grid DOM. The parent
-    // owns the actual ref (it's mounted in SchedulerPage), so we delegate.
-    if (format === 'png') {
-      if (typeof onExportImage !== 'function') {
-        showToast?.('Image export is not wired up.', 'error');
-        return;
-      }
-      onExportImage(view, fid);
-      onClose();
-      return;
-    }
-    // xlsx / pdf / docx all flow through the same backend endpoint.
+    // NEW-FU-667: PNG is now generated SERVER-SIDE — the same scoped, theme-independent grid the
+    // PDF renders, rasterized to an image — so it flows through the SAME backend endpoint as
+    // xlsx/docx/pdf. (It used to capture the live DOM via html2canvas, which gave the wrong scope
+    // and leaked the current theme/view.) A venue/instructor image now shows exactly that entity.
     onExport(view, fid, format);
     onClose();
   }
@@ -136,9 +135,13 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
   function handleFileChange(e) {
     setStagedFile(e.target.files?.[0] ?? null);
     setImportResult(null);
+    setDecision(null);
   }
 
-  async function handleImport() {
+  // NEW-FU-660: `mode` is undefined on the first ("preview") import; when the user
+  // picks an option in the conflict dialog it re-imports the SAME staged file with the
+  // chosen merge mode ('entity-only' | 'with-conflicts' | 'conflict-free').
+  async function handleImport(mode) {
     if (!stagedFile || !schedule) return;
     const inferred = inferImportFormat(stagedFile);
     if (inferred === 'image') {
@@ -149,21 +152,46 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
       showToast?.('Unsupported file type. Use .xlsx, .docx, or .pdf.', 'error');
       return;
     }
+    // NEW-FU-662: client-side size pre-check (defense in depth; the backend re-enforces the
+    // same 10 MB cap and never trusts this). Real exports are a few hundred KB at most.
+    if (stagedFile.size > 10 * 1024 * 1024) {
+      showToast?.('That file is too large (max 10 MB). A schedule export is only a few hundred KB.', 'error');
+      return;
+    }
     setImporting(true); setImportResult(null);
     try {
-      const result = await api.importSchedule(schedule.id, stagedFile, inferred);
+      const result = await api.importSchedule(schedule.id, stagedFile, inferred, mode);
+
+      // NEW-FU-660: a scoped file that would conflict comes back needing a decision —
+      // show the 3-option dialog instead of treating it as a finished import.
+      if (result.needsDecision) {
+        setDecision(result);
+        setImporting(false);
+        return;
+      }
+      setDecision(null);
       setImportResult(result);
       // Reload all reference data (courses, instructors, venues may have changed)
       await loadReference();
       dispatch({ type:'SET_CONFLICTS', conflicts: result.conflicts?.conflicts ?? [] });
       await loadView(schedule.id, view, filterId);
-      clearHistory?.();   // NEW-FU-549 (Batch 16): import replaces the schedule → reset undo history
-      const skippedMsg = result.skipped ? ` (${result.skipped} duplicate row(s) skipped)` : '';
-      const errMsg = result.errors?.length ? ` · ${result.errors.length} row(s) had errors` : '';
-      // Non-Excel imports are best-effort — surface a yellow warning toast when
-      // any rows were dropped so the user knows to verify.
-      const toastKind = (inferred !== 'xlsx' && result.errors?.length) ? 'warning' : 'success';
-      showToast && showToast(`✓ Imported ${result.created} section(s) from ${inferred.toUpperCase()}${skippedMsg}${errMsg}.`, toastKind);
+      clearHistory?.();   // NEW-FU-549 (Batch 16): import changed the schedule → reset undo history
+      // NEW-FU-660: tailor the toast to merge (scoped) vs replace (whole-term).
+      let summary;
+      if (result.scope === 'instructor' || result.scope === 'venue') {
+        if (result.mode === 'entity-only') summary = result.message || `Added ${result.entity}.`;
+        else {
+          const movedMsg  = result.moved ? ` · ${result.moved} moved to free slots` : '';
+          const confMsg   = result.newConflicts ? ` · ${result.newConflicts} conflict(s)` : '';
+          summary = `Merged ${result.entity}: ${result.created} section(s) added${movedMsg}${confMsg}.`;
+        }
+      } else {
+        const skippedMsg = result.skipped ? ` (${result.skipped} duplicate row(s) skipped)` : '';
+        const errMsg = result.errors?.length ? ` · ${result.errors.length} row(s) had errors` : '';
+        summary = `Imported ${result.created} section(s) from ${inferred.toUpperCase()}${skippedMsg}${errMsg}.`;
+      }
+      const toastKind = (result.errors?.length || result.newConflicts) ? 'warning' : 'success';
+      showToast && showToast('✓ ' + summary, toastKind);
       setStagedFile(null);
       if (fileRef.current) fileRef.current.value = '';
     } catch(err) {
@@ -172,6 +200,17 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
       showToast && showToast('Import failed: ' + msg, 'error');
     } finally { setImporting(false); }
   }
+
+  // NEW-FU-660: the three conflict-dialog options, worded per scope.
+  const decisionOptions = decision ? (decision.scope === 'venue' ? [
+    { mode:'entity-only',    title:'Add the venue only',            desc:'Just its capacity & type — no courses assigned.' },
+    { mode:'with-conflicts', title:'Add everything, keep conflicts', desc:'Add the venue, its courses & instructors, and proceed even with the conflicts.' },
+    { mode:'conflict-free',  title:'Add everything, conflict-free',  desc:'Add it all, but move conflicting classes to free times — nothing is dropped.' },
+  ] : [
+    { mode:'entity-only',    title:'Add the instructor only',        desc:'With their office hours — no courses assigned.' },
+    { mode:'with-conflicts', title:'Add everything, keep conflicts', desc:'Add the instructor, their courses & venues, and proceed even with the conflicts.' },
+    { mode:'conflict-free',  title:'Add everything, conflict-free',  desc:'Add it all, but move conflicting classes to free times — nothing is dropped.' },
+  ]) : [];
 
   // Pre-compute the inferred format of the staged file so we can render a
   // warning chip before the user clicks Import.
@@ -200,8 +239,8 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                     <input type="radio" name="exp" value="full"
                       checked={choice==='full'} onChange={()=>setChoice('full')} />
                     <div className="exp-label">
-                      <span className="exp-title"><Ico name="clipboard" /> Full Semester — Table</span>
-                      <span className="exp-desc">One row per section group. Importable format.</span>
+                      <span className="exp-title"><Ico name="clipboard" /> Whole-Term Schedule</span>
+                      <span className="exp-desc">The full term: week grid + every section + all instructors, venues & office hours. Re-importing replaces a term.</span>
                     </div>
                   </label>
 
@@ -209,8 +248,8 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                     <input type="radio" name="exp" value="teacher"
                       checked={choice==='teacher'} onChange={()=>setChoice('teacher')} />
                     <div className="exp-label">
-                      <span className="exp-title"><Ico name="user" /> Instructor View — Visual Grid</span>
-                      <span className="exp-desc">One instructor's schedule</span>
+                      <span className="exp-title"><Ico name="user" /> Instructor View</span>
+                      <span className="exp-desc">Only this instructor — their week, their sections, their office hours & rooms. Nothing else from the term.</span>
                     </div>
                   </label>
                   {choice==='teacher' && (
@@ -254,8 +293,8 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                     <input type="radio" name="exp" value="venue"
                       checked={choice==='venue'} onChange={()=>setChoice('venue')} />
                     <div className="exp-label">
-                      <span className="exp-title"><Ico name="pin" /> Venue View — Visual Grid</span>
-                      <span className="exp-desc">All sections assigned to a specific venue</span>
+                      <span className="exp-title"><Ico name="pin" /> Venue View</span>
+                      <span className="exp-desc">Only this venue — its week, its sections, its capacity & the instructors who use it. Nothing else from the term.</span>
                     </div>
                   </label>
                   {choice==='venue' && (
@@ -280,7 +319,7 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                           const hasClasses = venueHasClasses(v.id);
                           return (
                             <option key={v.id} value={v.id} disabled={!hasClasses}>
-                              {v.name} ({v.type}){hasClasses ? '' : ' · no classes'}
+                              {v.name} ({VENUE_TYPE_LABEL[v.type] ?? v.type}){hasClasses ? '' : ' · no classes'}
                             </option>
                           );
                         })}
@@ -356,16 +395,16 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                 color:'var(--text-secondary)', lineHeight:1.6, marginBottom:12
               }}>
                 <strong>Supported formats:</strong>{' '}
-                {IMPORT_FORMATS.map(f => `${f.label} (${f.accept})`).join(' · ')}
-                <br/>
-                Each file must contain a table with columns:<br/>
-                <code style={{fontSize:'.75rem',background:'var(--slate-100)',
-                  padding:'1px 5px',borderRadius:3,display:'inline-block',marginTop:4}}>
-                  Course Code, Course Name, Academic Level, Category, Credits, Section #, Days, Start Time, End Time, Duration (min), Instructor, Venue
-                </code><br/><br/>
-                <strong>Excel</strong> round-trips cleanly. <strong>Word</strong> imports parse the first table. <strong>PDF</strong> imports are best-effort — table extraction can lose rows when the layout is non-standard.<br/>
-                Images cannot be imported.<br/>
-                <strong style={{color:'var(--danger-fg)'}}>Heads up:</strong> import will <strong>replace all current sections</strong> in this schedule.
+                {IMPORT_FORMATS.map(f => `${f.label} (${f.accept})`).join(' · ')} — Excel, Word & PDF all round-trip losslessly.
+                <br/><br/>
+                The importer matches each file to how it was exported:
+                <ul style={{margin:'4px 0 0', paddingLeft:18}}>
+                  <li><strong>Whole-term file</strong> → <strong>replaces</strong> this term entirely (this term keeps its own name).</li>
+                  <li><strong>Instructor file</strong> → <strong>merges</strong> that instructor — its classes, rooms & office hours — into this term, keeping everything already here.</li>
+                  <li><strong>Venue file</strong> → <strong>merges</strong> that venue — its classes, capacity & the instructors who use it — into this term.</li>
+                </ul>
+                If a merge would clash with what's already scheduled, you'll be asked how to proceed (add anyway, find conflict-free times, or add the instructor/venue only).<br/>
+                Images cannot be imported.
               </div>
 
               <div className="sm-field">
@@ -421,10 +460,18 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                   border: `1px solid ${importResult.errors?.length ? 'var(--danger-fg)' : 'var(--success-fg)'}`,
                   borderRadius:8, padding:'10px 12px', fontSize:'.8rem',
                 }}>
-                  <div style={{fontWeight:600, marginBottom:4}}>
-                    <Ico name="check" /> {importResult.created} section(s) imported
-                    {importResult.skipped ? ` · ${importResult.skipped} duplicate(s) skipped` : ''}
-                    {importResult.errors?.length ? ` · ${importResult.errors.length} error(s)` : ''}
+                  {/* NEW-FU-661: the icon + header reflect the OUTCOME — a pure rejection
+                      (nothing imported, ≥1 error) shows an alert icon and "Import canceled",
+                      not a misleading check + "0 section(s) imported". Partial/clean imports
+                      keep the count summary. */}
+                  <div style={{fontWeight:600, marginBottom:4,
+                    color: importResult.errors?.length ? 'var(--danger-fg)' : 'inherit'}}>
+                    <Ico name={importResult.errors?.length ? 'alert' : 'check'} />{' '}
+                    {importResult.created === 0 && importResult.errors?.length
+                      ? "Couldn't import this file"
+                      : <>{importResult.created} section(s) imported
+                          {importResult.skipped ? ` · ${importResult.skipped} duplicate(s) skipped` : ''}
+                          {importResult.errors?.length ? ` · ${importResult.errors.length} error(s)` : ''}</>}
                   </div>
                   {importResult.errors?.map((e,i) => (
                     <div key={i} style={{color:'var(--danger-fg)',fontSize:'.75rem'}}>{e}</div>
@@ -432,12 +479,54 @@ export default function ExportModal({ onExport, onExportImage, onClose, showToas
                 </div>
               )}
 
+              {/* NEW-FU-660: scoped-merge conflict dialog. Merging this instructor/venue
+                  would clash with what's already scheduled — let the user choose how. */}
+              {decision && !importing && (
+                <div style={{
+                  background:'var(--warn-bg)', border:'1px solid var(--warn-fg)',
+                  borderRadius:8, padding:'12px 14px', marginTop:12,
+                }}>
+                  <div style={{fontWeight:700, fontSize:'.86rem', color:'var(--warn-fg)', marginBottom:4}}>
+                    Merging {decision.scope} “{decision.entity}” causes {decision.conflictCount} conflict(s)
+                  </div>
+                  <div style={{fontSize:'.76rem', color:'var(--text-secondary)', marginBottom:10}}>
+                    {decision.courseCount} class group(s) in this file. Choose how to add it:
+                    {decision.conflictSummaries?.length ? (
+                      <ul style={{margin:'4px 0 0', paddingLeft:18}}>
+                        {decision.conflictSummaries.map((s,i)=>(
+                          <li key={i} style={{fontSize:'.72rem'}}>{s}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                  <div style={{display:'flex', flexDirection:'column', gap:8}}>
+                    {decisionOptions.map(opt => (
+                      <button
+                        key={opt.mode}
+                        type="button"
+                        onClick={() => handleImport(opt.mode)}
+                        style={{
+                          textAlign:'left', padding:'9px 12px', borderRadius:8, cursor:'pointer',
+                          background:'var(--bg-elevated)', border:'1.5px solid var(--slate-200)',
+                          display:'flex', flexDirection:'column', gap:2,
+                        }}
+                      >
+                        <span style={{fontWeight:600, fontSize:'.82rem', color:'var(--fg)'}}>{opt.title}</span>
+                        <span style={{fontSize:'.72rem', color:'var(--slate-500)'}}>{opt.desc}</span>
+                      </button>
+                    ))}
+                    <button type="button" className="sm-btn-cancel" style={{alignSelf:'flex-start', marginTop:2}}
+                      onClick={() => setDecision(null)}>Cancel merge</button>
+                  </div>
+                </div>
+              )}
+
               <div className="sm-actions" style={{marginTop:12}}>
                 <button className="sm-btn-cancel" onClick={onClose}>Close</button>
                 <button
                   className="sm-btn-save"
-                  onClick={handleImport}
-                  disabled={!stagedFile || importing || stagedFormat === 'image' || stagedFormat === null}
+                  onClick={() => handleImport()}
+                  disabled={!stagedFile || importing || stagedFormat === 'image' || stagedFormat === null || !!decision}
                   style={(!stagedFile || stagedFormat === 'image' || stagedFormat === null)
                     ? { background:'var(--slate-200)', borderColor:'var(--slate-200)', color:'var(--slate-500)' }
                     : undefined}

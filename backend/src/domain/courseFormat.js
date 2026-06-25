@@ -58,12 +58,16 @@ const COURSE_NAME_RE = new RegExp(`^(?!.*(.)\\1{3})(?=.*[A-Za-z]{2})[A-Za-z][${C
 function courseNameError(name) {
   const n = String(name ?? '').trim();
   if (n.length < 3) return 'Course name must be at least 3 characters.';
-  if (!/\s/.test(n)) return 'Course name needs at least two words (e.g. "Software Architecture").';
+  // NEW-FU-662: bound the length BEFORE the regex below. The DB column is VARCHAR(120), and
+  // COURSE_NAME_RE's negative lookahead (`(?!.*(.)\1{3})`) is O(n²) on a long no-repeat string —
+  // capping here both matches the DB limit and removes any ReDoS exposure on crafted input.
+  if (n.length > 120) return 'Course name is too long (max 120 characters).';
+  if (!/\s/.test(n)) return 'Course name needs at least two words (for example, “Software Architecture”).';
   if (!COURSE_NAME_RE.test(n))
-    // NEW-FU-561 (audit P3): COURSE_NAME_RE also rejects gibberish (a char repeated 4+
-    // times) and names with no real 2-letter word — the old "no symbols/other scripts"
-    // message mis-described those valid-charset failures. Cover all of its conditions.
-    return 'Course name must be a real English title (letters, digits, spaces, basic punctuation) — no symbols, other scripts, gibberish, or a character repeated 4+ times.';
+    // NEW-FU-659: plain-language wording (the old message used jargon — "real English
+    // title", "other scripts", "a character repeated 4+ times"). The regex still enforces
+    // the same charset + anti-gibberish rules; only the user-facing text changed.
+    return 'Course name should use only English letters, numbers, spaces, and basic punctuation (for example, “Software Engineering”).';
   return null;
 }
 function isValidCourseName(name) { return courseNameError(name) === null; }

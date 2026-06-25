@@ -649,6 +649,37 @@
   color: var(--text-muted);
   font-style: italic;
 }
+/* NEW-FU-656: transient "disallowed character" hint shown under a term-modal input when a keystroke is
+   blocked (so the user understands why their input didn't register). Amber = informational, not an error. */
+.tp-input-hint {
+  margin: 6px 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--amber-700, #b45309);
+}
+/* NEW-FU-656: Add-term seed-mode segmented toggle — Copy (seed from same-season term) vs Start blank. */
+.tp-seed-toggle {
+  display: inline-flex;
+  gap: 6px;
+  margin: 2px 0;
+}
+.tp-seed-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong, var(--slate-400));
+  background: var(--bg-app);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.tp-seed-btn:hover { color: var(--text-primary); }
+.tp-seed-btn-on {
+  background: var(--teal-600, #0f766e);
+  border-color: var(--teal-600, #0f766e);
+  color: #fff;
+}
 .tp-preview {
   margin: 12px 0;
   padding: 12px 14px;

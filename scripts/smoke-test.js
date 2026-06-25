@@ -76,6 +76,36 @@ async function loginUi(page, creds) {
   await page.waitForTimeout(800);
 }
 
+// NEW: the delete/OH smoke tests assert a mutation affordance is reachable but blocked by ROLE
+// ("Insufficient permissions."). That requires an EDITABLE (Draft) active term — a FINALIZED
+// term locks every delete affordance entirely (the button is disabled, so the click can never
+// land). The default/last-active term may be finalized (e.g. a term the user locked), so after
+// logging in we explicitly switch to the first populated Draft term. Returns its code so callers
+// can scope per-term lookups (per-term isolation means an instructor/venue belongs to ONE term).
+async function gotoEditableTerm(page) {
+  // Bucket this admin login under its own IP so it doesn't drain the shared "unknown" login
+  // rate-limit bucket (maxUnknown is small) and 429 a later test.
+  const token = (await api('POST', '/auth/login', null, ADMIN, nextTestIp())).token;
+  const terms = await api('GET', '/terms', token);
+  const draft = (terms || []).find(t => t.status === 'Draft' && !t.isArchived && (t.sectionCount || 0) > 0);
+  if (!draft) throw new Error('smoke setup: no editable (Draft, populated) term available');
+  await page.goto(`${APP_URL}/?term=${encodeURIComponent(draft.code)}`, { waitUntil: 'networkidle' });
+  await page.waitForSelector('.sg-root', { timeout: 15000 });
+  await page.waitForTimeout(500);
+  return draft.code;
+}
+
+// A destructive delete now opens a custom confirm modal (.modal-overlay, with a danger "Delete"
+// button) before the request fires — it used to be a native confirm() the suite dismissed via
+// page.on('dialog'). Click through it when present; tolerate deletes that don't confirm.
+async function confirmDeleteModal(page) {
+  const del = page.locator('.modal-overlay .decision-btn.danger');
+  try {
+    await del.first().waitFor({ state: 'visible', timeout: 3000 });
+    await del.first().click();
+  } catch { /* no confirm modal for this delete — nothing to dismiss */ }
+}
+
 async function expectToast(page, expectedText, timeout = 5000) {
   await page.waitForSelector('.toast.toast-error', { timeout });
   const text = (await page.locator('.toast').first().textContent() || '').trim();
@@ -89,7 +119,14 @@ async function expectToast(page, expectedText, timeout = 5000) {
 async function testOhModalRenders(ctx) {
   // Find an instructor that actually has at least one office hour via API.
   const adminToken = (await api('POST', '/auth/login', null, ADMIN)).token;
-  const instructors = await api('GET', '/instructors', adminToken);
+
+  const page = await ctx.newPage();
+  await loginUi(page, SCHEDULER);
+  // Editable term → clicking an OH block opens the editable modal (a finalized term gates it).
+  const code = await gotoEditableTerm(page);
+
+  // Per-term isolation: pick an instructor IN this term that has office hours.
+  const instructors = await api('GET', `/instructors?term=${encodeURIComponent(code)}`, adminToken);
   let target = null;
   for (const ins of instructors) {
     const oh = await api('GET', `/instructors/${ins.id}/office-hours`, adminToken);
@@ -103,8 +140,6 @@ async function testOhModalRenders(ctx) {
     target = instructors[0];
   }
 
-  const page = await ctx.newPage();
-  await loginUi(page, SCHEDULER);
   await page.locator('button.topbar-tab:has-text("Instructor View")').click();
   await page.waitForTimeout(500);
 
@@ -130,10 +165,12 @@ async function testCourseDeleteToast(ctx) {
   const page = await ctx.newPage();
   page.on('dialog', d => d.accept().catch(() => {}));
   await loginUi(page, SCHEDULER);
+  await gotoEditableTerm(page);   // editable term → the delete affordance is reachable (then role-blocked)
   await page.waitForSelector('.sp-course-card', { timeout: 8000 });
   const before = await page.locator('.sp-course-card').count();
 
   await page.locator('.sp-course-card .sp-del-btn').first().click();
+  await confirmDeleteModal(page);
   const txt = await expectToast(page, 'Insufficient permissions.');
 
   const after = await page.locator('.sp-course-card').count();
@@ -149,6 +186,7 @@ async function testInstructorDeleteToast(ctx) {
   const page = await ctx.newPage();
   page.on('dialog', d => d.accept().catch(() => {}));
   await loginUi(page, SCHEDULER);
+  await gotoEditableTerm(page);   // editable term → the delete affordance is reachable (then role-blocked)
   await page.locator('button.topbar-tab:has-text("Instructor View")').click();
   await page.waitForSelector('.sp-filter-item', { timeout: 8000 });
   await page.waitForTimeout(400);
@@ -157,6 +195,7 @@ async function testInstructorDeleteToast(ctx) {
   // The first × button inside the instructor list.
   await page.locator('.sp-section:has(.sp-heading:has-text("Instructors")) .sp-del-btn')
     .first().click();
+  await confirmDeleteModal(page);
   const txt = await expectToast(page, 'Insufficient permissions.');
 
   const after = await page.locator('.sp-filter-item').count();
@@ -174,7 +213,15 @@ async function testInstructorDeleteToast(ctx) {
 // silently swallowing the error.
 async function testOhDeleteToast(ctx) {
   const adminToken = (await api('POST', '/auth/login', null, ADMIN)).token;
-  const instructors = await api('GET', '/instructors', adminToken);
+
+  const page = await ctx.newPage();
+  page.on('dialog', d => d.accept().catch(() => {}));
+  await loginUi(page, SCHEDULER);
+  const code = await gotoEditableTerm(page);   // editable term → the OH delete affordance is reachable
+
+  // Per-term isolation: pick an instructor IN this term that has office hours (a global
+  // /instructors pick could land on an instructor that belongs to a different term).
+  const instructors = await api('GET', `/instructors?term=${encodeURIComponent(code)}`, adminToken);
   let target = null;
   for (const ins of instructors) {
     const oh = await api('GET', `/instructors/${ins.id}/office-hours`, adminToken);
@@ -187,18 +234,20 @@ async function testOhDeleteToast(ctx) {
     target = instructors[0];
   }
 
-  const page = await ctx.newPage();
-  page.on('dialog', d => d.accept().catch(() => {}));
-  await loginUi(page, SCHEDULER);
   await page.locator('button.topbar-tab:has-text("Instructor View")').click();
   await page.waitForTimeout(400);
 
+  // NEW-FU-637: office hours are managed in a dedicated modal — no longer inline sidebar items.
+  // Select the instructor, then open their manager via the "Manage office hours" button
+  // (.sp-oh-btn appears for the selected instructor).
+  const OHM = '.sm-card[aria-label="Office hours manager"]';
   await page
     .locator(`.sp-filter-item:has(.sp-filter-name:has-text("${target.name}"))`)
     .first().click();
-  await page.waitForSelector('.sp-oh-item', { timeout: 8000 });
   await page.waitForTimeout(300);
-  const before = await page.locator('.sp-oh-item').count();
+  await page.locator('.sp-oh-btn').first().click();
+  await page.waitForSelector(`${OHM} .sm-btn-delete`, { timeout: 8000 });
+  const before = await page.locator(`${OHM} .sm-btn-delete`).count();
 
   // Intercept the OH DELETE and force a 500 — verifies the error handler
   // surfaces a toast (and protects the real DB from this destructive test).
@@ -214,10 +263,11 @@ async function testOhDeleteToast(ctx) {
     }
   });
 
-  await page.locator('.sp-oh-item .sp-del-btn').first().click();
+  await page.locator(`${OHM} .sm-btn-delete`).first().click();
+  await confirmDeleteModal(page);   // the modal's delete opens a confirm dialog too (FU-638)
   const txt = await expectToast(page, 'Simulated server error.');
 
-  const after = await page.locator('.sp-oh-item').count();
+  const after = await page.locator(`${OHM} .sm-btn-delete`).count();
   if (after !== before) {
     throw new Error(`OH count changed: ${before} → ${after} (delete should have failed)`);
   }
@@ -230,12 +280,14 @@ async function testVenueDeleteToast(ctx) {
   const page = await ctx.newPage();
   page.on('dialog', d => d.accept().catch(() => {}));
   await loginUi(page, SCHEDULER);
+  await gotoEditableTerm(page);   // editable term → the delete affordance is reachable (then role-blocked)
   await page.locator('button.topbar-tab:has-text("Venue View")').click();
   await page.waitForSelector('.sp-venue-li', { timeout: 8000 });
   await page.waitForTimeout(400);
   const before = await page.locator('.sp-venue-li').count();
 
   await page.locator('.sp-venue-li .sp-del-btn').first().click();
+  await confirmDeleteModal(page);
   const txt = await expectToast(page, 'Insufficient permissions.');
 
   const after = await page.locator('.sp-venue-li').count();
@@ -271,10 +323,14 @@ async function testTermPickerOpens(ctx) {
   const active = await page.locator('.tp-row.active').count();
   if (active < 1) throw new Error('no active term marked in dropdown');
 
-  // At least one row must show non-zero stats (proves the join worked).
-  const statsText = (await page.locator('.tp-row.active .tp-row-stats').textContent() || '').replace(/\s+/g, ' ');
-  if (!/📚 \d+/.test(statsText) || !/📋 \d+/.test(statsText)) {
-    throw new Error(`active-row stats look malformed: "${statsText}"`);
+  // The active row must show its entity stats (proves the term→entity join populated the row).
+  // They render as an SVG icon + count for Courses, Sections, Instructors and Venues; the icons
+  // are SVG (no text), so textContent is just the numbers, e.g. "14 78 19 22". (This used to be
+  // an emoji "📚 N"/"📋 N" check, from before the stats switched to the <Ico> icon component.)
+  const statsText = (await page.locator('.tp-row.active .tp-row-stats').textContent() || '').replace(/\s+/g, ' ').trim();
+  const counts = statsText.match(/\d+/g) || [];
+  if (counts.length < 4) {
+    throw new Error(`active-row stats look malformed: "${statsText}" (expected the 4 entity counts)`);
   }
 
   // Esc closes the popover.

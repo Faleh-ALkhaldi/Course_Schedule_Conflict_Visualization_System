@@ -181,13 +181,16 @@ class VenueRepository {
          -- was un-selectable until it had a section — and a fresh term showed almost no
          -- venues. This matches findAssignable (the pool Suggest/Quick-Fix already use),
          -- so humans can pick exactly what the auto-resolvers can.
-         WHERE v.id IN (
-                 SELECT s.venue_id FROM sections s
-                 JOIN schedules sc ON sc.id = s.schedule_id
-                 WHERE sc.semester = $1
-               )
-            OR v.owner_semester = $1
-            OR v.owner_semester IS NULL
+         -- NEW-FU-645 (per-term isolation): templates (owner_semester IS NULL) are NO LONGER
+         -- included — each term has its own private venue copies (mig 023), so a term's list is
+         -- ONLY its own venues. (The FU-593 global-NULL fallback was the cross-term bleed-through.)
+         -- NEW-FU-666: the term's OWN venues only. The old "assigned to a section OR owned
+         -- by the term" pair listed a venue TWICE whenever a section still pointed at a stale
+         -- TEMPLATE row (owner NULL) while the term also owned a private copy of that same
+         -- name — the exact duplicate the export picker showed. Post-FU-645 every section
+         -- references a term-owned copy, so the section branch is redundant; scoping strictly
+         -- to owner_semester guarantees each term shows exactly its own entities, once each.
+         WHERE v.owner_semester = $1
          -- NEW-FU-462 (Phase 110): order by building number then room number,
          -- NUMERICALLY (so "7-220" sorts before "22-119", rooms ascend within a
          -- building). SELECT DISTINCT requires the sort keys in the SELECT list, so
@@ -219,7 +222,7 @@ class VenueRepository {
       `SELECT id, name, type, capacity, is_dummy, created_at
        FROM venues
        WHERE is_dummy = false
-         AND (owner_semester IS NULL OR owner_semester = $1)
+         AND owner_semester = $1   -- NEW-FU-645: per-term only; templates (NULL) are not assignable
        ORDER BY (SUBSTRING(name FROM '^[0-9]+'))::int NULLS LAST,
                 (SUBSTRING(name FROM '^[0-9]+-([0-9]+)'))::int NULLS LAST, name`,
       [termCode]
@@ -278,21 +281,32 @@ class CourseRepository {
    */
   async findAll(termCode = null) {
     if (termCode) {
+      // NEW-FU-650 (per-term isolation): a course is "in this term" when the term OWNS it
+      // (owner_semester = term) — which now includes a just-created course that has NO sections
+      // yet (e.g. SWE 485, added but not yet placed). The OR-clause also keeps any course that
+      // has a section in the term (belt-and-suspenders; post-isolation every sectioned course is
+      // already owner=term). This is the list the SidePanel COURSES tab AND the Suggest panel
+      // show — exactly the term's own courses, never a template or another term's private course.
       const res = await query(
         `SELECT DISTINCT c.id, c.course_code, c.name, c.credits, c.academic_level,
                          c.category, c.num_sections, c.has_lab, c.is_capstone, c.is_external
          FROM courses c
-         JOIN sections s   ON s.course_id  = c.id
-         JOIN schedules sc ON sc.id        = s.schedule_id
-         WHERE sc.semester = $1
+         WHERE c.owner_semester = $1
+            OR c.id IN (SELECT s.course_id FROM sections s
+                        JOIN schedules sc ON sc.id = s.schedule_id
+                        WHERE sc.semester = $1)
          ORDER BY c.academic_level, c.course_code`,
         [termCode]
       );
       return res.rows;
     }
+    // NEW-FU-645 (per-term isolation): the no-term "catalog" read returns only the TEMPLATE
+    // library (owner_semester IS NULL) — the program catalog to browse/copy from — NOT every
+    // term's private copy. (Per-term lists come from the `termCode` branch above, which returns
+    // the courses referenced by that term's sections = its own private copies.)
     const res = await query(
       `SELECT id, course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone, is_external
-       FROM courses ORDER BY academic_level, course_code`
+       FROM courses WHERE owner_semester IS NULL ORDER BY academic_level, course_code`
     );
     return res.rows;
   }
@@ -309,15 +323,18 @@ class CourseRepository {
   // NEW-FU-278 (Phase 54): create() now accepts isCapstone + isExternal so
   // admins can mark new courses at creation time. Both default to FALSE.
   async create({ courseCode, name, credits, academicLevel, category, numSections, hasLab,
-                 isCapstone, isExternal }) {
+                 isCapstone, isExternal, ownerSemester = null }) {
+    // NEW-FU-645 (per-term isolation): stamp owner_semester so a course created in a term is that
+    // term's PRIVATE copy (uniqueness is per-term now), never a global/shared row. Parity with
+    // instructor/venue create. ownerSemester comes from the active term (controller).
     const res = await query(
       `INSERT INTO courses (course_code, name, credits, academic_level, category, num_sections, has_lab,
-                            is_capstone, is_external)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+                            is_capstone, is_external, owner_semester)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
       [courseCode, name, parseInt(credits, 10) /* NEW-L2 */, academicLevel, category,
        parseInt(numSections, 10) || 1 /* NEW-L2 */,
        Boolean(hasLab) /* NEW-FU-94 */,
-       Boolean(isCapstone), Boolean(isExternal)]
+       Boolean(isCapstone), Boolean(isExternal), ownerSemester]
     );
     return this.findById(res.rows[0].id);
   }

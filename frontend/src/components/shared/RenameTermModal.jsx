@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import * as api from '../../api';
 import './TermPicker.css';
@@ -8,6 +8,10 @@ import './TermPicker.css';
 // decodeTerm() and rejects collisions with 409.
 
 const TERM_RE = /^\d{2}[123]$/;
+// NEW-FU-656: mirror AddTermModal's allowed range (251 Fall 2025 – 303 Summer 2031) so Rename catches
+// out-of-range codes inline too.
+const CODE_MIN = 251;
+const CODE_MAX = 303;
 
 function decodePreview(code) {
   if (!TERM_RE.test(code)) return null;
@@ -28,12 +32,21 @@ export function RenameTermModal({ term, activeCode, existingCodes, onClose, onRe
   const [newCode, setNewCode] = useState('');
   const [busy, setBusy]       = useState(false);
   const [error, setError]     = useState(null);
+  const [hint, setHint]       = useState('');   // NEW-FU-656: transient "only numbers" hint
+  const hintTimer = useRef(null);
+  function flashHint(msg) {
+    setHint(msg);
+    if (hintTimer.current) clearTimeout(hintTimer.current);
+    hintTimer.current = setTimeout(() => setHint(''), 2500);
+  }
 
   const preview     = useMemo(() => decodePreview(newCode), [newCode]);
   const validShape  = TERM_RE.test(newCode);
   const duplicate   = newCode && existingCodes.includes(newCode);
   const sameAsOld   = newCode === term.code;
-  const canRename   = validShape && !duplicate && !sameAsOld && !busy;
+  // NEW-FU-656: out-of-range guard, consistent with AddTermModal.
+  const outOfRange  = validShape && (parseInt(newCode, 10) < CODE_MIN || parseInt(newCode, 10) > CODE_MAX);
+  const canRename   = validShape && !duplicate && !sameAsOld && !outOfRange && !busy;
 
   useEffect(() => {
     const onKey = e => { if (e.key === 'Escape') onClose(); };
@@ -70,10 +83,14 @@ export function RenameTermModal({ term, activeCode, existingCodes, onClose, onRe
               type="text"
               className="tp-modal-input"
               value={newCode}
-              onChange={e => setNewCode(e.target.value.trim().slice(0, 3))}
+              onChange={e => {
+                // NEW-FU-656: English digits 0–9 only — block letters (English/Arabic), symbols, and
+                // non-English numerals at runtime; also strips pasted junk.
+                if (/[^0-9]/.test(e.target.value)) flashHint('Term code accepts only numbers (0–9).');
+                setNewCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 3));
+              }}
               placeholder={term.code === '251' ? 'e.g. 261' : 'e.g. 251'}
               autoFocus
-              maxLength={3}
               inputMode="numeric"
             />
             <span className="tp-modal-hint">
@@ -81,9 +98,16 @@ export function RenameTermModal({ term, activeCode, existingCodes, onClose, onRe
             </span>
           </label>
 
+          {hint && <div className="tp-input-hint">{hint}</div>}
+
           {newCode && !validShape && (
             <div className="tp-preview tp-preview-warn">
               Invalid format. Use 3 digits like <code>261</code>.
+            </div>
+          )}
+          {validShape && outOfRange && (
+            <div className="tp-preview tp-preview-warn">
+              Term <code>{newCode}</code> is outside the allowed range <code>{CODE_MIN}</code>–<code>{CODE_MAX}</code>.
             </div>
           )}
           {validShape && sameAsOld && (
@@ -96,7 +120,7 @@ export function RenameTermModal({ term, activeCode, existingCodes, onClose, onRe
               Term <code>{newCode}</code> already exists.
             </div>
           )}
-          {preview && !duplicate && !sameAsOld && (
+          {preview && !duplicate && !sameAsOld && !outOfRange && (
             <div className="tp-preview">
               <div className="tp-preview-row">
                 <span>{term.code} → <strong>{newCode}</strong></span>

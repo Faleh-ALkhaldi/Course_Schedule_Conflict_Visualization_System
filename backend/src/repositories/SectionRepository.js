@@ -16,6 +16,7 @@ const SELECT_SECTION = `
     s.created_at, s.updated_at,
     c.course_code, c.name  AS course_name,
     c.academic_level, c.category, c.num_sections, c.has_lab, c.is_capstone, c.is_external,
+    c.credits,
     i.name AS instructor_name,
     v.name AS venue_name, v.type AS venue_type
   FROM sections s
@@ -32,6 +33,10 @@ function toSection(row) {
     startTime: row.start_time, endTime: row.end_time,
     courseCode: row.course_code, courseName: row.course_name,
     academicLevel: row.academic_level, category: row.category,
+    // NEW-FU-657: credits now round-trip through the export tables — populate
+    // them here (the conflict engine uses ScheduleService's own loader, so this
+    // additive column doesn't change any conflict evaluation).
+    credits: row.credits,
     numSections: row.num_sections, instructorName: row.instructor_name,
     venueName: row.venue_name,
     // NEW-FU-93/94: joined metadata for R-11/R-12 + frontend rendering

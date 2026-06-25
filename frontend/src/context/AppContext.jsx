@@ -167,8 +167,25 @@ function reducer(state, action) {
     // NEW-FU-619 (audit P3): reset coverage when the SCHEDULE (term) actually changes, so the
     // Instructor/Venue status flags don't flash the PREVIOUS term's coverage before the new
     // term's GET /coverage resolves. A same-id status update (finalize/unfinalize) keeps it.
-    case 'SET_SCHEDULE':   return { ...state, schedule:action.schedule,
-      coverage: action.schedule?.id !== state.schedule?.id ? null : state.coverage };
+    // NEW-FU-646 (phantom-on-term-switch): on a REAL term switch also drop the previous term's
+    // SELECTION + view data. `filterId` is a PER-TERM instructor/venue id — carrying it into the
+    // new term made loadView re-fetch that entity (the backend's getOfficeHours is keyed by
+    // instructor id alone, term-independent), painting a PHANTOM office-hours block (plus stale
+    // sections/conflicts) that don't exist in the new term. Resetting here makes the new term
+    // start clean — Instructor/Venue view shows an empty grid until the user picks an entity
+    // FROM the new term. A same-id status update (finalize/unlock) preserves the selection.
+    case 'SET_SCHEDULE': {
+      const termChanged = action.schedule?.id !== state.schedule?.id;
+      return { ...state, schedule:action.schedule,
+        coverage:    termChanged ? null  : state.coverage,
+        filterId:    termChanged ? null  : state.filterId,
+        sections:    termChanged ? []    : state.sections,
+        officeHours: termChanged ? []    : state.officeHours,
+        conflicts:   termChanged ? []    : state.conflicts,
+        saveBlocked: termChanged ? false : state.saveBlocked,
+        softPending: termChanged ? []    : state.softPending,
+      };
+    }
     case 'SET_VIEW_DATA':  return { ...state, sections:action.sections, officeHours:action.officeHours??[], loading:false };
     case 'SET_COVERAGE':   return { ...state, coverage:action.coverage };
     case 'SET_CONFLICTS':  return { ...state,
@@ -434,6 +451,26 @@ export function AppProvider({ children }) {
     return recordChainRef.current;
   }, []);
 
+  // NEW-FU-638 (issue #6): record an INSTRUCTOR or OFFICE-HOUR mutation as ONE undo step via a
+  // COMMAND with an explicit inverse — NOT the section snapshot+reconcile model. Safe by
+  // construction: each command's undo/redo touches only the specific captured entity (plus, for
+  // an instructor drop, a SCOPED reconcile of THIS schedule's sections back to it) — it never
+  // does a bulk roster reconcile, so it can't delete an un-captured global instructor. Command
+  // entries live on the same undo/redo stacks as section steps; undo()/redo() dispatch on `kind`.
+  const recordRefCommand = useCallback(({ undo, redo, label }) => {
+    recordChainRef.current = recordChainRef.current.then(async () => {
+      const sid = scheduleRef.current?.id;
+      if (!sid || histBusyRef.current || !isScheduleEditable()) return;
+      undoRef.current.push({ kind: 'command', undo, redo, label });
+      if (undoRef.current.length > MAX_HISTORY) undoRef.current.shift();
+      redoRef.current = [];
+      // a ref-data change can move sections (a drop nulls them) — keep the section baseline honest.
+      try { baselineRef.current = await snapshotNow(sid); } catch {}
+      bumpHistory();
+    });
+    return recordChainRef.current;
+  }, []);
+
   const applySnapshot = async (target, label) => {
     if (histBusyRef.current || !isScheduleEditable()) return null;
     const sid = scheduleRef.current?.id;
@@ -452,10 +489,32 @@ export function AppProvider({ children }) {
     }
   };
 
+  // NEW-FU-638 (issue #6): run a command entry's inverse (undo) or forward (redo) op, then
+  // resync the section baseline + reload (mirrors applySnapshot's lock/error/reload handling).
+  const applyCommand = async (entry, dir) => {
+    if (histBusyRef.current || !isScheduleEditable()) return null;
+    const sid = scheduleRef.current?.id;
+    if (!sid) return null;
+    histBusyRef.current = true; bumpHistory();
+    try {
+      await (dir === 'undo' ? entry.undo : entry.redo)();
+      try { baselineRef.current = await snapshotNow(sid); } catch {}
+      await loadView(sid, viewRef.current, filterIdRef.current);
+      return { label: entry.label };
+    } catch (e) {
+      dispatch({ type: 'SET_ERROR', error: e.response?.data?.error || 'Could not apply undo/redo.' });
+      return null;
+    } finally {
+      histBusyRef.current = false; bumpHistory();
+    }
+  };
+
   const undo = useCallback(async () => {
     if (histBusyRef.current || undoRef.current.length === 0 || !isScheduleEditable()) return null;
     const entry = undoRef.current[undoRef.current.length - 1];
-    const res = await applySnapshot(entry.before, entry.label);
+    // NEW-FU-638 (issue #6): section steps reconcile to their `before` snapshot; instructor/OH
+    // steps run their command inverse.
+    const res = entry.kind === 'command' ? await applyCommand(entry, 'undo') : await applySnapshot(entry.before, entry.label);
     if (res) { undoRef.current.pop(); redoRef.current.push(entry); bumpHistory(); }
     return res;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -464,7 +523,7 @@ export function AppProvider({ children }) {
   const redo = useCallback(async () => {
     if (histBusyRef.current || redoRef.current.length === 0 || !isScheduleEditable()) return null;
     const entry = redoRef.current[redoRef.current.length - 1];
-    const res = await applySnapshot(entry.after, entry.label);
+    const res = entry.kind === 'command' ? await applyCommand(entry, 'redo') : await applySnapshot(entry.after, entry.label);
     if (res) { redoRef.current.pop(); undoRef.current.push(entry); bumpHistory(); }
     return res;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -556,20 +615,81 @@ export function AppProvider({ children }) {
       // it. (The old CLEAR_SECTIONS just blanked the grid: the sections-length
       // reload effect it relied on was removed in FU-55.)
       reloadCurrentView();
+      resyncBaseline();   // auto-replace path also moved sections — complex inverse, keep non-undoable
+    } else {
+      // NEW-FU-638 (issue #6): a plain add is one undo step — undo deletes it, redo re-creates it
+      // (re-capturing the new id so a later undo deletes the right row).
+      let curId = instructor.id;
+      recordRefCommand({
+        label: `add instructor ${instructor.name}`,
+        undo: async () => { await api.deleteInstructor(curId); dispatch({ type:'REMOVE_INSTRUCTOR', id: curId }); },
+        redo: async () => {
+          // Re-create faithfully from the original panel payload (incl. its office hours), so a
+          // redo restores the same instructor + OH the add created.
+          const { replacedDummy: _r, ...re } = await api.createInstructor({ ...data, ownerSemester: state.schedule?.semester });
+          curId = re.id; dispatch({ type:'ADD_INSTRUCTOR', instructor: re });
+        },
+      });
     }
-    resyncBaseline();   // NEW-FU-549: reference change isn't undoable; keep baseline fresh
     return { ...instructor, replacedDummy };
-  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView, resyncBaseline]);
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView, resyncBaseline, recordRefCommand]);
 
   const removeInstructor = useCallback(async (id) => {
+    const sid = state.schedule?.id;
+    // NEW-FU-638 (issue #6): capture the instructor + its office hours + this schedule's section
+    // snapshot BEFORE the (global) delete, so undo can fully restore it: recreate the instructor,
+    // re-add its office hours, and reconcile this schedule's sections back to it (by name).
+    const victim = (refDataRef.current.instructors || []).find(i => i.id === id) || {};
+    let ohBefore = [];
+    try { const r = await api.getInstructorOfficeHours(id); ohBefore = Array.isArray(r) ? r : (r?.officeHours || []); } catch {}
+    let snapBefore = null;
+    try { if (sid) snapBefore = await snapshotNow(sid); } catch {}
+
     await api.deleteInstructor(id);
     dispatch({ type:'REMOVE_INSTRUCTOR', id });
     // NEW-FU-437 (Phase 107 H3): RELOAD the view (sections.instructor_id is now
     // NULL on affected rows). The old CLEAR_SECTIONS relied on a SchedulerPage
     // reload effect that FU-55 removed, so the grid blanked with no re-fetch.
     reloadCurrentView();
-    resyncBaseline();   // NEW-FU-549
-  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView, resyncBaseline]);
+
+    let snapAfter = null;
+    try { if (sid) snapAfter = await snapshotNow(sid); } catch {}
+
+    if (sid && victim.name && snapBefore) {
+      let curId = id;
+      recordRefCommand({
+        label: `delete instructor ${victim.name}`,
+        undo: async () => {
+          // createInstructor AUTO-SEEDS one office hour (FU-461). To restore EXACTLY the captured
+          // OH set (no extra default), seed the create with the first captured OH, then add the
+          // rest. (ohBefore always has ≥1 because the original instructor was itself auto-seeded.)
+          const ohSlice = (oh) => ({
+            day: oh.day,
+            startTime: String(oh.start_time ?? oh.startTime ?? '').slice(0, 5),
+            endTime:   String(oh.end_time   ?? oh.endTime   ?? '').slice(0, 5),
+          });
+          const body = { name: victim.name, email: victim.email, ownerSemester: scheduleRef.current?.semester };
+          if (ohBefore[0]) body.officeHours = ohSlice(ohBefore[0]);
+          const { replacedDummy: _r, ...re } = await api.createInstructor(body);
+          curId = re.id; dispatch({ type:'ADD_INSTRUCTOR', instructor: re });
+          for (const oh of ohBefore.slice(1)) await api.addInstructorOfficeHour(curId, ohSlice(oh));
+          // Re-assign this schedule's sections to the recreated instructor. Resolve its
+          // name→curId DIRECTLY so render-timing can't leave the name resolver stale.
+          const base = resolvers();
+          await reconcileSchedule(api, sid, snapBefore, {
+            ...base,
+            instructorIdByName: (n) => (n === victim.name ? curId : base.instructorIdByName(n)),
+          });
+        },
+        redo: async () => {
+          await api.deleteInstructor(curId); dispatch({ type:'REMOVE_INSTRUCTOR', id: curId });
+          if (snapAfter) await reconcileSchedule(api, sid, snapAfter, resolvers());
+        },
+      });
+    } else {
+      resyncBaseline();   // NEW-FU-549: couldn't capture enough to undo — keep baseline fresh
+    }
+  }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView, resyncBaseline, recordRefCommand]);
 
   const addVenue = useCallback(async (data) => {
     // NEW-FU-434 (Phase 106 item 6): auto-replace the oldest placeholder venue of
@@ -596,10 +716,13 @@ export function AppProvider({ children }) {
   }, [state.schedule, state.view, state.filterId, loadView, reloadCurrentView, resyncBaseline]);
 
   const addCourse = useCallback(async (data) => {
-    const course = await api.createCourse(data);
+    // NEW-FU-645 (per-term isolation): inject the active term so a new course is this term's
+    // private copy (parity with addInstructor/addVenue). The X-Active-Term header also carries it,
+    // but sending ownerSemester keeps the create path explicit + header-independent.
+    const course = await api.createCourse({ ...data, ownerSemester: state.schedule?.semester });
     dispatch({ type:'ADD_COURSE', course });
     return course;
-  }, []);
+  }, [state.schedule]);
 
   const removeCourse = useCallback(async (id) => {
     try {
@@ -660,6 +783,11 @@ export function AppProvider({ children }) {
   // NEW-FU-547 (Batch 15 Issue 5): themed confirm. `confirm({ title, message,
   // confirmLabel, tone })` resolves to true/false. Renders the dark-compatible
   // DecisionModal instead of the OS window.confirm() white panel.
+  // NEW-FU-639 (issue #3/#7): a caller may instead pass `options: [{label,value,tone}]`
+  // (+ optional `dismissValue`) for an N-WAY decision — confirm() then resolves to the
+  // chosen option's `value`. This powers the 3-option OH↔class conflict dialog (Save
+  // anyway / Use suggested time / Cancel) reused by both OH modals. Legacy callers (no
+  // `options`) still get the Cancel/Confirm boolean. DecisionModal already renders N buttons.
   const [confirmSpec, setConfirmSpec] = useState(null);
   const confirm = useCallback((opts = {}) => new Promise(resolve => {
     setConfirmSpec({ ...opts, resolve });
@@ -684,7 +812,7 @@ export function AppProvider({ children }) {
       confirm,
       // NEW-FU-549 (Batch 16): undo/redo
       undo, redo, canUndo, canRedo, undoLabel, redoLabel,
-      recordMutation, resyncBaseline, clearHistory,
+      recordMutation, resyncBaseline, recordRefCommand, clearHistory,
     }}>
       {children}
       {confirmSpec && (
@@ -692,14 +820,15 @@ export function AppProvider({ children }) {
           icon={<Ico name="alert" />}
           title={confirmSpec.title}
           lead={confirmSpec.message}
-          // Cancel first → it receives the autofocus + Enter default, so a destructive
-          // confirm is never one stray keypress away. Delete sits on the right (danger).
-          options={[
+          // NEW-FU-639 (issue #3/#7): N-way decision when the caller passes `options`;
+          // otherwise the legacy Cancel/Confirm boolean. Cancel first → it receives the
+          // autofocus + Enter default, so a destructive confirm is never one stray keypress away.
+          options={confirmSpec.options || [
             { label: confirmSpec.cancelLabel || 'Cancel', value: false, tone: 'neutral' },
             { label: confirmSpec.confirmLabel || 'Delete', value: true, tone: confirmSpec.tone || 'danger' },
           ]}
           onChoose={closeConfirm}
-          onDismiss={() => closeConfirm(false)}
+          onDismiss={() => closeConfirm(confirmSpec.options ? (confirmSpec.dismissValue ?? null) : false)}
         />
       )}
     </AppContext.Provider>

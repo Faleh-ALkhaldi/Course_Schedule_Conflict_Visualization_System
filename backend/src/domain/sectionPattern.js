@@ -326,7 +326,13 @@ function legalPatternsForCourse({ credits, hasLab }) {
   if (c === 1) return [wrap('ONE_DAY_50')];
   if (c === 2) return ['ST_50', 'MW_50', 'TT_50'].map(wrap);
   if (c === 3 && !hasLab) return ['STT_50', 'MW_75', 'ST_75', 'TT_75'].map(wrap);
-  if (c === 3 &&  hasLab) return ['ST_50', 'MW_50', 'TT_50', 'MW_75', 'ST_75', 'TT_75'].map(wrap);
+  // NEW-FU-648: a 3-credit course WITH a lab meets the LECTURE in exactly two 50-min
+  // sessions (2-day pattern) + a separate lab — NOT 2×75. A 2×75 lecture delivers the full
+  // 3-credit load with no room for the lab's contribution, so it's a NO-lab pattern. This is
+  // the OFFERING set (drives the Suggest panel + its recommend pre-fill); the validator
+  // (legalDurationsForCourse/legalDayTemplatesForCourse) stays lenient so legacy 75-min
+  // with-lab lectures already in the data remain editable.
+  if (c === 3 &&  hasLab) return ['ST_50', 'MW_50', 'TT_50'].map(wrap);
   if (c === 4) return ['STT_50', 'MW_75', 'ST_75', 'TT_75'].map(wrap);
   return [];
 }

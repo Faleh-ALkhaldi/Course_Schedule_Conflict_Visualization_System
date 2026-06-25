@@ -199,7 +199,7 @@ async function _setArchive({ code, departmentId, archive }) {
  *
  * Returns the newly-created term row (same shape as listTerms entry).
  */
-async function createTerm({ code, createdBy, departmentId = DEFAULT_DEPT, startsAt, endsAt }) {
+async function createTerm({ code, createdBy, departmentId = DEFAULT_DEPT, startsAt, endsAt, seedMode = 'copy' }) {
   const decoded = decodeTerm(code); // throws on invalid; bubbles to controller
   // NEW-FU-217: range guard. Throws BAD_INPUT with a clear message that
   // surfaces the legal range so the user knows what to type instead.
@@ -288,7 +288,9 @@ async function createTerm({ code, createdBy, departmentId = DEFAULT_DEPT, starts
         s.semester ASC                              -- tie: prefer earlier
       LIMIT 1
     `, [departmentId, newId, seasonDigit, newYY]);
-    if (tpl.rowCount > 0) {
+    // NEW-FU-656: seedMode 'blank' creates an EMPTY term (no copy), even when a same-season term exists.
+    // 'copy' (default) preserves the prior auto-seed behavior.
+    if (seedMode !== 'blank' && tpl.rowCount > 0) {
       const templateId = tpl.rows[0].id;
       // Copy sections — same course/instructor/venue refs, new ids,
       // new schedule_id. Conflicts are NOT copied here (template's
@@ -370,6 +372,66 @@ async function createTerm({ code, createdBy, departmentId = DEFAULT_DEPT, starts
         await client.query(`UPDATE sections SET instructor_id = $1 WHERE schedule_id = $2 AND instructor_id = $3`, [newDId, newId, oldId]);
       for (const [oldId, newDId] of dVenueMap)
         await client.query(`UPDATE sections SET venue_id = $1 WHERE schedule_id = $2 AND venue_id = $3`, [newDId, newId, oldId]);
+
+      // NEW-FU-645: per-term ISOLATION for a COPIED term. The section copy above carried the
+      // template's real (non-dummy) course/instructor/venue refs VERBATIM, so the new term would
+      // SHARE those rows with its source term — editing an instructor's office hours, a course's
+      // credits, or a venue's capacity in one term would silently change the other (the exact
+      // cross-term contamination migration 023 eliminated for the seeded terms). Mint a PRIVATE
+      // per-term copy of every still-shared entity and remap the new term's sections onto the
+      // copies; for instructors also copy the office hours so each term owns its own OH set.
+      // Dummies are already term-local (minted fresh above), so they're excluded here.
+      // `owner_semester IS DISTINCT FROM code` catches both template (NULL) and another-term refs,
+      // and is a no-op for anything already owned by this term (idempotent).
+      const isoInstr = await client.query(
+        `SELECT DISTINCT i.id, i.name, i.email
+           FROM sections s JOIN instructors i ON i.id = s.instructor_id
+          WHERE s.schedule_id = $1 AND i.is_dummy = false
+            AND i.owner_semester IS DISTINCT FROM $2`,
+        [newId, code]);
+      for (const r of isoInstr.rows) {
+        const ins = await client.query(
+          `INSERT INTO instructors (name, email, owner_semester) VALUES ($1,$2,$3) RETURNING id`,
+          [r.name, r.email, code]);
+        await client.query(
+          `UPDATE sections SET instructor_id = $1 WHERE schedule_id = $2 AND instructor_id = $3`,
+          [ins.rows[0].id, newId, r.id]);
+        await client.query(
+          `INSERT INTO office_hours (instructor_id, day, start_time, end_time)
+           SELECT $1, day, start_time, end_time FROM office_hours WHERE instructor_id = $2`,
+          [ins.rows[0].id, r.id]);
+      }
+      const isoVenue = await client.query(
+        `SELECT DISTINCT v.id, v.name, v.type, v.capacity
+           FROM sections s JOIN venues v ON v.id = s.venue_id
+          WHERE s.schedule_id = $1 AND v.is_dummy = false
+            AND v.owner_semester IS DISTINCT FROM $2`,
+        [newId, code]);
+      for (const r of isoVenue.rows) {
+        const ins = await client.query(
+          `INSERT INTO venues (name, type, capacity, owner_semester) VALUES ($1,$2,$3,$4) RETURNING id`,
+          [r.name, r.type, r.capacity, code]);
+        await client.query(
+          `UPDATE sections SET venue_id = $1 WHERE schedule_id = $2 AND venue_id = $3`,
+          [ins.rows[0].id, newId, r.id]);
+      }
+      const isoCourse = await client.query(
+        `SELECT DISTINCT c.id, c.course_code, c.name, c.credits, c.academic_level,
+                         c.category, c.num_sections, c.has_lab, c.is_capstone, c.is_external
+           FROM sections s JOIN courses c ON c.id = s.course_id
+          WHERE s.schedule_id = $1 AND c.owner_semester IS DISTINCT FROM $2`,
+        [newId, code]);
+      for (const r of isoCourse.rows) {
+        const ins = await client.query(
+          `INSERT INTO courses (course_code, name, credits, academic_level, category,
+                                num_sections, has_lab, is_capstone, is_external, owner_semester)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+          [r.course_code, r.name, r.credits, r.academic_level, r.category,
+           r.num_sections, r.has_lab, r.is_capstone, r.is_external, code]);
+        await client.query(
+          `UPDATE sections SET course_id = $1 WHERE schedule_id = $2 AND course_id = $3`,
+          [ins.rows[0].id, newId, r.id]);
+      }
     }
 
     // Re-query with stats so the response reflects whatever the seed copy
