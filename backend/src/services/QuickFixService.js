@@ -98,6 +98,31 @@ function weightedCost(conflicts) {
   return total;
 }
 
+// NEW-FU-679 (round 8 re-audit): the accept-gate as a pure, testable function.
+// An op is accepted iff it strictly LOWERS weighted cost, OR it strictly lowers
+// the hard*2+soft count WITHOUT raising weighted cost. The count branch only
+// fires on a weighted TIE — a genuine "same total cost, fewer conflicts" win.
+//
+// It must never wave through a weighted INCREASE. The raw count metric scores
+// 1 hard = 2 soft, so the original unguarded `||` count branch would accept
+// trading several light soft conflicts (e.g. 3× R-13, weight 5 = 15) for one
+// critical hard (R-01, weight 100): the count drops 3→2 so it was "accepted",
+// yet the weighted cost explodes 15→100. That branch was justified as "a
+// fallback for rules without weights", but every R-01..R-15 rule HAS a weight
+// (weightedCost's `?? 10` never fires for a real conflict) — so it never served
+// that purpose and only added permissiveness. The `afterWeighted <=
+// beforeWeighted` guard closes the regression while preserving every genuine
+// fewer-conflicts-at-equal-cost tie that keeps the greedy making progress.
+function acceptsOp(beforeConflicts, afterConflicts) {
+  const beforeWeighted = weightedCost(beforeConflicts);
+  const afterWeighted  = weightedCost(afterConflicts);
+  if (afterWeighted < beforeWeighted) return true;
+  const pre  = countConflicts(beforeConflicts);
+  const post = countConflicts(afterConflicts);
+  return (post.hard * 2 + post.soft) < (pre.hard * 2 + pre.soft)
+      && afterWeighted <= beforeWeighted;
+}
+
 // NEW-FU-381 (Phase 36): canonical, human-readable reasons for the
 // `unresolvedReasons` map. Generators populate this when they cannot
 // produce a valid op for a given conflict — the modal renders it as
@@ -1854,11 +1879,14 @@ class QuickFixService {
           const afterWeighted  = weightedCost(bestPostConflicts);
           const preCount       = countConflicts(conflicts);
           const postCount      = countConflicts(bestPostConflicts);
-          // Accept if EITHER: weighted cost drops, OR strict-count drops
-          // (the latter as a fallback for rules without weights).
-          const accepted =
-            afterWeighted < beforeWeighted ||
-            (postCount.hard * 2 + postCount.soft) < (preCount.hard * 2 + preCount.soft);
+          // NEW-FU-679 (round 8 re-audit): delegate to the pure, unit-tested
+          // accept-gate. The old inline `||` let the count branch wave through
+          // a weighted-INCREASING trade (several soft conflicts → one hard,
+          // because the count metric scores 1 hard = 2 soft); acceptsOp guards
+          // that with `afterWeighted <= beforeWeighted`. beforeWeighted /
+          // afterWeighted / preCount / postCount are still computed above for
+          // the op metadata (weightedDelta, willResolveCount) below.
+          const accepted = acceptsOp(conflicts, bestPostConflicts);
           if (accepted) {
             ops.push({
               id: `op-${++opId}`,
@@ -2326,3 +2354,7 @@ module.exports._candidateOps = candidateOps;
 // NEW-FU-655: expose the pure sim op-applier so the gender-scoped / allGenders move+drop semantics
 // (course-cohort R-01/R-02 fixes must relocate/remove the WHOLE logical section) are unit-testable.
 module.exports._applyOpInMemory = applyOpInMemory;
+// NEW-FU-679 (round 8): expose the pure accept-gate + weighted-cost so the
+// "count branch must never RAISE weighted cost" invariant is unit-testable.
+module.exports._acceptsOp = acceptsOp;
+module.exports._weightedCost = weightedCost;

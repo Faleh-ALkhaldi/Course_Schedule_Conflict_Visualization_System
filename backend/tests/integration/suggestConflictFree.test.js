@@ -17,6 +17,10 @@ const ADMIN = { username: 'admin1', password: 'password123' };
 
 let adminTok;
 const createdCodes = new Set();
+// NEW-FU-673: freshTermSchedule() clears `createdCodes` each call (it deletes prior
+// test terms first — see there), so a separate never-cleared set records every code
+// for the afterAll teardown.
+const allCodes = new Set();
 
 beforeAll(async () => {
   const r = await request(app).post('/api/v1/auth/login').send(ADMIN);
@@ -25,7 +29,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  for (const code of createdCodes) {
+  for (const code of allCodes) {
     await request(app)
       .delete(`/api/v1/terms/${code}`)
       .query({ activeCode: '251' })
@@ -35,7 +39,31 @@ afterAll(async () => {
 });
 
 async function freshTermSchedule(code) {
+  // NEW-FU-673: drop EVERY prior test term before creating this one. Post-FU-234 a
+  // default (copy) term-create seeds its sections from the NEAREST same-season term;
+  // post-FU-645 that copy then mints PRIVATE per-term course/instructor/venue rows.
+  // After a Suggest run, a test term's sections reference BOTH its own private venue
+  // (e.g. "22-127" owner=<term>) AND the template "22-127" (owner NULL). Copying THAT
+  // polluted term into the next same-season test term makes the isolation step try to
+  // mint two "22-127" rows for the new owner → uq_venues_name_per_term 23505 → the
+  // term-create 400s. The base SEED terms (251/252/253/261/262) reference only template
+  // (NULL-owned) venues, so a copy FROM them is collision-free. Deleting prior test
+  // terms first guarantees the nearest same-season neighbour is always a pristine seed
+  // term, never a previously-suggested test term. Tests run serially (--runInBand) and
+  // each has finished asserting on its own term by the time the next call runs, so this
+  // is safe. We KEEP the default (copy) seed so the term owns a real instructor/venue/
+  // course pool — Suggest's findAssignable()/recommend() draw from owner_semester=term
+  // ONLY (templates are not assignable), so a blank term would starve the suggester.
+  for (const prior of createdCodes) {
+    await request(app)
+      .delete(`/api/v1/terms/${prior}`)
+      .query({ activeCode: '251' })
+      .set('Authorization', `Bearer ${adminTok}`)
+      .catch(() => {});
+  }
+  createdCodes.clear();
   createdCodes.add(code);
+  allCodes.add(code);
   await request(app)
     .delete(`/api/v1/terms/${code}`)
     .query({ activeCode: '251' })

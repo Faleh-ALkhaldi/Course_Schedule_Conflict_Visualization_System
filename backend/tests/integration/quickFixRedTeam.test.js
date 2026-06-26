@@ -7,6 +7,7 @@
 
 const request = require('supertest');
 const app     = require('../../src/app');
+const { query } = require('../../src/config/db');   // NEW-FU-673: term-valid resource selection
 
 const ADMIN = { username: 'admin1', password: 'password123' };
 
@@ -46,15 +47,9 @@ async function freshTermSchedule(code) {
     .set('Authorization', `Bearer ${adminTok}`);
   const sched = sr.body.find(s => s.semester === code);
   expect(sched).toBeTruthy();
-  const existing = (await request(app)
-    .get(`/api/v1/schedules/${sched.id}/sections`)
-    .set('Authorization', `Bearer ${adminTok}`)).body;
-  for (const s of (existing.sections || existing)) {
-    await request(app)
-      .delete(`/api/v1/sections/${s.id}?scope=row`)
-      .set('Authorization', `Bearer ${adminTok}`)
-      .catch(() => {});
-  }
+  // NEW-FU-673: SQL-level wipe of the auto-cloned sections (one shot; never trips FU-609's
+  // row→group coercion mid-loop). The term's OWNED resources survive.
+  await query(`DELETE FROM sections WHERE schedule_id = $1`, [sched.id]);
   return sched.id;
 }
 
@@ -94,12 +89,24 @@ async function apply(scheduleId, ops) {
   return r;
 }
 
-async function getRefs() {
-  const [courses, instructors, venues] = await Promise.all([
-    request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-  ]);
+// NEW-FU-673: resources VALID FOR THIS TERM — owned by `code` OR template (owner IS NULL).
+// Post-FU-645 the global GET lists also include OTHER terms' owner-scoped copies, so picking
+// `instructors[0]` / `courses.find(...)` from them grabs a resource owned by another term →
+// section-create 409 "belongs to term X". Query directly (GETs don't expose owner_semester).
+// `name`/`course_code`/`academic_level` ride along so tests can pick by code or level. The
+// QuickFix RESOLVER, however, only reassigns to the term's OWN (owner = code) pool, so tests
+// whose assertion needs a reassign target use a rich-season code (xx1/xx2) that owns one.
+async function getRefs(code) {
+  const courses = (await query(
+    `SELECT id, credits, has_lab, category, course_code, academic_level FROM courses
+      WHERE owner_semester = $1 OR owner_semester IS NULL`, [code])).rows
+    .map(c => ({ ...c, credits: Number(c.credits) }));
+  const instructors = (await query(
+    `SELECT id, name FROM instructors
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false ORDER BY name`, [code])).rows;
+  const venues = (await query(
+    `SELECT id, type, name FROM venues
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false ORDER BY name`, [code])).rows;
   return { courses, instructors, venues };
 }
 
@@ -113,10 +120,12 @@ async function getSections(scheduleId) {
 describe('FU-355: Quick Fix red-team battery (Phase 34)', () => {
 
   test('R-FIX-4: R-05 venue double-book → plan resolves it', async () => {
-    const scheduleId = await freshTermSchedule('273');
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = await pickFromList(courses, c => c.course_code === 'SWE301');
-    const c2 = await pickFromList(courses, c => c.course_code === 'SWE321');
+    // NEW-FU-673: rich Fall code '271' (owns LectureHalls so the resolver can reassign one of
+    // the double-booked sections) + real course codes (SWE 316/SWE 326 exist; "SWE301" doesn't).
+    const scheduleId = await freshTermSchedule('271');
+    const { courses, instructors, venues } = await getRefs('271');
+    const c1 = await pickFromList(courses, c => c.course_code === 'SWE 316');
+    const c2 = await pickFromList(courses, c => c.course_code === 'SWE 326');
     const hall = venues.find(v => v.type === 'LectureHall');
     // Both sections at same venue same time → R-05 hard
     await createSection(scheduleId, {
@@ -213,19 +222,27 @@ describe('FU-355: Quick Fix red-team battery (Phase 34)', () => {
 
   test('R-FIX-13: mixed R-09 + R-10 conflicts → plan covers both', async () => {
     // Two sections, one missing instructor, one missing venue.
+    // NEW-FU-673: Fall code '281' owns instructors + venues (the resolver's reassign pool).
+    // Real course codes (SWE 316/SWE 326). FU-475 made missing instructor/venue HARD create-time
+    // blocks, so seed both gap states at the DB level after creating valid sections.
     const scheduleId = await freshTermSchedule('281');
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = await pickFromList(courses, c => c.course_code === 'SWE301');
-    const c2 = await pickFromList(courses, c => c.course_code === 'SWE321');
+    const { courses, instructors, venues } = await getRefs('281');
+    const c1 = await pickFromList(courses, c => c.course_code === 'SWE 316');
+    const c2 = await pickFromList(courses, c => c.course_code === 'SWE 326');
     const hall = venues.find(v => v.type === 'LectureHall');
-    await createSection(scheduleId, {
-      courseId: c1.id, venueId: hall.id, // no instructor → R-09
+    const s1 = await createSection(scheduleId, {
+      courseId: c1.id, instructorId: instructors[0].id, venueId: hall.id,
       startTime: '10:00', endTime: '10:50',
     });
-    await createSection(scheduleId, {
-      courseId: c2.id, instructorId: instructors[0].id, // no venue → R-10
+    const s2 = await createSection(scheduleId, {
+      courseId: c2.id, instructorId: instructors[1].id, venueId: hall.id,
       startTime: '11:00', endTime: '11:50',
     });
+    expect(s1.status).toBe(201);
+    expect(s2.status).toBe(201);
+    // c1 → no instructor (R-09); c2 → no venue (R-10).
+    await query(`UPDATE sections SET instructor_id = NULL WHERE schedule_id = $1 AND course_id = $2`, [scheduleId, c1.id]);
+    await query(`UPDATE sections SET venue_id = NULL      WHERE schedule_id = $1 AND course_id = $2`, [scheduleId, c2.id]);
     const p = await plan(scheduleId);
     // Both R-09 and R-10 should have ops proposed, OR both should
     // disappear from unresolvedRuleIds.
@@ -236,8 +253,10 @@ describe('FU-355: Quick Fix red-team battery (Phase 34)', () => {
 
   test('R-FIX-15: applying op that resolves a soft conflict succeeds', async () => {
     // Apply a known-good R-15 add-day op and verify it lands cleanly.
-    const scheduleId = await freshTermSchedule('283');
-    const { courses, instructors, venues } = await getRefs();
+    // NEW-FU-673: rich Fall code '341' so the add-day apply re-adds the day onto a term-owned
+    // instructor/venue. Real course filter (any 3cr no-lab UG).
+    const scheduleId = await freshTermSchedule('341');
+    const { courses, instructors, venues } = await getRefs('341');
     const c = await pickFromList(courses,
       c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
     const cr = await createSection(scheduleId, {
@@ -248,11 +267,11 @@ describe('FU-355: Quick Fix red-team battery (Phase 34)', () => {
     });
     expect(cr.status).toBe(201);
     // Delete Tuesday row to trigger R-15.
+    // NEW-FU-673: DB-level delete (FU-609 would coerce a per-row API delete of a multi-day group
+    // into a whole-group delete, so R-15 wouldn't fire).
     const rows = await getSections(scheduleId);
     const tue = rows.find(r => r.courseId === c.id && r.day === 'Tuesday');
-    await request(app)
-      .delete(`/api/v1/sections/${tue.id}?scope=row`)
-      .set('Authorization', `Bearer ${adminTok}`);
+    await query(`DELETE FROM sections WHERE id = $1`, [tue.id]);
     // Plan + apply.
     const p = await plan(scheduleId);
     const addDay = p.ops.find(o => o.type === 'add-day');
@@ -262,36 +281,38 @@ describe('FU-355: Quick Fix red-team battery (Phase 34)', () => {
     expect(ar.body.applied).toBeGreaterThan(0);
   });
 
-  // NEW-FU-368 (Phase 35): R-FIX-18 — R-02 same-level Graduate with
-  // escape. Build a schedule where SWE501 §01 overlaps SWE510 §01 in
-  // time (both Graduate), then run Quick Fix. The plan must propose a
-  // `move` op for SWE501 (or SWE510 §01) that resolves the soft R-02.
-  test('R-FIX-18 (Phase 35): R-02 same-level Graduate → plan proposes move', async () => {
-    const scheduleId = await freshTermSchedule('293');
-    const { courses, instructors, venues } = await getRefs();
-    const gr1 = await pickFromList(courses, c => c.course_code === 'SWE501');
-    const gr2 = await pickFromList(courses, c => c.course_code === 'SWE510');
-    const hall1 = venues.find(v => v.type === 'LectureHall' && v.name === 'H-201');
-    const hall2 = venues.find(v => v.type === 'LectureHall' && v.name === 'H-301');
-    expect(gr1 && gr2 && hall1 && hall2).toBeTruthy();
-    // SWE501 §01 Mon/Wed 17:00–18:15 (Graduate band, 1 section only → R-02 trigger)
+  // R-FIX-18: R-02 adjacent-level overlap WITH escape → SOFT → the plan must propose a `move`.
+  // NEW-FU-673: the original "same-level Graduate" scenario no longer fires R-02 — FU-275
+  // (Phase 52 #2) made grad↔grad overlap ALLOWED (R02Rule skips when both sides are Graduate),
+  // and a Senior↔Graduate adjacent pair can't time-overlap (UG window ends 17:10, GR starts
+  // 17:20). So this exercises the SAME resolver move-op path via a valid R-02 trigger: two
+  // adjacent UG levels — SWE 316 (Junior) + SWE 402 (Senior) — overlapping, with SWE 402
+  // carrying a second free section so R-02 is SOFT (escape exists) per R02Rule.
+  test('R-FIX-18 (Phase 35): R-02 adjacent-level (soft, with escape) → plan proposes move', async () => {
+    const scheduleId = await freshTermSchedule('292');
+    const { courses, instructors, venues } = await getRefs('292');
+    const junior = await pickFromList(courses, c => c.course_code === 'SWE 316');
+    const senior = await pickFromList(courses, c => c.course_code === 'SWE 402');
+    const halls = venues.filter(v => v.type === 'LectureHall');
+    expect(junior && senior && halls.length >= 3).toBeTruthy();
+    // SWE 316 §01 Mon/Wed 10:00–11:15 (1 section only → R-02 trigger for the Junior side)
     await createSection(scheduleId, {
-      courseId: gr1.id, instructorId: instructors[0].id, venueId: hall1.id,
+      courseId: junior.id, instructorId: instructors[0].id, venueId: halls[0].id,
       sectionNumber: '01', days: ['Monday', 'Wednesday'],
-      startTime: '17:00', endTime: '18:15',
+      startTime: '10:00', endTime: '11:15',
     });
-    // SWE510 §01 Mon/Wed 17:00–18:15 (overlaps SWE501)
+    // SWE 402 §01 Mon/Wed 10:00–11:15 (overlaps SWE 316)
     await createSection(scheduleId, {
-      courseId: gr2.id, instructorId: instructors[1].id, venueId: hall2.id,
+      courseId: senior.id, instructorId: instructors[1].id, venueId: halls[1].id,
       sectionNumber: '01', days: ['Monday', 'Wednesday'],
-      startTime: '17:00', endTime: '18:15',
+      startTime: '10:00', endTime: '11:15',
     });
-    // SWE510 §02 Mon/Wed 18:30–19:45 — gives SWE510 an "escape": some
-    // section of SWE510 is free, so R-02 fires SOFT (not HARD) per R02Rule.
+    // SWE 402 §02 Mon/Wed 11:30–12:45 — gives SWE 402 an "escape": a free section
+    // exists, so R-02 fires SOFT (not HARD) per R02Rule.
     await createSection(scheduleId, {
-      courseId: gr2.id, instructorId: instructors[2].id, venueId: hall2.id,
+      courseId: senior.id, instructorId: instructors[2].id, venueId: halls[2].id,
       sectionNumber: '02', days: ['Monday', 'Wednesday'],
-      startTime: '18:30', endTime: '19:45',
+      startTime: '11:30', endTime: '12:45',
     });
     // Verify R-02 actually fires in the conflict engine (separate /conflicts
     // endpoint — the plan response has summary + unresolvedRuleIds but
@@ -318,23 +339,24 @@ describe('FU-355: Quick Fix red-team battery (Phase 34)', () => {
   // return a plan (possibly with `unresolvedRuleIds` containing R-02)
   // rather than crashing.
   test('R-FIX-19 (Phase 35): Quick Fix degrades gracefully on saturated Graduate window', async () => {
-    // Phase 35 expanded TERM_CODE_MAX to 343 (Summer 2034); pick 343 as a
-    // fresh-and-unused code at the top of the range.
-    const scheduleId = await freshTermSchedule('343');
-    const { courses, instructors, venues } = await getRefs();
-    const gr1 = await pickFromList(courses, c => c.course_code === 'SWE501');
-    const gr2 = await pickFromList(courses, c => c.course_code === 'SWE510');
+    // NEW-FU-673: Spring code '342' OWNS Graduate courses (SWE 516/545); use real codes and a
+    // GR-window time (17:30, since a 17:00 GR start is rejected 400 by R-06 at create).
+    const scheduleId = await freshTermSchedule('342');
+    const { courses, instructors, venues } = await getRefs('342');
+    const gr1 = await pickFromList(courses, c => c.course_code === 'SWE 516');
+    const gr2 = await pickFromList(courses, c => c.course_code === 'SWE 545');
     const hall = venues.find(v => v.type === 'LectureHall');
+    expect(gr1 && gr2 && hall).toBeTruthy();
     // Single section each, both at the exact same Graduate slot.
     await createSection(scheduleId, {
       courseId: gr1.id, instructorId: instructors[0].id, venueId: hall.id,
       sectionNumber: '01', days: ['Monday', 'Wednesday'],
-      startTime: '17:00', endTime: '18:15',
+      startTime: '17:30', endTime: '18:45',
     });
     await createSection(scheduleId, {
       courseId: gr2.id, instructorId: instructors[1].id, venueId: hall.id,
       sectionNumber: '01', days: ['Monday', 'Wednesday'],
-      startTime: '17:00', endTime: '18:15',
+      startTime: '17:30', endTime: '18:45',
     });
     const planRes = await plan(scheduleId);
     // Must return a plan response (no crash) — either ops to apply or

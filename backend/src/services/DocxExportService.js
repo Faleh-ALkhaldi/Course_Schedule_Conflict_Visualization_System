@@ -59,6 +59,13 @@ const HEADER_FILL = '1F4E79';
 // LEVEL_FILL colors, amber for unresolved soft conflicts).
 const G_START_H = 7, G_END_H = 22, G_SLOT_MIN = 5;
 const G_TOTAL_SLOTS = ((G_END_H - G_START_H) * 60) / G_SLOT_MIN; // 180
+// NEW-FU-677: hard cap on visual-grid lanes per day. The docx grid builds a TableCell tree per
+// (slot × lane); a pathological term (hundreds of sections overlapping at one time) produced ~86k
+// cell trees and OOM-killed the whole Node process under the 512 MB Render heap (a process-fatal
+// crash one export request inflicts on every user). The grid is a HUMAN aid — all sections are in
+// the Half-B table regardless — and >~12 concurrent lanes is already unreadable, so clamp overflow
+// sections into the last lane rather than grow columns unbounded. Bounds the cell count to ≤ 5×12×180.
+const MAX_GRID_LANES = 12;
 const SOFT_FILL = 'FFE08A';
 const TIME_FILL = 'E8EEF7';
 const EMPTY_FILL_A = 'FAFAFA', EMPTY_FILL_B = 'F0F4FA';
@@ -77,7 +84,13 @@ function gAssignLanes(entries) {
   for (const e of sorted) {
     let placed = false;
     for (let i = 0; i < ends.length; i++) { if (e.startSlot >= ends[i]) { e.lane = i; ends[i] = e.endSlot; placed = true; break; } }
-    if (!placed) { e.lane = ends.length; ends.push(e.endSlot); }
+    if (!placed) {
+      // NEW-FU-677: cap lanes — beyond MAX_GRID_LANES, clamp overflow sections into the last lane
+      // (they overlap visually there) rather than add an unbounded column, so the cell-tree count
+      // stays bounded and a pathological term can't OOM-crash the export. (Full data is in the table.)
+      if (ends.length >= MAX_GRID_LANES) { e.lane = MAX_GRID_LANES - 1; }
+      else { e.lane = ends.length; ends.push(e.endSlot); }
+    }
   }
   return ends.length || 1;
 }
@@ -405,4 +418,4 @@ async function buildCombinedDocxBuffer(scheduleId, filter = { type: 'full' }, se
   return Packer.toBuffer(doc);
 }
 
-module.exports = { buildTableDocxBuffer, buildGridDocxBuffer, buildCombinedDocxBuffer };
+module.exports = { buildTableDocxBuffer, buildGridDocxBuffer, buildCombinedDocxBuffer, gAssignLanes, MAX_GRID_LANES };

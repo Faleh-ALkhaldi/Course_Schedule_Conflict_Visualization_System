@@ -8,6 +8,7 @@
 
 const request = require('supertest');
 const app     = require('../../src/app');
+const { query } = require('../../src/config/db');   // NEW-FU-673: term-valid resource selection
 
 const ADMIN = { username: 'admin1', password: 'password123' };
 
@@ -56,7 +57,20 @@ async function freshTermSchedule(code) {
       .set('Authorization', `Bearer ${adminTok}`)
       .catch(() => {});
   }
-  return sched.id;
+  // NEW-FU-673: return resources VALID FOR THIS TERM — owned by this term (owner_semester = code) or
+  // template (NULL). Picking from the global GET lists grabs another term's owner-scoped copy
+  // (FU-645) → section-create 409 "belongs to term …". UG-only avoids the R-06 graduate window.
+  const courses = (await query(
+    `SELECT id, credits, has_lab, category FROM courses
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND category = 'UG'`, [code])).rows
+    .map(c => ({ ...c, credits: Number(c.credits) }));
+  const instructors = (await query(
+    `SELECT id, name FROM instructors
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false ORDER BY name`, [code])).rows;
+  const venues = (await query(
+    `SELECT id, type FROM venues
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false ORDER BY name`, [code])).rows;
+  return { scheduleId: sched.id, courses, instructors, venues };
 }
 
 async function createOneSection(scheduleId, opts) {
@@ -80,7 +94,7 @@ async function createOneSection(scheduleId, opts) {
 describe('FU-318: Quick Fix resolver (Phase 29)', () => {
 
   test('plan endpoint returns an empty plan when there are no conflicts', async () => {
-    const scheduleId = await freshTermSchedule('291');
+    const { scheduleId } = await freshTermSchedule('291');
     // Schedule starts empty (no conflicts).
     const r = await request(app)
       .post(`/api/v1/schedules/${scheduleId}/quick-fix`)
@@ -92,12 +106,7 @@ describe('FU-318: Quick Fix resolver (Phase 29)', () => {
   });
 
   test('plan proposes a reassign-instructor op for R-04', async () => {
-    const scheduleId = await freshTermSchedule('292');
-    const [courses, instructors, venues] = await Promise.all([
-      request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    ]);
+    const { scheduleId, courses, instructors, venues } = await freshTermSchedule('292');
     // Use UG-category courses so R-06 (graduate-time-window) doesn't
     // fire alongside R-04 — keep the test focused on just R-04.
     const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
@@ -131,12 +140,7 @@ describe('FU-318: Quick Fix resolver (Phase 29)', () => {
   });
 
   test('apply endpoint clears the conflict after applying', async () => {
-    const scheduleId = await freshTermSchedule('293');
-    const [courses, instructors, venues] = await Promise.all([
-      request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    ]);
+    const { scheduleId, courses, instructors, venues } = await freshTermSchedule('293');
     // UG-only to avoid R-06 noise.
     const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
     const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG' && c.id !== c1.id);
@@ -177,7 +181,7 @@ describe('FU-318: Quick Fix resolver (Phase 29)', () => {
   });
 
   test('apply endpoint rejects unknown op types', async () => {
-    const scheduleId = await freshTermSchedule('261');
+    const { scheduleId } = await freshTermSchedule('261');
     const r = await request(app)
       .post(`/api/v1/schedules/${scheduleId}/quick-fix/apply`)
       .set('Authorization', `Bearer ${adminTok}`)
@@ -187,7 +191,7 @@ describe('FU-318: Quick Fix resolver (Phase 29)', () => {
   });
 
   test('apply endpoint rejects malformed payload', async () => {
-    const scheduleId = await freshTermSchedule('262');
+    const { scheduleId } = await freshTermSchedule('262');
     const r = await request(app)
       .post(`/api/v1/schedules/${scheduleId}/quick-fix/apply`)
       .set('Authorization', `Bearer ${adminTok}`)

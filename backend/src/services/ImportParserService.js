@@ -173,7 +173,13 @@ function assertDocxStructureSafe(html) {
   const tClose = (html.match(/<\/table>/gi) || []).length;
   const trOpen  = (html.match(/<tr\b/gi)  || []).length;
   const trClose = (html.match(/<\/tr>/gi) || []).length;
-  if (tOpen !== tClose || trOpen !== trClose || tOpen > MAX_DOCX_TABLES)
+  // NEW-FU-672: also require balanced <td>/<th>. The cell extractor `cellsFor` uses the lazy
+  // `/<t[hd]…?<\/t[hd]>/gi`, which is the SAME O(n²) ReDoS shape as the table/row scans when an
+  // opener has no closer (a 200k-`<td>` body pins it ~51 s). mammoth always emits balanced cells,
+  // so this never trips a real file — it's insurance against any future non-mammoth HTML producer.
+  const tdOpen  = (html.match(/<t[dh]\b/gi)  || []).length;
+  const tdClose = (html.match(/<\/t[dh]>/gi) || []).length;
+  if (tOpen !== tClose || trOpen !== trClose || tdOpen !== tdClose || tOpen > MAX_DOCX_TABLES)
     bad("We couldn't read this Word file — its table structure looks malformed.");
   return trOpen;
 }

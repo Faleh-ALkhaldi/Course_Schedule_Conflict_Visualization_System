@@ -61,6 +61,10 @@ function venueNameError(name) {
   if (!n) return null;                                  // an empty venue (no room yet) is allowed
   if (n.length > 80) return 'venue name is too long (max 80 characters)';
   if (!VENUE_NAME_RE.test(n)) return 'venue name may use only letters, numbers, spaces, dots, hyphens and slashes';
+  // NEW-FU-672: reject CONSECUTIVE spaces (same look-alike-duplicate vector as instructor names —
+  // the venue dedup key doesn't collapse interior whitespace, so "22  120" would forge a second
+  // venue row distinct from "22 120"). Real room codes have no double spaces (0 in the live data).
+  if (/ {2,}/.test(n)) return 'venue name has consecutive spaces — use a single space';
   return null;
 }
 

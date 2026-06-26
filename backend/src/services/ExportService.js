@@ -125,11 +125,38 @@ function safeFilenamePart(s) {
     .trim();
 }
 
+// NEW-FU-672: unwrap exceljs RICH cell values to their scalar. A formula cell's `.value` is
+// `{ formula, result }`, a hyperlink's is `{ text, hyperlink }`, rich text is `{ richText:[…] }` —
+// `.toString()` on those yields "[object Object]", which a formula course-code cell then carried
+// into the field-gate error (junk instead of a readable value). Resolve to the computed/display
+// scalar so a formula cell is read as its value and validated normally. Real exports never contain
+// formula cells (safeCell writes literals), so this changes nothing for a faithful round-trip.
+function cellScalar(value) {
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    if ('result' in value)             return value.result;                      // formula → result
+    if ('text' in value)               return value.text;                        // hyperlink → text
+    if (Array.isArray(value.richText)) return value.richText.map(t => t.text).join('');
+    if ('error' in value)              return value.error;                       // error cell → its code
+  }
+  return value;
+}
+
+// NEW-FU-674: case-INSENSITIVE worksheet lookup. exceljs getWorksheet() is case-sensitive, so a
+// third-party tool (Google Sheets / openpyxl / a manual edit) that re-saves a sheet under a different
+// NAME CASE ("officehours") made the importer silently skip that sheet → return [] → the unconditional
+// pre-commit DELETE/prune then ERASED the term's office hours / section-less venues with NO warning.
+// Match by lowercased name so a case-variant sheet is still found (faithful exports are unaffected).
+const wsByName = (wb, ...names) => {
+  const want = new Set(names.map(n => n.toLowerCase()));
+  return wb.worksheets.find(w => want.has(String(w.name).toLowerCase())) || null;
+};
+
 // NEW-H1: exceljs returns time cells as Date objects (or numbers for raw
 // fractional-day values). Coercing those via .toString() yields "1899-12-31..."
 // which then parses to 0 minutes and silently collapses every section to 00:00.
 // Normalize to "HH:MM" here so the import path stays string-only downstream.
 function cellToTimeString(value) {
+  value = cellScalar(value);
   if (value == null) return '';
   if (value instanceof Date) {
     const h = value.getUTCHours();
@@ -645,7 +672,7 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
     // "lklsh 292-1" and gibberish names could persist via a file upload. Reject the
     // whole import up front; the surrounding transaction rolls back, so the term's
     // existing courses/sections are never lost.
-    const { courseCodeError, courseNameError, courseCodeLevelError } = require('../domain/courseFormat');
+    const { courseCodeError, courseNameError, courseCodeLevelError, resolveAcademicLevel } = require('../domain/courseFormat');
     // NEW-FU-657: a faithful re-import of an exported term must be ACCEPTED. The seed
     // catalog legitimately holds names the strict create-time validator rejects —
     // one-word graduate titles ("Thesis", "Seminar") and an em-dash in a demo title —
@@ -712,15 +739,11 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
       const key = row.courseCode.toLowerCase();
       if (!courseByCode.has(key)) {
         const isGR = row.category?.toUpperCase() === 'GR';
-        // NEW-FU-671 (re-audit): strip ALL whitespace before matching the UG level. The PDF
-        // export's narrow Academic-Level column char-wraps "Sophomore" → "Sophomor"+"e", which the
-        // positional parser rejoins as "Sophomor e"; without this the no-match path silently
-        // defaulted EVERY wrapped row to "Freshman" (a real round-trip data loss). No UG level has
-        // an internal space, so collapsing whitespace is loss-free.
-        const level = isGR ? 'Graduate' :
-          ['Freshman','Sophomore','Junior','Senior'].find(
-            l => l.toLowerCase() === String(row.academicLevel ?? '').replace(/\s+/g, '').toLowerCase()
-          ) ?? 'Freshman';
+        // NEW-FU-671 (re-audit): resolve the academic level via the SHARED whitespace-tolerant
+        // resolver (domain/courseFormat) so this whole-term path and the scoped-merge path
+        // (ScopedImportService) cannot diverge. It recovers the PDF-wrapped "Sophomor e" → "Sophomore"
+        // the narrow Academic-Level column produced; GR → Graduate; unknown → Freshman.
+        const level = resolveAcademicLevel(row.academicLevel, row.category);
         // NEW-FU-570 (audit-2 Phase-11 P2): persist the derived has_lab so a
         // 4-credit course imports schedulable (it was defaulting FALSE, which the
         // app treats as impossible → every later add-section failed pattern validation).
@@ -909,24 +932,32 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
     const wantVenue = [...new Set(
       [...rowData.map(r => _lc(r.venueName)), ...(venuesRef || []).map(v => _lc(v.name))].filter(Boolean)
     )];
-    if (wantInstr.length) {
-      await client.query(
-        `DELETE FROM instructors
-           WHERE owner_semester = $1
-             AND lower(name) <> ALL($2::text[])
-             AND id NOT IN (SELECT instructor_id FROM sections WHERE schedule_id = $3 AND instructor_id IS NOT NULL)`,
-        [ownerSemester, wantInstr, scheduleId]
-      );
-    }
-    if (wantVenue.length) {
-      await client.query(
-        `DELETE FROM venues
-           WHERE owner_semester = $1
-             AND lower(name) <> ALL($2::text[])
-             AND id NOT IN (SELECT venue_id FROM sections WHERE schedule_id = $3 AND venue_id IS NOT NULL)`,
-        [ownerSemester, wantVenue, scheduleId]
-      );
-    }
+    // NEW-FU-672: prune UNCONDITIONALLY (was gated on `wantInstr.length`/`wantVenue.length`, like
+    // the office-hours DELETE in (a)). A whole-term file whose section rows are ALL anonymous AND
+    // that carries no Instructors/Venues reference sheet yields an EMPTY want-set — the old guard
+    // then skipped the DELETE entirely, leaving the PREVIOUS import's instructors/venues as orphans
+    // (they re-surfaced in the assignment dropdowns + re-exports). The keep-list test is written
+    // empty-array-safe as `NOT (lower(name) = ANY($2))`: `= ANY('{}')` is FALSE, so NOT(FALSE)=TRUE
+    // keeps EVERY owner-term row eligible when the file names nobody → the correct full prune. (We
+    // use this rather than `lower(name) <> ALL($2)`: that form is ALSO TRUE for an empty array, but
+    // only via the easy-to-misread "ALL over the empty set is vacuously true" rule, whereas
+    // `= ANY('{}') = FALSE` is unambiguous.) The "backs no current section" sub-select keeps each
+    // DELETE FK-safe, and a faithful round-trip (complete want-set) still prunes only true orphans.
+    // COURSES stay unpruned (see (b): no complete course reference; section-less courses are kept).
+    await client.query(
+      `DELETE FROM instructors
+         WHERE owner_semester = $1
+           AND NOT (lower(name) = ANY($2::text[]))
+           AND id NOT IN (SELECT instructor_id FROM sections WHERE schedule_id = $3 AND instructor_id IS NOT NULL)`,
+      [ownerSemester, wantInstr, scheduleId]
+    );
+    await client.query(
+      `DELETE FROM venues
+         WHERE owner_semester = $1
+           AND NOT (lower(name) = ANY($2::text[]))
+           AND id NOT IN (SELECT venue_id FROM sections WHERE schedule_id = $3 AND venue_id IS NOT NULL)`,
+      [ownerSemester, wantVenue, scheduleId]
+    );
 
     // (c) Re-create office hours from the file so the term doesn't fire R-13 ("instructor has no
     //     office hours"). Each OH is keyed to its instructor by name.
@@ -976,7 +1007,7 @@ async function parseExcelToRows(buffer) {
   await wb.xlsx.load(buffer);
   // NEW-FU-662: cap sheets/rows so an abnormally large (or size-lying) workbook is rejected.
   assertSheetCount(wb.worksheets.length);
-  const ws = wb.getWorksheet('Sections') ?? wb.worksheets[0];
+  const ws = wsByName(wb, 'Sections') ?? wb.worksheets[0];   // NEW-FU-674: case-insensitive
   if (!ws) throw new Error('No worksheet found in uploaded file.');
   assertRowCount(ws.rowCount, 'sheet');
 
@@ -1012,7 +1043,7 @@ async function parseExcelToRows(buffer) {
     // lowercased key matches FU-68's case-insensitive header table.
     const getStr  = col => {
       const k = headers[col.toLowerCase()];
-      return k ? (row.getCell(k)?.value?.toString().trim() ?? '') : '';
+      return k ? (cellScalar(row.getCell(k)?.value)?.toString().trim() ?? '') : '';   // NEW-FU-672: unwrap formula/rich cells
     };
     const getTime = col => {
       const k = headers[col.toLowerCase()];
@@ -1027,7 +1058,7 @@ async function parseExcelToRows(buffer) {
 
     // NEW-M13 + NEW-FU-24 + NEW-FU-68: lowercased optional-column lookup.
     const creditsCol = headers['credits'];
-    const creditsCell = creditsCol ? row.getCell(creditsCol)?.value : undefined;
+    const creditsCell = creditsCol ? cellScalar(row.getCell(creditsCol)?.value) : undefined;   // NEW-FU-672: unwrap formula/rich cells
     const credits = Number.isFinite(parseInt(creditsCell, 10)) ? parseInt(creditsCell, 10) : 3;
 
     // NEW-FU-100: read Section Type with 'Lec' default. Files exported
@@ -1097,14 +1128,24 @@ async function parseExcelToRows(buffer) {
 // NEW-FU-660: read the "Meta" sheet's Scope value ('full' | 'instructor' | 'venue').
 // Absent sheet → 'full' (pre-FU-660 files were whole-term replace files).
 function parseMetaScope(wb) {
-  const ws = wb.getWorksheet('Meta');
+  const ws = wsByName(wb, 'Meta');   // NEW-FU-674: case-insensitive
   if (!ws) return 'full';
   for (let r = 2; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
-    const field = row.getCell(1)?.value?.toString().trim().toLowerCase();
+    const field = cellScalar(row.getCell(1)?.value)?.toString().trim().toLowerCase();   // NEW-FU-672: unwrap formula/rich/hyperlink cells (consistency w/ Sections path)
     if (field === 'scope') {
-      const v = row.getCell(2)?.value?.toString().trim().toLowerCase();
-      return (v === 'instructor' || v === 'venue') ? v : 'full';
+      const v = cellScalar(row.getCell(2)?.value)?.toString().trim().toLowerCase();   // NEW-FU-672: a Scope cell that RENDERS as full/instructor/venue reads as that value, not "[object Object]"
+      if (v === 'instructor' || v === 'venue' || v === 'full') return v;
+      // NEW-FU-672: a PRESENT Meta sheet with an UNRECOGNIZED Scope value is anomalous — a faithful
+      // export always writes 'full' | 'instructor' | 'venue'. The old code silently coerced any other
+      // value to 'full', which would route a tampered/garbled SCOPED file into a DESTRUCTIVE
+      // whole-term REPLACE. Reject it instead (atomic, pre-DB). Zero false positives: no legitimate
+      // file carries a garbage scope. (A fully ABSENT Meta sheet still defaults to 'full' below —
+      // old/pre-FU-660 whole-term files legitimately carry none, so that case is indistinguishable
+      // from a scoped file whose Meta sheet was removed; the REPLACE there is per-term-isolated and
+      // user-initiated. See the FU-672 audit note.)
+      const e = new Error('This file’s scope marker is unrecognized — please re-export the schedule and import the fresh file.');
+      e.status = 400; throw e;
     }
   }
   return 'full';
@@ -1112,7 +1153,7 @@ function parseMetaScope(wb) {
 
 // NEW-FU-657b: read the "Instructors" sheet → [{name, email}].
 function parseInstructorsSheet(wb) {
-  const ws = wb.getWorksheet('Instructors') ?? wb.getWorksheet('Instructor');   // NEW-FU-666: accept singular scoped name
+  const ws = wsByName(wb, 'Instructors', 'Instructor');   // NEW-FU-666: singular scoped name · NEW-FU-674: case-insensitive
   if (!ws) return [];
   assertRowCount(ws.rowCount, 'Instructors sheet');   // NEW-FU-669: cap reference-sheet rows too
   const h = Object.create(null);   // NEW-FU-669: null-proto so a "__proto__"/"constructor" header can't pollute
@@ -1122,8 +1163,8 @@ function parseInstructorsSheet(wb) {
   const out = [];
   for (let r = 2; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
-    const name  = row.getCell(nCol)?.value?.toString().trim() ?? '';
-    const email = eCol ? (row.getCell(eCol)?.value?.toString().trim() ?? '') : '';
+    const name  = cellScalar(row.getCell(nCol)?.value)?.toString().trim() ?? '';   // NEW-FU-672: unwrap formula/rich/hyperlink cells (consistency w/ Sections path)
+    const email = eCol ? (cellScalar(row.getCell(eCol)?.value)?.toString().trim() ?? '') : '';
     if (name) out.push({ name, email });
   }
   return out;
@@ -1131,7 +1172,7 @@ function parseInstructorsSheet(wb) {
 
 // NEW-FU-657b: read the "Venues" sheet → [{name, type, capacity}].
 function parseVenuesSheet(wb) {
-  const ws = wb.getWorksheet('Venues') ?? wb.getWorksheet('Venue');   // NEW-FU-666: accept singular scoped name
+  const ws = wsByName(wb, 'Venues', 'Venue');   // NEW-FU-666: singular scoped name · NEW-FU-674: case-insensitive
   if (!ws) return [];
   assertRowCount(ws.rowCount, 'Venues sheet');   // NEW-FU-669
   const h = Object.create(null);   // NEW-FU-669: null-proto header map
@@ -1141,9 +1182,9 @@ function parseVenuesSheet(wb) {
   const out = [];
   for (let r = 2; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
-    const name = row.getCell(nCol)?.value?.toString().trim() ?? '';
-    const type = tCol ? labels.venueTypeCode(row.getCell(tCol)?.value?.toString().trim() ?? '') : '';  // NEW-FU-666
-    const capRaw = cCol ? row.getCell(cCol)?.value : null;
+    const name = cellScalar(row.getCell(nCol)?.value)?.toString().trim() ?? '';   // NEW-FU-672: unwrap formula/rich/hyperlink cells (consistency w/ Sections path)
+    const type = tCol ? labels.venueTypeCode(cellScalar(row.getCell(tCol)?.value)?.toString().trim() ?? '') : '';  // NEW-FU-666 / FU-672 unwrap
+    const capRaw = cCol ? cellScalar(row.getCell(cCol)?.value) : null;   // NEW-FU-672: a formula capacity {formula,result:30} now reads 30, not NaN→null
     const capacity = Number.isFinite(parseInt(capRaw, 10)) ? parseInt(capRaw, 10) : null;
     if (name) out.push({ name, type, capacity });
   }
@@ -1152,7 +1193,7 @@ function parseVenuesSheet(wb) {
 
 // NEW-FU-657: read the "OfficeHours" sheet → [{instructorName, day, startTime, endTime}].
 function parseOfficeHoursSheet(wb) {
-  const ws = wb.getWorksheet('OfficeHours');
+  const ws = wsByName(wb, 'OfficeHours');   // NEW-FU-674: case-insensitive
   if (!ws) return [];
   assertRowCount(ws.rowCount, 'OfficeHours sheet');   // NEW-FU-669
   const headers = Object.create(null);   // NEW-FU-669: null-proto header map
@@ -1166,8 +1207,8 @@ function parseOfficeHoursSheet(wb) {
   const out = [];
   for (let r = 2; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
-    const instructorName = row.getCell(iCol)?.value?.toString().trim() ?? '';
-    const day            = row.getCell(dCol)?.value?.toString().trim() ?? '';
+    const instructorName = cellScalar(row.getCell(iCol)?.value)?.toString().trim() ?? '';   // NEW-FU-672: unwrap formula/rich/hyperlink cells (start/end already via cellToTimeString→cellScalar)
+    const day            = cellScalar(row.getCell(dCol)?.value)?.toString().trim() ?? '';
     const startTime      = cellToTimeString(row.getCell(sCol)?.value);
     const endTime        = cellToTimeString(row.getCell(eCol)?.value);
     if (!instructorName || !day || !startTime || !endTime) continue;

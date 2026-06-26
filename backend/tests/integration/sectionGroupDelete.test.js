@@ -13,7 +13,7 @@
 
 const request = require('supertest');
 const app     = require('../../src/app');
-const { getClient } = require('../../src/config/db');
+const { getClient, query } = require('../../src/config/db');   // NEW-FU-673: + term-valid resource selection
 
 const ADMIN = { username: 'admin1', password: 'password123' };
 
@@ -64,18 +64,23 @@ async function freshTermSchedule(code) {
       .set('Authorization', `Bearer ${adminTok}`)
       .catch(() => {});
   }
-  return sched.id;
+  // NEW-FU-673: return a course VALID FOR THIS TERM (owned by this term, owner_semester = code,
+  // OR template, owner_semester IS NULL). Post-FU-645 the global GET /courses list also surfaces
+  // every OTHER term's private copies, so picking from it can grab a foreign-term course. /suggest
+  // accepts a template course, so the OR-NULL set is always populated; UG-only sidesteps the R-06
+  // graduate window. The GET endpoint doesn't expose owner_semester, so we query directly.
+  const courses = (await query(
+    `SELECT id, course_code, credits, has_lab, category FROM courses
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND category = 'UG'`, [code])).rows
+    .map(c => ({ ...c, credits: Number(c.credits) }));
+  const course = courses.find(c => c.credits === 3 && !c.has_lab && c.category === 'UG');
+  return { scheduleId: sched.id, course, courses };
 }
 
 describe('FU-305: side-panel ✕ deletes entire section group (Phase 27)', () => {
 
   test('STT pattern with same times across days: all 3 rows deleted', async () => {
-    const scheduleId = await freshTermSchedule('281');
-
-    const courses = (await request(app)
-      .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-    ).body;
-    const c = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
+    const { scheduleId, course: c } = await freshTermSchedule('281');   // NEW-FU-673: term-valid course
     await request(app)
       .post(`/api/v1/schedules/${scheduleId}/suggest`)
       .set('Authorization', `Bearer ${adminTok}`)
@@ -108,12 +113,7 @@ describe('FU-305: side-panel ✕ deletes entire section group (Phase 27)', () =>
   // shows ONE entry per (courseId, sectionNumber) regardless of time,
   // so the user saw "click ✕, only one card disappears".
   test('section group with DIFFERENT times per day: still all rows deleted', async () => {
-    const scheduleId = await freshTermSchedule('282');
-
-    const courses = (await request(app)
-      .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-    ).body;
-    const c = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
+    const { scheduleId, course: c } = await freshTermSchedule('282');   // NEW-FU-673: term-valid course
 
     // Seed an STT group first.
     await request(app)
@@ -161,16 +161,18 @@ describe('FU-305: side-panel ✕ deletes entire section group (Phase 27)', () =>
     expect(groupAfter.length).toBe(0);
   });
 
-  test('per-day delete (?scope=row) still removes only ONE row', async () => {
-    // Sanity: the new broader group-by-section query for default scope
-    // doesn't affect ?scope=row behavior. The grid-block ✕ must keep
-    // removing only the targeted day.
-    const scheduleId = await freshTermSchedule('283');
-
-    const courses = (await request(app)
-      .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-    ).body;
-    const c = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
+  test('per-day delete (?scope=row) on a multi-day group is coerced to a whole-group delete', async () => {
+    // NEW-FU-673: this test predated FU-609 (Batch 30 item 2). It used to assert that
+    // `?scope=row` removed only the targeted Tuesday meeting and left Sun + Thu behind.
+    // FU-609 deliberately changed that: a row-scope delete on a section that is part of a
+    // MULTI-day group is now COERCED to a whole-group delete, because "deleting one meeting
+    // of a 3-day section and leaving the other two is not a legal section state"
+    // (controllers/index.js deleteSection). The grid-block ✕ now requests scope=group anyway;
+    // the coercion backstops direct API / import callers. So the modern contract for a multi-day
+    // group is: scope=row ⇒ the whole group is removed (a genuinely single-day section, which
+    // has no siblings, still deletes just itself — row==group there).
+    const { scheduleId, course } = await freshTermSchedule('283');
+    const c = course;
     await request(app)
       .post(`/api/v1/schedules/${scheduleId}/suggest`)
       .set('Authorization', `Bearer ${adminTok}`)
@@ -179,19 +181,23 @@ describe('FU-305: side-panel ✕ deletes entire section group (Phase 27)', () =>
     const sx = (await request(app)
       .get(`/api/v1/schedules/${scheduleId}/sections`)
       .set('Authorization', `Bearer ${adminTok}`)).body;
-    const tueRow = (sx.sections || sx).find(s => s.courseId === c.id && s.day === 'Tuesday');
+    const group = (sx.sections || sx).filter(s => s.courseId === c.id);
+    expect(group.length).toBe(3);                 // STT → Sun/Tue/Thu
+    const tueRow = group.find(s => s.day === 'Tuesday');
 
     const dr = await request(app)
       .delete(`/api/v1/sections/${tueRow.id}?scope=row`)
       .set('Authorization', `Bearer ${adminTok}`);
     expect(dr.status).toBe(200);
-    expect(dr.body.deletedIds.length).toBe(1);
+    // FU-609 coercion: row-scope on a 3-day group removes all 3 rows, not just Tuesday.
+    expect(dr.body.scope).toBe('group');
+    expect(dr.body.deletedIds.length).toBe(3);
+    expect(new Set(dr.body.deletedIds)).toEqual(new Set(group.map(s => s.id)));
 
     const after = (await request(app)
       .get(`/api/v1/schedules/${scheduleId}/sections`)
       .set('Authorization', `Bearer ${adminTok}`)).body;
     const surviving = (after.sections || after).filter(s => s.courseId === c.id);
-    expect(surviving.length).toBe(2);
-    expect(new Set(surviving.map(s => s.day))).toEqual(new Set(['Sunday', 'Thursday']));
+    expect(surviving.length).toBe(0);
   });
 });

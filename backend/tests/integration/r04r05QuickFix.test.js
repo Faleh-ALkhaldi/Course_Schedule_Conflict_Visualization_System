@@ -12,6 +12,7 @@
 
 const request = require('supertest');
 const app     = require('../../src/app');
+const { query } = require('../../src/config/db');   // NEW-FU-673: term-valid resource selection
 
 const ADMIN = { username: 'admin1', password: 'password123' };
 
@@ -41,6 +42,8 @@ async function freshTermSchedule(code) {
     .query({ activeCode: '251' })
     .set('Authorization', `Bearer ${adminTok}`)
     .catch(() => {});
+  // Default (copy) create so the term owns a real resource pool — the R-04/R-05 fix computers draw
+  // their reassign candidates from the term's own instructors/venues, so a blank term would starve them.
   const tr = await request(app)
     .post('/api/v1/terms')
     .set('Authorization', `Bearer ${adminTok}`)
@@ -53,10 +56,10 @@ async function freshTermSchedule(code) {
   const sched = sr.body.find(s => s.semester === code);
   expect(sched).toBeTruthy();
 
-  // Wipe any auto-cloned sections (term creation may seed from a base
-  // season-family term — Phase 16). Phase 25 tests need precise control
-  // over what's in the schedule, so we start from a true blank slate.
-  // Use /suggest with empty configs to clear the schedule, then verify.
+  // Wipe any auto-cloned sections (term creation seeds from a base season-family term — Phase 16).
+  // Phase 25 tests need precise control over what's in the schedule, so we start from a blank slate.
+  // The term's OWNED resources (courses/instructors/venues) survive a section delete — only the
+  // schedule's section rows go.
   const sections = (await request(app)
     .get(`/api/v1/schedules/${sched.id}/sections`)
     .set('Authorization', `Bearer ${adminTok}`)).body;
@@ -66,7 +69,23 @@ async function freshTermSchedule(code) {
       .set('Authorization', `Bearer ${adminTok}`)
       .catch(() => {});
   }
-  return sched.id;
+
+  // NEW-FU-673: return resources VALID FOR THIS TERM — owned by this term (owner_semester = code) or
+  // template (owner_semester IS NULL). Post-FU-645, picking from the global GET /instructors|courses|
+  // venues lists grabs another term's owner-scoped copy → section-create 409 "belongs to term …".
+  // Query directly because those GET endpoints don't expose owner_semester. UG-only courses keep the
+  // R-06 graduate-time-window (17:20–22:00) from rejecting the 09:00 sections these tests build.
+  const courses = (await query(
+    `SELECT id, credits, has_lab, category FROM courses
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND category = 'UG'`, [code])).rows
+    .map(c => ({ ...c, credits: Number(c.credits) }));
+  const instructors = (await query(
+    `SELECT id, name FROM instructors
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false ORDER BY name`, [code])).rows;
+  const venues = (await query(
+    `SELECT id, type FROM venues
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false ORDER BY name`, [code])).rows;
+  return { scheduleId: sched.id, courses, instructors, venues };
 }
 
 // Helper: create a single section in this schedule with explicit
@@ -96,17 +115,12 @@ async function createOneSection(scheduleId, opts) {
 describe('FU-294: R-04 quick-fix (Phase 25)', () => {
 
   test('R-04 conflict carries `fixes` listing free instructors', async () => {
-    const scheduleId = await freshTermSchedule('281');
+    const { scheduleId, courses, instructors, venues } = await freshTermSchedule('281');
 
     // Pre-flight data: two distinct 3-cr courses, two distinct instructors,
     // one venue. We'll force-assign the SAME instructor to both → R-04 fires.
-    const [courses, instructors, venues] = await Promise.all([
-      request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    ]);
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
-    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.id !== c1.id);
+    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
+    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG' && c.id !== c1.id);
     const instr = instructors[0];
     const lecVenue1 = venues.find(v => v.type === 'LectureHall');
     const lecVenue2 = venues.find(v => v.type === 'LectureHall' && v.id !== lecVenue1.id);
@@ -142,15 +156,10 @@ describe('FU-294: R-04 quick-fix (Phase 25)', () => {
   });
 
   test('applying R-04 fix clears the conflict', async () => {
-    const scheduleId = await freshTermSchedule('282');
+    const { scheduleId, courses, instructors, venues } = await freshTermSchedule('282');
 
-    const [courses, instructors, venues] = await Promise.all([
-      request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    ]);
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
-    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.id !== c1.id);
+    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
+    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG' && c.id !== c1.id);
     const instr = instructors[0];
     const lec1 = venues.find(v => v.type === 'LectureHall');
     const lec2 = venues.find(v => v.type === 'LectureHall' && v.id !== lec1.id);
@@ -188,16 +197,11 @@ describe('FU-294: R-04 quick-fix (Phase 25)', () => {
   });
 
   test('R-04 fixes never propose an instructor who is also busy at the slot', async () => {
-    const scheduleId = await freshTermSchedule('283');
+    const { scheduleId, courses, instructors, venues } = await freshTermSchedule('283');
 
-    const [courses, instructors, venues] = await Promise.all([
-      request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    ]);
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
-    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.id !== c1.id);
-    const c3 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.id !== c1.id && c.id !== c2.id);
+    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
+    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG' && c.id !== c1.id);
+    const c3 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG' && c.id !== c1.id && c.id !== c2.id);
     const instrA = instructors[0];
     const instrB = instructors[1];
     const lec1 = venues.find(v => v.type === 'LectureHall');
@@ -242,15 +246,10 @@ describe('FU-294: R-04 quick-fix (Phase 25)', () => {
 describe('FU-294: R-05 quick-fix (Phase 25)', () => {
 
   test('R-05 conflict carries `fixes` listing free same-type venues', async () => {
-    const scheduleId = await freshTermSchedule('261');
+    const { scheduleId, courses, instructors, venues } = await freshTermSchedule('261');
 
-    const [courses, instructors, venues] = await Promise.all([
-      request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    ]);
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
-    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.id !== c1.id);
+    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
+    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG' && c.id !== c1.id);
     const instrA = instructors[0];
     const instrB = instructors[1];
     const sharedLec = venues.find(v => v.type === 'LectureHall');
@@ -287,15 +286,10 @@ describe('FU-294: R-05 quick-fix (Phase 25)', () => {
   });
 
   test('applying R-05 fix clears the conflict', async () => {
-    const scheduleId = await freshTermSchedule('262');
+    const { scheduleId, courses, instructors, venues } = await freshTermSchedule('262');
 
-    const [courses, instructors, venues] = await Promise.all([
-      request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    ]);
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
-    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.id !== c1.id);
+    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
+    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG' && c.id !== c1.id);
     const instrA = instructors[0];
     const instrB = instructors[1];
     const sharedLec = venues.find(v => v.type === 'LectureHall');
@@ -334,15 +328,10 @@ describe('FU-294: R-05 quick-fix (Phase 25)', () => {
     // A Lab section in a LectureHall would trigger R-11; a Lec section
     // in a Laboratory would trigger R-12. The fix computer must filter
     // candidates to the SAME type as the conflicting section.
-    const scheduleId = await freshTermSchedule('263');
+    const { scheduleId, courses, instructors, venues } = await freshTermSchedule('263');
 
-    const [courses, instructors, venues] = await Promise.all([
-      request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-      request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    ]);
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
-    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.id !== c1.id);
+    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
+    const c2 = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG' && c.id !== c1.id);
     const instrA = instructors[0];
     const instrB = instructors[1];
     const lec = venues.find(v => v.type === 'LectureHall');

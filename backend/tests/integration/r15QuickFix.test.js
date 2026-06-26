@@ -11,6 +11,7 @@
 
 const request = require('supertest');
 const app     = require('../../src/app');
+const { query } = require('../../src/config/db');   // NEW-FU-673: term-valid course + raw under-coverage setup
 
 const ADMIN = { username: 'admin1', password: 'password123' };
 
@@ -51,7 +52,25 @@ async function freshTermSchedule(code) {
     .set('Authorization', `Bearer ${adminTok}`);
   const sched = sr.body.find(s => s.semester === code);
   expect(sched).toBeTruthy();
-  return sched.id;
+  // NEW-FU-673: return a course VALID FOR THIS TERM (owned, owner_semester = code, OR template,
+  // owner_semester IS NULL). The global GET /courses list now also surfaces every OTHER term's
+  // private copies (FU-645) → a picked course can belong to another term. /suggest accepts a
+  // template, so OR-NULL is always populated; UG-only avoids the R-06 graduate window.
+  const courses = (await query(
+    `SELECT id, course_code, credits, has_lab, category FROM courses
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND category = 'UG'`, [code])).rows
+    .map(c => ({ ...c, credits: Number(c.credits) }));
+  const course = courses.find(c => c.credits === 3 && !c.has_lab && c.category === 'UG');
+  return { scheduleId: sched.id, course, courses };
+}
+
+// NEW-FU-673: drop ONE meeting row at the DB level to leave a section group under-covering its
+// credit pattern, so R-15 fires. FU-609 (Batch 30 item 2) now coerces an HTTP scope=row delete on
+// a multi-day group into a whole-group delete (a partial group is not a legal state), which would
+// remove the group entirely and R-15 could never fire. A raw delete reproduces the exact
+// under-covered state the rule + its quick-fix are designed to remediate.
+async function rawDeleteRow(sectionId) {
+  await query('DELETE FROM sections WHERE id = $1', [sectionId]);
 }
 
 async function seedSTT(scheduleId, course) {
@@ -66,22 +85,17 @@ describe('FU-282: R-15 quick-fix flow (Phase 23)', () => {
 
   // ── FU-278: R-15 carries `fixes` proposals ────────────────────────
   test('R-15 conflict includes fixes proposing the missing day', async () => {
-    const scheduleId = await freshTermSchedule('291');
-
-    const courses = (await request(app)
-      .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-    ).body;
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
+    const { scheduleId, course: c1 } = await freshTermSchedule('291');
     await seedSTT(scheduleId, c1);
 
-    // Delete the Thursday meeting → surviving is Sun + Tue (100 min < 150).
+    // Drop the Thursday meeting → surviving is Sun + Tue (100 min < 150).
+    // NEW-FU-673: raw DB delete (FU-609 coerces HTTP scope=row on a multi-day group to a
+    // whole-group delete, which would leave nothing for R-15 to fire on).
     const sx = (await request(app)
       .get(`/api/v1/schedules/${scheduleId}/sections`)
       .set('Authorization', `Bearer ${adminTok}`)).body;
     const thu = (sx.sections || sx).find(s => s.courseId === c1.id && s.day === 'Thursday');
-    await request(app)
-      .delete(`/api/v1/sections/${thu.id}?scope=row`)
-      .set('Authorization', `Bearer ${adminTok}`);
+    await rawDeleteRow(thu.id);
 
     const conflicts = (await request(app)
       .get(`/api/v1/schedules/${scheduleId}/conflicts`)
@@ -101,22 +115,16 @@ describe('FU-282: R-15 quick-fix flow (Phase 23)', () => {
 
   // ── FU-277: extend endpoint applies a fix and R-15 clears ─────────
   test('POST /sections/:id/extend with fix addDays completes the pattern and clears R-15', async () => {
-    const scheduleId = await freshTermSchedule('292');
-
-    const courses = (await request(app)
-      .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-    ).body;
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
+    const { scheduleId, course: c1 } = await freshTermSchedule('292');
     await seedSTT(scheduleId, c1);
 
-    // Delete Tuesday → surviving Sun + Thu.
+    // Drop Tuesday → surviving Sun + Thu. NEW-FU-673: raw DB delete (FU-609 coerces HTTP
+    // scope=row on a multi-day group to a whole-group delete).
     const sx = (await request(app)
       .get(`/api/v1/schedules/${scheduleId}/sections`)
       .set('Authorization', `Bearer ${adminTok}`)).body;
     const tue = (sx.sections || sx).find(s => s.courseId === c1.id && s.day === 'Tuesday');
-    await request(app)
-      .delete(`/api/v1/sections/${tue.id}?scope=row`)
-      .set('Authorization', `Bearer ${adminTok}`);
+    await rawDeleteRow(tue.id);
 
     // Get the fix proposal and apply it.
     const conflicts = (await request(app)
@@ -151,12 +159,7 @@ describe('FU-282: R-15 quick-fix flow (Phase 23)', () => {
 
   // ── FU-276: extend rejects an addition that doesn't form a legal pattern ─
   test('POST /sections/:id/extend rejects an illegal addition with 400', async () => {
-    const scheduleId = await freshTermSchedule('293');
-
-    const courses = (await request(app)
-      .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-    ).body;
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
+    const { scheduleId, course: c1 } = await freshTermSchedule('293');   // NEW-FU-673: term-valid course
     await seedSTT(scheduleId, c1);
 
     // Try to add Friday — not in any legal 3-credit template.
@@ -175,12 +178,7 @@ describe('FU-282: R-15 quick-fix flow (Phase 23)', () => {
 
   // ── FU-277: extend rejects adding a day already in the group ─────
   test('POST /sections/:id/extend rejects a duplicate day with 409', async () => {
-    const scheduleId = await freshTermSchedule('261');
-
-    const courses = (await request(app)
-      .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-    ).body;
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
+    const { scheduleId, course: c1 } = await freshTermSchedule('261');   // NEW-FU-673: term-valid course
     await seedSTT(scheduleId, c1);
 
     const sx = (await request(app)
@@ -199,12 +197,7 @@ describe('FU-282: R-15 quick-fix flow (Phase 23)', () => {
 
   // ── FU-277: extend rejects empty addDays with 400 ────────────────
   test('POST /sections/:id/extend rejects empty addDays with 400', async () => {
-    const scheduleId = await freshTermSchedule('262');
-
-    const courses = (await request(app)
-      .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-    ).body;
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
+    const { scheduleId, course: c1 } = await freshTermSchedule('262');   // NEW-FU-673: term-valid course
     await seedSTT(scheduleId, c1);
 
     const sx = (await request(app)
@@ -222,27 +215,19 @@ describe('FU-282: R-15 quick-fix flow (Phase 23)', () => {
 
   // ── FU-278: no fixes proposed for non-completable patterns ───────
   test('No fixes emitted when surviving days are not a subset of any legal template', async () => {
-    const scheduleId = await freshTermSchedule('263');
-
-    const courses = (await request(app)
-      .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-    ).body;
-    const c1 = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
+    const { scheduleId, course: c1 } = await freshTermSchedule('263');
     await seedSTT(scheduleId, c1);
 
-    // Delete Sun AND Tue so only Thu survives. Thu alone is a subset of
-    // STT and TT — both yield 1-day fix proposals. We expect fixes.
+    // Drop Sun AND Tue so only Thu survives. Thu alone is a subset of STT — the fix proposal
+    // completes STT by adding Sun + Tue. NEW-FU-673: raw DB deletes (FU-609 coerces HTTP
+    // scope=row on a multi-day group to a whole-group delete).
     const sx = (await request(app)
       .get(`/api/v1/schedules/${scheduleId}/sections`)
       .set('Authorization', `Bearer ${adminTok}`)).body;
     const sun = (sx.sections || sx).find(s => s.courseId === c1.id && s.day === 'Sunday');
     const tue = (sx.sections || sx).find(s => s.courseId === c1.id && s.day === 'Tuesday');
-    await request(app)
-      .delete(`/api/v1/sections/${sun.id}?scope=row`)
-      .set('Authorization', `Bearer ${adminTok}`);
-    await request(app)
-      .delete(`/api/v1/sections/${tue.id}?scope=row`)
-      .set('Authorization', `Bearer ${adminTok}`);
+    await rawDeleteRow(sun.id);
+    await rawDeleteRow(tue.id);
 
     const conflicts = (await request(app)
       .get(`/api/v1/schedules/${scheduleId}/conflicts`)

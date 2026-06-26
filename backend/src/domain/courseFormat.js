@@ -41,6 +41,22 @@ function courseCodeLevelError(code, academicLevel, category) {
   return `SWE ${m[1]} is a ${expected.level} course — its academic level must be ${want} to match the number.`;
 }
 
+// NEW-FU-671 (re-audit): the SINGLE academic-level resolver shared by every import commit path
+// (ExportService.commitRows whole-term REPLACE and ScopedImportService scoped MERGE). It is
+// whitespace-tolerant on purpose: the PDF export's narrow Academic-Level column char-wraps
+// "Sophomore" → "Sophomor"+"e", which the positional parser rejoins as "Sophomor e"; collapsing
+// internal whitespace before matching recovers it (no UG level word has an internal space, so this
+// is loss-free). GR maps to Graduate regardless of the level text; an unrecognized level falls back
+// to Freshman (the historical default — keeps known-code re-imports lossless). Keeping ONE copy is
+// what stops the two paths from silently diverging again: the scoped copy had missed the
+// whitespace fix, so a wrapped level there was still defaulting every such row to Freshman.
+const ACADEMIC_LEVELS = ['Freshman', 'Sophomore', 'Junior', 'Senior'];
+function resolveAcademicLevel(rawLevel, category) {
+  if (String(category ?? '').toUpperCase() === 'GR') return 'Graduate';
+  const norm = String(rawLevel ?? '').replace(/\s+/g, '').toLowerCase();
+  return ACADEMIC_LEVELS.find((l) => l.toLowerCase() === norm) ?? 'Freshman';
+}
+
 // Name: a real, multi-word title in ENGLISH only — start with a letter, only
 // English letters / digits / spaces / basic title punctuation (incl. apostrophe).
 // NEW-FU-455 (Phase 108): reject gibberish the charset-only rule let through
@@ -127,5 +143,5 @@ module.exports = {
   isValidCourseCode, courseCodeError,
   isValidCourseName, courseNameError, titleCaseCourseName,
   courseFlagError, creditsFlagError,
-  levelForCourseNumber, courseCodeLevelError,
+  levelForCourseNumber, courseCodeLevelError, resolveAcademicLevel,
 };

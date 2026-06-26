@@ -94,10 +94,14 @@ describe('POST /api/v1/terms', () => {
   test('admin can create a Summer term (blank)', async () => {
     const code = '293'; // Summer 2030
     createdCodes.add(code);
+    // NEW-FU-234 made Summer SEED from the nearest existing Summer (253 is seeded) instead of
+    // always starting blank — so a plain create is no longer empty (that seeded path is covered by
+    // the "new Summer seeds…" test below). This test asserts the BLANK path, so request it
+    // explicitly via seedMode:'blank' (NEW-FU-656), which matches the test's name + assertions.
     const r = await request(app)
       .post('/api/v1/terms')
       .set('Authorization', `Bearer ${adminTok}`)
-      .send({ code });
+      .send({ code, seedMode: 'blank' });
     expect(r.status).toBe(201);
     expect(r.body.code).toBe(code);
     expect(r.body.isSummer).toBe(true);

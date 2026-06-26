@@ -192,10 +192,16 @@ class ScheduleService {
         }
       }
 
-      // Update the changed section
+      // Update the changed section.
+      // NEW-FU-678: COALESCE so a PURE time/day move (the caller omits instructorId/venueId → $2/$3
+      // null) PRESERVES the section's existing instructor + venue instead of NULLing them. The old
+      // `SET instructor_id=$2` with `$2 = updates.instructorId ?? null` silently cleared the assignment
+      // on the documented minimal time-move payload (the UI masked it by re-sending the ids, but a
+      // direct API caller lost the data). Clearing an assignment goes through updateSectionInfo (which
+      // guards `!== undefined`), so this move path never legitimately needs to set NULL.
       await client.query(`
         UPDATE sections
-        SET instructor_id=$2, venue_id=$3, day=$4, start_time=$5, end_time=$6, updated_at=NOW()
+        SET instructor_id=COALESCE($2, instructor_id), venue_id=COALESCE($3, venue_id), day=$4, start_time=$5, end_time=$6, updated_at=NOW()
         WHERE id=$1
       `, [sectionId, updates.instructorId ?? null, updates.venueId ?? null,
           updates.day, updates.startTime, updates.endTime]);
@@ -211,10 +217,10 @@ class ScheduleService {
         if (sib.id === sectionId) continue;
         await client.query(`
           UPDATE sections
-          SET instructor_id=$2, venue_id=$3, day=$4, start_time=$5, end_time=$6, updated_at=NOW()
+          SET instructor_id=COALESCE($2, instructor_id), venue_id=COALESCE($3, venue_id), day=$4, start_time=$5, end_time=$6, updated_at=NOW()
           WHERE id=$1
         `, [sib.id, updates.instructorId ?? null, updates.venueId ?? null,
-            sib.day, updates.startTime, updates.endTime]);
+            sib.day, updates.startTime, updates.endTime]);   // NEW-FU-678: COALESCE preserves omitted instructor/venue (see above)
       }
 
       await client.query('COMMIT');

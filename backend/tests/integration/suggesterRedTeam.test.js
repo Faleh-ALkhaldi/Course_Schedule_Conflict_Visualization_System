@@ -7,11 +7,15 @@
 
 const request = require('supertest');
 const app     = require('../../src/app');
+const { query } = require('../../src/config/db');   // NEW-FU-673: term-valid course selection
 
 const ADMIN = { username: 'admin1', password: 'password123' };
 
 let adminTok;
 const createdCodes = new Set();
+// NEW-FU-673: freshTermSchedule() clears `createdCodes` each call (it deletes prior
+// test terms first), so a separate never-cleared set records every code for teardown.
+const allCodes = new Set();
 
 beforeAll(async () => {
   const r = await request(app).post('/api/v1/auth/login').send(ADMIN);
@@ -20,7 +24,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  for (const code of createdCodes) {
+  for (const code of allCodes) {
     await request(app)
       .delete(`/api/v1/terms/${code}`)
       .query({ activeCode: '251' })
@@ -30,7 +34,30 @@ afterAll(async () => {
 });
 
 async function freshTermSchedule(code) {
+  // NEW-FU-673: drop EVERY prior test term before creating this one. Post-FU-234 a
+  // default (copy) term-create seeds sections from the NEAREST same-season term, and
+  // post-FU-645 that copy mints PRIVATE per-term course/instructor/venue rows. After a
+  // Suggest run, a test term's sections reference BOTH its own private venue (e.g.
+  // "22-127" owner=<term>) AND the template "22-127" (owner NULL); copying THAT polluted
+  // term into the next same-season test term makes the isolation step mint two "22-127"
+  // rows for the new owner → uq_venues_name_per_term 23505 → term-create 400. The base
+  // SEED terms (251/252/253/261/262) reference only template venues, so copying FROM them
+  // is collision-free. Deleting prior test terms first guarantees the nearest same-season
+  // neighbour is always a pristine seed term. Tests run serially (--runInBand) and each
+  // has finished asserting before the next call, so this is safe. The default (copy) seed
+  // is KEPT so the term owns a real instructor/venue pool — Suggest's findAssignable()
+  // draws from owner_semester=term ONLY (templates are not assignable), so a blank term
+  // would starve the placer and inject phantom R-13/R-14 noise.
+  for (const prior of createdCodes) {
+    await request(app)
+      .delete(`/api/v1/terms/${prior}`)
+      .query({ activeCode: '251' })
+      .set('Authorization', `Bearer ${adminTok}`)
+      .catch(() => {});
+  }
+  createdCodes.clear();
   createdCodes.add(code);
+  allCodes.add(code);
   await request(app)
     .delete(`/api/v1/terms/${code}`)
     .query({ activeCode: '251' })
@@ -75,19 +102,32 @@ async function getConflicts(scheduleId) {
   return r.body.conflicts ?? r.body;
 }
 
-async function pickCourse(predicate) {
-  const courses = (await request(app)
-    .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-  ).body;
-  return courses.find(predicate);
+// NEW-FU-673: term-valid course lookup by code. The seed course codes carry a SPACE
+// ("SWE 101", not "SWE101") and the legacy fixture codes (SWE201/301/321/310/411/510)
+// don't exist at all, so the old global-GET predicate match returned undefined for
+// every scenario. We query by canonical seed code, returning the course VALID FOR THIS
+// TERM — the term's own copy (owner_semester = code, minted by the copy-seed) when
+// present, else the template (owner_semester IS NULL). Suggest accepts either id; the
+// conflict engine reads level/category/has_lab off the row, so the scenario's intent
+// (level adjacency, lab presence, graduate window) is preserved exactly.
+async function pickCourse(termCode, courseCode) {
+  const res = await query(
+    `SELECT id, course_code, academic_level, category, has_lab, credits
+       FROM courses
+      WHERE course_code = $2 AND (owner_semester = $1 OR owner_semester IS NULL)
+      ORDER BY (owner_semester = $1) DESC NULLS LAST
+      LIMIT 1`,
+    [termCode, courseCode]
+  );
+  return res.rows[0];
 }
 
 describe('FU-354: Suggester red-team battery (Phase 34)', () => {
 
   test('SCENARIO 1a: Freshman + Sophomore single-section → 0 R-02', async () => {
-    const scheduleId = await freshTermSchedule('252');
-    const freshman = await pickCourse(c => c.course_code === 'SWE101');
-    const soph     = await pickCourse(c => c.course_code === 'SWE201');
+    const scheduleId = await freshTermSchedule('272');   // NEW-FU-673: non-seed code (was 252, a base seed term)
+    const freshman = await pickCourse('272', 'SWE 101');   // NEW-FU-673: Freshman
+    const soph     = await pickCourse('272', 'SWE 216');   // NEW-FU-673: Sophomore (SWE201 doesn't exist)
     await runSuggest(scheduleId, [
       { courseId: freshman.id, sections: 1, duration: 50, dayPattern: 'STT' },
       { courseId: soph.id,     sections: 1, duration: 75, dayPattern: 'MW' },
@@ -98,9 +138,9 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
   });
 
   test('SCENARIO 1b: Sophomore + Junior single-section → 0 R-02', async () => {
-    const scheduleId = await freshTermSchedule('253');
-    const soph = await pickCourse(c => c.course_code === 'SWE201');
-    const jr   = await pickCourse(c => c.course_code === 'SWE301');
+    const scheduleId = await freshTermSchedule('273');   // NEW-FU-673: non-seed code (was 253, a base seed term)
+    const soph = await pickCourse('273', 'SWE 216');   // NEW-FU-673: Sophomore
+    const jr   = await pickCourse('273', 'SWE 316');   // NEW-FU-673: Junior
     await runSuggest(scheduleId, [
       { courseId: soph.id, sections: 1, duration: 75, dayPattern: 'MW' },
       { courseId: jr.id,   sections: 1, duration: 50, dayPattern: 'STT' },
@@ -114,9 +154,9 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
     // The headline screenshot scenario. SWE101 (Freshman, 1 section)
     // and SWE206 (Sophomore, has_lab, 1 section) MUST not overlap on
     // any meeting day, even though SWE206 has both LAB and LEC rows.
-    const scheduleId = await freshTermSchedule('261');
-    const freshman = await pickCourse(c => c.course_code === 'SWE101');
-    const swe206   = await pickCourse(c => c.course_code === 'SWE206');
+    const scheduleId = await freshTermSchedule('291');   // NEW-FU-673: non-seed code (was 261, a base seed term)
+    const freshman = await pickCourse('291', 'SWE 101');   // NEW-FU-673: Freshman
+    const swe206   = await pickCourse('291', 'SWE 206');   // NEW-FU-673: Sophomore w/ lab
     await runSuggest(scheduleId, [
       { courseId: freshman.id, sections: 1, duration: 50, dayPattern: 'STT' },
       { courseId: swe206.id,   sections: 1, duration: 50, dayPattern: 'STT', labDuration: 50, labDay: 'Sunday' },
@@ -127,9 +167,9 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
   });
 
   test('SCENARIO 5: Sophomore 3-section + Freshman 1-section → 0 R-02 + sections spread', async () => {
-    const scheduleId = await freshTermSchedule('262');
-    const freshman = await pickCourse(c => c.course_code === 'SWE101');
-    const soph     = await pickCourse(c => c.course_code === 'SWE201');
+    const scheduleId = await freshTermSchedule('292');   // NEW-FU-673: non-seed code (was 262, a base seed term)
+    const freshman = await pickCourse('292', 'SWE 101');   // NEW-FU-673: Freshman
+    const soph     = await pickCourse('292', 'SWE 216');   // NEW-FU-673: Sophomore
     await runSuggest(scheduleId, [
       { courseId: freshman.id, sections: 1, duration: 50, dayPattern: 'STT' },
       { courseId: soph.id,     sections: 3, duration: 75, dayPattern: 'MW' },
@@ -153,9 +193,9 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
 
   test('SCENARIO 6: 3 same-level single-section courses → 0 R-01 (hard)', async () => {
     const scheduleId = await freshTermSchedule('263');
-    const j1 = await pickCourse(c => c.course_code === 'SWE301');
-    const j2 = await pickCourse(c => c.course_code === 'SWE321');
-    const j3 = await pickCourse(c => c.course_code === 'SWE310');
+    const j1 = await pickCourse('263', 'SWE 316');   // NEW-FU-673: three Junior courses
+    const j2 = await pickCourse('263', 'SWE 326');
+    const j3 = await pickCourse('263', 'SWE 363');
     await runSuggest(scheduleId, [
       { courseId: j1.id, sections: 1, duration: 50, dayPattern: 'STT' },
       { courseId: j2.id, sections: 1, duration: 75, dayPattern: 'MW'  },
@@ -168,10 +208,11 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
 
   test('SCENARIO 7: same input twice on identical schedules → identical placements', async () => {
     const scheduleA = await freshTermSchedule('271');
-    const scheduleB = await freshTermSchedule('272');
-    // Same scheduleId can't be reused (per-schedule hash differs), so
-    // we run BOTH and verify per-schedule reproducibility within each.
-    const freshman = await pickCourse(c => c.course_code === 'SWE101');
+    // NEW-FU-673: the original also created a second term (272) but never used it — the
+    // assertion only snapshots scheduleA twice. Dropped it: freshTermSchedule now wipes
+    // prior test terms (to dodge the copy-seed venue-name collision), so a second create
+    // here would delete scheduleA's term out from under this test.
+    const freshman = await pickCourse('271', 'SWE 101');
 
     async function placeAndSnapshot(id) {
       await runSuggest(id, [{ courseId: freshman.id, sections: 1, duration: 50, dayPattern: 'STT' }]);
@@ -205,7 +246,7 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
 
   test('SCENARIO 9: graduate course defaults respect R-06 time window', async () => {
     const scheduleId = await freshTermSchedule('282');
-    const gr = await pickCourse(c => c.course_code === 'SWE501');
+    const gr = await pickCourse('282', 'SWE 503');   // NEW-FU-673: Graduate (GR → R-06 window)
     expect(gr).toBeTruthy();
     await runSuggest(scheduleId, [
       { courseId: gr.id, sections: 1, duration: 75, dayPattern: 'MW' },
@@ -230,8 +271,8 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
     // day patterns, a 0-R-02 placement is feasible — multi-restart
     // should find it.
     const scheduleId = await freshTermSchedule('303');
-    const gr1 = await pickCourse(c => c.course_code === 'SWE501');
-    const gr2 = await pickCourse(c => c.course_code === 'SWE510');
+    const gr1 = await pickCourse('303', 'SWE 503');   // NEW-FU-673: Graduate ↔ Graduate
+    const gr2 = await pickCourse('303', 'SWE 516');
     expect(gr1 && gr2).toBeTruthy();
     await runSuggest(scheduleId, [
       { courseId: gr1.id, sections: 1, duration: 75, dayPattern: 'MW' },
@@ -244,7 +285,7 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
 
   test('SCENARIO 10: lab co-location — Lec and Lab don\'t collide', async () => {
     const scheduleId = await freshTermSchedule('283');
-    const labCourse = await pickCourse(c => c.course_code === 'SWE206');
+    const labCourse = await pickCourse('283', 'SWE 206');   // NEW-FU-673: Sophomore w/ lab
     await runSuggest(scheduleId, [
       { courseId: labCourse.id, sections: 1, duration: 50, dayPattern: 'STT',
         labDuration: 50, labDay: 'Monday' },
@@ -271,8 +312,8 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
   test('SCENARIO 12 (Phase 35): Graduate time-window stress — multiple courses, 0 R-02 + 0 R-06', async () => {
     // Term codes must match ^\d{2}[123]$ (migration 011). 313 ≠ 304.
     const scheduleId = await freshTermSchedule('313');
-    const gr1 = await pickCourse(c => c.course_code === 'SWE501');
-    const gr2 = await pickCourse(c => c.course_code === 'SWE510');
+    const gr1 = await pickCourse('313', 'SWE 503');   // NEW-FU-673: Graduate time-window stress
+    const gr2 = await pickCourse('313', 'SWE 516');
     expect(gr1 && gr2).toBeTruthy();
     await runSuggest(scheduleId, [
       { courseId: gr1.id, sections: 2, duration: 75, dayPattern: 'MW' },
@@ -302,11 +343,11 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
   // be minimized via the multi-restart machinery.
   test('SCENARIO 13 (Phase 35): saturated 1-section adjacent chain → 0 R-01 hard', async () => {
     const scheduleId = await freshTermSchedule('323');
-    const f  = await pickCourse(c => c.course_code === 'SWE101');
-    const so = await pickCourse(c => c.course_code === 'SWE201');
-    const j  = await pickCourse(c => c.course_code === 'SWE301');
-    const sr = await pickCourse(c => c.course_code === 'SWE411');
-    const g  = await pickCourse(c => c.course_code === 'SWE501');
+    const f  = await pickCourse('323', 'SWE 101');   // NEW-FU-673: one course per level —
+    const so = await pickCourse('323', 'SWE 216');   // Freshman / Sophomore / Junior /
+    const j  = await pickCourse('323', 'SWE 316');   // Senior / Graduate (SWE411 → SWE 402,
+    const sr = await pickCourse('323', 'SWE 402');   // both Senior; SWE201/301/501 remapped
+    const g  = await pickCourse('323', 'SWE 503');   // to real seed codes).
     expect(f && so && j && sr && g).toBeTruthy();
     await runSuggest(scheduleId, [
       { courseId: f.id,  sections: 1, duration: 50, dayPattern: 'STT' },
@@ -324,7 +365,7 @@ describe('FU-354: Suggester red-team battery (Phase 34)', () => {
   // NOT persist sections, and must echo residualConflicts + ruleIds.
   test('PREVIEW: previewOnly=true returns residual stats without writing', async () => {
     const scheduleId = await freshTermSchedule('333');
-    const course = await pickCourse(c => c.course_code === 'SWE301');
+    const course = await pickCourse('333', 'SWE 316');   // NEW-FU-673: Junior (SWE301 doesn't exist)
     const r = await request(app)
       .post(`/api/v1/schedules/${scheduleId}/suggest`)
       .set('Authorization', `Bearer ${adminTok}`)

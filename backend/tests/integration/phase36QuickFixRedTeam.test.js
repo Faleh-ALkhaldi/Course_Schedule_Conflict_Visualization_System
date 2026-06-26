@@ -11,20 +11,49 @@
 
 const request = require('supertest');
 const app     = require('../../src/app');
+const { query } = require('../../src/config/db');   // NEW-FU-673: term-valid resource selection
 
 const ADMIN = { username: 'admin1', password: 'password123' };
+// NEW-FU-673: ONE unique code per test (no wraparound) + delete-after-each.
+// Two coupled reasons the old 12-code wraparound broke after FU-234/FU-645:
+//   1. Recreating a code that was deleted leaves ORPHAN owner_semester copies
+//      (term-delete drops the schedule+sections but NOT the minted per-term
+//      course/instructor copies) → the recreate hits uq_*_per_term and 400s.
+//   2. A copied term seeds sections from the NEAREST live same-season-digit
+//      term (FU-234). Once several season-1 test terms (…11/…21/…31) are alive
+//      AND filled with red-team data, the next season-1 create clones that
+//      polluted data and 400s on a section-number/email collision.
+// Fix: give every test its own code (27 active tests ≤ 29 codes here) so no
+// code is ever recreated, and delete each term in afterEach so the clone
+// source for the next term is only the pristine seed terms.
 const TERM_CODES = [
-  '311','312','313','321','322','323','331','332','333','341','342','343',
+  '263','271','272','273','281','282','283','291','292','293',
+  '301','302','303','311','312','313','321','322','323','331',
+  '332','333','341','342','343','252','253',
 ];
 
 let adminTok;
 const usedCodes = new Set();
 let codeIdx = 0;
+let currentCode = null;   // code allocated by the running test (deleted in afterEach)
 
 beforeAll(async () => {
   const r = await request(app).post('/api/v1/auth/login').send(ADMIN);
   expect(r.status).toBe(200);
   adminTok = r.body.token;
+});
+
+// NEW-FU-673: delete the term created by each test right away so it can't
+// become the FU-234 clone source (or an owner_semester collision source) for
+// the next test. afterAll is a belt-and-suspenders sweep of anything missed.
+afterEach(async () => {
+  if (!currentCode) return;
+  await request(app)
+    .delete(`/api/v1/terms/${currentCode}`)
+    .query({ activeCode: '251' })
+    .set('Authorization', `Bearer ${adminTok}`)
+    .catch(() => {});
+  currentCode = null;
 });
 
 afterAll(async () => {
@@ -38,9 +67,12 @@ afterAll(async () => {
 });
 
 function nextCode() {
-  if (codeIdx >= TERM_CODES.length) codeIdx = 0;
+  if (codeIdx >= TERM_CODES.length) {
+    throw new Error(`phase36QuickFixRedTeam: ran out of unique term codes (${TERM_CODES.length}). Add more.`);
+  }
   const code = TERM_CODES[codeIdx++];
   usedCodes.add(code);
+  currentCode = code;
   return code;
 }
 
@@ -51,6 +83,14 @@ async function freshTermSchedule() {
     .query({ activeCode: '251' })
     .set('Authorization', `Bearer ${adminTok}`)
     .catch(() => {});
+  // NEW-FU-673: term-delete drops the schedule+sections but NOT the per-term
+  // owned course/instructor/venue copies it minted (FU-645). Those orphans
+  // make a later create of the SAME code collide on uq_*_per_term. This file
+  // uses each code once, but a PRIOR test file (or aborted run) in the same
+  // shared DB may have left orphans for these codes. The schedule is gone now,
+  // so any owner_semester=code rows are unreferenced orphans → safe to purge,
+  // making create order-independent. (Pure test-fixture hygiene; no src change.)
+  await purgeOrphanOwned(code);
   const tr = await request(app)
     .post('/api/v1/terms')
     .set('Authorization', `Bearer ${adminTok}`)
@@ -70,16 +110,80 @@ async function freshTermSchedule() {
       .set('Authorization', `Bearer ${adminTok}`)
       .catch(() => {});
   }
-  return sched.id;
+  // NEW-FU-673: return the term code too so getRefs() can scope resource
+  // selection to THIS term (owned copies + templates). Post-FU-645 the
+  // global GET lists also expose other terms' owner-scoped copies, and
+  // section-create rejects a resource that "belongs to" another term.
+  return { scheduleId: sched.id, code };
 }
 
-async function getRefs() {
-  const [courses, instructors, venues] = await Promise.all([
-    request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-  ]);
+// NEW-FU-673: term-valid references. Picks ONLY resources owned by this
+// term (owner_semester = code) or templates (owner_semester IS NULL), via
+// the DB (the GET endpoints don't expose owner_semester). This file also
+// predates the catalog re-coding: the seed no longer has SWEnnn codes
+// (SWE201/301/321/411/501…) — it has spaced codes (SWE 101, SWE 206, …)
+// keyed by academic level. Tests select by level/attribute/venue-type
+// (their real intent) via the helpers below, not by the dead course codes.
+//   courses     {id, course_code, credits(number), has_lab(bool), category, academic_level}
+//   instructors {id, name}   sorted by name; instructors[last] tends to have no OH
+//   venues      {id, name, type}  type ∈ LectureHall|Laboratory|Multipurpose
+async function getRefs(code) {
+  const courses = (await query(
+    `SELECT id, course_code, credits, has_lab, category, academic_level FROM courses
+      WHERE owner_semester = $1 OR owner_semester IS NULL`, [code])).rows
+    .map(c => ({ ...c, credits: Number(c.credits) }));
+  const instructors = (await query(
+    `SELECT id, name FROM instructors
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false
+      ORDER BY name`, [code])).rows;
+  const venues = (await query(
+    `SELECT id, name, type FROM venues
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false
+      ORDER BY name`, [code])).rows;
   return { courses, instructors, venues };
+}
+
+// NEW-FU-673: delete orphaned per-term owned copies for `code` — rows tagged
+// owner_semester=code that no live schedule references (left behind because
+// term-delete doesn't purge them). Guarded to fire ONLY when no schedule for
+// the code exists, so it can never touch a live term's data. office_hours rows
+// of orphan instructors go first to satisfy the FK.
+async function purgeOrphanOwned(code) {
+  const live = await query(
+    `SELECT 1 FROM schedules WHERE department_id = 'SWE-DEPT' AND semester = $1 LIMIT 1`, [code]);
+  if (live.rowCount > 0) return;   // a real term exists — never purge its data
+  await query(
+    `DELETE FROM office_hours WHERE instructor_id IN (SELECT id FROM instructors WHERE owner_semester = $1)`, [code]);
+  await query(`DELETE FROM instructors WHERE owner_semester = $1`, [code]);
+  await query(`DELETE FROM venues      WHERE owner_semester = $1`, [code]);
+  await query(`DELETE FROM courses     WHERE owner_semester = $1`, [code]);
+}
+
+// NEW-FU-673: intent-preserving selectors (replace the dead SWEnnn / H-nnn lookups).
+function byLevel(courses, level, skip = []) {
+  const isGrad = level === 'Graduate';
+  return courses.find(c =>
+    !skip.includes(c.id) &&
+    (isGrad ? c.category === 'GR' : c.academic_level === level && c.category === 'UG'));
+}
+// Two distinct courses at the SAME level (for R-01 same-level / R-04+R-05 pairs).
+function sameLevelPair(courses, level = 'Junior') {
+  const a = byLevel(courses, level);
+  const b = byLevel(courses, level, a ? [a.id] : []);
+  return [a, b];
+}
+// `n` distinct courses matching a predicate (stable order).
+function pickMany(courses, n, predicate) {
+  const out = [];
+  for (const c of courses) {
+    if (out.length >= n) break;
+    if (predicate(c) && !out.some(o => o.id === c.id)) out.push(c);
+  }
+  return out;
+}
+// `n` distinct LectureHalls (replaces the H-101/H-201/H-301 picks).
+function halls(venues, n) {
+  return venues.filter(v => v.type === 'LectureHall').slice(0, n);
 }
 
 async function createSection(scheduleId, opts) {
@@ -192,12 +296,10 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   // strict assertion. Kept here as a historical placeholder; the real
   // coverage is in P-Q01 which asserts post-apply consistency.
   test.skip('Q-01: [superseded by P-Q01 in phase37PostApply.test.js]', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = courses.find(c => c.course_code === 'SWE301');
-    const c2 = courses.find(c => c.course_code === 'SWE321');
-    const hall1 = venues.find(v => v.type === 'LectureHall' && v.name === 'H-101');
-    const hall2 = venues.find(v => v.type === 'LectureHall' && v.name === 'H-201');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const [c1, c2] = sameLevelPair(courses, 'Junior');
+    const [hall1, hall2] = halls(venues, 2);
     // STT 50min — KFUPM-legal for 3-credit. Same instructor → R-04 on overlapping days.
     await createSection(sched, { courseId: c1.id, instructorId: instructors[0].id,
       venueId: hall1.id, sectionNumber: '01',
@@ -216,11 +318,10 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
 
   // NEW-FU-393 (Phase 37): superseded by P-Q02 in phase37PostApply.test.js.
   test.skip('Q-02: [superseded by P-Q02 in phase37PostApply.test.js]', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = courses.find(c => c.course_code === 'SWE301');
-    const c2 = courses.find(c => c.course_code === 'SWE321');
-    const hall = venues.find(v => v.type === 'LectureHall');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const [c1, c2] = sameLevelPair(courses, 'Junior');
+    const hall = halls(venues, 1)[0];
     await createSection(sched, { courseId: c1.id, instructorId: instructors[0].id,
       venueId: hall.id, sectionNumber: '01',
       days: ['Sunday','Tuesday','Thursday'], startTime: '13:30', endTime: '14:20' });
@@ -235,12 +336,14 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-03: R-02 (single-section adjacent-level overlap)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const f = courses.find(c => c.course_code === 'SWE101');
-    const s = courses.find(c => c.course_code === 'SWE201');
-    const h1 = venues.find(v => v.type === 'LectureHall' && v.name === 'H-101');
-    const h2 = venues.find(v => v.type === 'LectureHall' && v.name === 'H-201');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    // Adjacent levels (diff=1): Freshman + Sophomore. Prefer the non-lab
+    // Sophomore so R-14 doesn't pile on (R-02 is the rule under test).
+    const f = byLevel(courses, 'Freshman');
+    const s = courses.find(c => c.academic_level === 'Sophomore' && c.category === 'UG' && !c.has_lab)
+           ?? byLevel(courses, 'Sophomore');
+    const [h1, h2] = halls(venues, 2);
     // MW 75min — KFUPM-legal pattern for 3-credit course.
     await createSection(sched, { courseId: f.id, instructorId: instructors[2].id,
       venueId: h1.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '13:30', endTime: '14:45' });
@@ -252,33 +355,45 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-04: R-09 (missing instructor)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, venues } = await getRefs();
-    const c = courses.find(c => c.course_code === 'SWE301');
-    const h = venues.find(v => v.type === 'LectureHall');
-    await createSection(sched, { courseId: c.id, instructorId: null,
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const c = byLevel(courses, 'Junior');
+    const h = halls(venues, 1)[0];
+    // NEW-FU-673: FU-475 (Phase 114) made instructor a HARD create-time
+    // requirement, so a null-instructor section can no longer be POSTed.
+    // R-09 still flags any section whose instructor went missing (e.g. from
+    // import or later edits), so construct that exact data state directly:
+    // create a valid section, then clear its instructor in the DB. (Mirrors
+    // how Q-08 deletes section rows via SQL/API to build the R-15 state.)
+    await createSection(sched, { courseId: c.id, instructorId: instructors[0].id,
       venueId: h.id, sectionNumber: '01', days: ['Sunday','Tuesday','Thursday'], startTime: '09:00', endTime: '09:50' });
+    await query('UPDATE sections SET instructor_id = NULL WHERE schedule_id = $1', [sched]);
     const cs = await conflictsFor(sched);
     const planRes = await plan(sched);
     assertQuickFixCoverage(planRes, 'R-09', cs);
   });
 
   test('Q-05: R-10 (missing venue)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors } = await getRefs();
-    const c = courses.find(c => c.course_code === 'SWE301');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const c = byLevel(courses, 'Junior');
+    const h = halls(venues, 1)[0];
+    // NEW-FU-673: as with R-09, FU-475 made venue a hard create-time
+    // requirement (non-capstone), so build the missing-venue state directly:
+    // create a valid section, then clear its venue in the DB → R-10 fires.
     await createSection(sched, { courseId: c.id, instructorId: instructors[0].id,
-      venueId: null, sectionNumber: '01', days: ['Sunday','Tuesday','Thursday'], startTime: '09:00', endTime: '09:50' });
+      venueId: h.id, sectionNumber: '01', days: ['Sunday','Tuesday','Thursday'], startTime: '09:00', endTime: '09:50' });
+    await query('UPDATE sections SET venue_id = NULL WHERE schedule_id = $1', [sched]);
     const cs = await conflictsFor(sched);
     const planRes = await plan(sched);
     assertQuickFixCoverage(planRes, 'R-10', cs);
   });
 
   test('Q-06: R-11 (lab section in non-lab venue)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
     const labCourse = courses.find(c => c.has_lab);
-    const hall = venues.find(v => v.type === 'LectureHall');
+    const hall = halls(venues, 1)[0];
     await createSection(sched, { courseId: labCourse.id, instructorId: instructors[0].id,
       venueId: hall.id, sectionNumber: '50', sectionType: 'Lab',
       days: ['Sunday'], startTime: '07:00', endTime: '07:50' });
@@ -288,9 +403,9 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-07: R-12 (lec section in lab venue)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c = courses.find(c => c.course_code === 'SWE301');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const c = byLevel(courses, 'Junior');
     const lab = venues.find(v => v.type === 'Laboratory');
     await createSection(sched, { courseId: c.id, instructorId: instructors[0].id,
       venueId: lab.id, sectionNumber: '01', sectionType: 'Lec',
@@ -301,52 +416,51 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-08: R-15 (insufficient credit coverage)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
-    const hall = venues.find(v => v.type === 'LectureHall');
-    // Create full STT 50min then delete two days → leaves 1 day = 50min,
-    // insufficient for 3-credit (needs 150 min/week). Mirrors Phase 35
-    // R-FIX-15 pattern.
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const c = courses.find(c => c.credits === 3 && !c.has_lab && c.category === 'UG');
+    const hall = halls(venues, 1)[0];
+    // Create full STT 50min then reduce to a single 50min day → 50min/week,
+    // insufficient for 3-credit (needs 150) → R-15. Mirrors Phase 35 R-FIX-15.
+    // NEW-FU-673: TWO product changes broke the old construction —
+    //   (1) the pattern validator now rejects POSTing a 1-day 50min 3-credit
+    //       section outright, and
+    //   (2) DELETE /sections/:id?scope=row now drops the WHOLE grouped logical
+    //       section (all 3 days), not just the one day-row.
+    // So build the legal full STT, then delete two day-rows DIRECTLY in the DB
+    // to reach the insufficient single-day state R-15 is meant to catch
+    // (same SQL-fixture approach as the R-09/R-10 missing-resource tests).
     await createSection(sched, { courseId: c.id, instructorId: instructors[0].id,
       venueId: hall.id, sectionNumber: '01',
       days: ['Sunday','Tuesday','Thursday'], startTime: '14:30', endTime: '15:20' });
-    const rows = (await request(app)
-      .get(`/api/v1/schedules/${sched}/sections`)
-      .set('Authorization', `Bearer ${adminTok}`)).body;
-    const all = rows.sections || rows;
-    const toDelete = all.filter(r => r.day === 'Tuesday' || r.day === 'Thursday');
-    for (const row of toDelete) {
-      await request(app).delete(`/api/v1/sections/${row.id}?scope=row`).set('Authorization', `Bearer ${adminTok}`);
-    }
+    await query(`DELETE FROM sections WHERE schedule_id = $1 AND day IN ('Tuesday','Thursday')`, [sched]);
     const cs = await conflictsFor(sched);
     const planRes = await plan(sched);
     assertQuickFixCoverage(planRes, 'R-15', cs);
   });
 
   test('Q-09: R-01 (same-level multi-section, no escape)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
     // R-01 requires BOTH courses to have MULTIPLE sections AND every
     // logical pair overlaps. Construct: 2 sections each, all at the same
     // time, different instructors + venues to avoid R-04/R-05.
-    const c1 = courses.find(c => c.course_code === 'SWE301');     // Junior
-    const c2 = courses.find(c => c.course_code === 'SWE321');     // Junior (same level)
-    const halls = venues.filter(v => v.type === 'LectureHall');
-    expect(halls.length).toBeGreaterThanOrEqual(3);
+    const [c1, c2] = sameLevelPair(courses, 'Junior');   // two same-level (Junior) courses
+    const hall3 = halls(venues, 3);
+    expect(hall3.length).toBeGreaterThanOrEqual(3);
     const days = ['Sunday','Tuesday','Thursday'];
     const time = { startTime: '12:30', endTime: '13:20' };
-    // Reuse one hall (halls[0]) for c1 §01 and c2 §01 — same time but
+    // Reuse one hall (hall3[0]) for c1 §01 and c2 §01 — same time but
     // not concurrent on the same DB row. R-05 fires (venue double-book)
     // but the assertion still works because R-01 also fires (same level).
     await createSection(sched, { courseId: c1.id, instructorId: instructors[0].id,
-      venueId: halls[0].id, sectionNumber: '01', days, ...time });
+      venueId: hall3[0].id, sectionNumber: '01', days, ...time });
     await createSection(sched, { courseId: c1.id, instructorId: instructors[1].id,
-      venueId: halls[1].id, sectionNumber: '02', days, ...time });
+      venueId: hall3[1].id, sectionNumber: '02', days, ...time });
     await createSection(sched, { courseId: c2.id, instructorId: instructors[2].id,
-      venueId: halls[2].id, sectionNumber: '01', days, ...time });
+      venueId: hall3[2].id, sectionNumber: '01', days, ...time });
     await createSection(sched, { courseId: c2.id, instructorId: instructors[3].id,
-      venueId: halls[0].id, sectionNumber: '02', days, ...time });
+      venueId: hall3[0].id, sectionNumber: '02', days, ...time });
     const cs = await conflictsFor(sched);
     const planRes = await plan(sched);
     const present = ['R-01','R-04','R-05'].find(rid => cs.some(c => c.ruleId === rid));
@@ -355,10 +469,10 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-10: R-06 (UG section placed at Graduate time 19:00+)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c = courses.find(c => c.category === 'UG' && c.course_code === 'SWE301');
-    const hall = venues.find(v => v.type === 'LectureHall');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const c = byLevel(courses, 'Junior');   // a UG course → must be in the UG window
+    const hall = halls(venues, 1)[0];
     // STT 50min at 19:00 — KFUPM pattern legal, time placement triggers R-06.
     await createSection(sched, { courseId: c.id, instructorId: instructors[0].id,
       venueId: hall.id, sectionNumber: '01',
@@ -382,18 +496,17 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-11: R-14 (lab-bearing course missing Lab section) → unresolved with reason', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    // SWE206 (2 credits, has_lab=true). 2-credit + STT 50min is legal
-    // (100 min/wk lec covers 2 credits, lab provides the extra hour).
-    // Pick an instructor whose OH is NOT on Sun/Tue/Thu near the test time.
-    // Dr. Hassan has OH on Monday — safe to use any non-Monday section.
-    const labCourse = courses.find(c => c.has_lab && c.course_code === 'SWE206')
-                   ?? courses.find(c => c.has_lab);
-    const hall = venues.find(v => v.type === 'LectureHall');
-    const hassan = instructors.find(i => i.name === 'Dr. Hassan') ?? instructors[1];
-    // Lec only, no Lab → R-14 fires. Use a time/instructor with no OH conflict.
-    await createSection(sched, { courseId: labCourse.id, instructorId: hassan.id,
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    // The only has_lab course in the seed is SWE 206 (3 credits). A single
+    // STT 50min Lec (3×50=150min) covers 3-credit lecture but the missing
+    // Lab section makes R-14 fire. (No Dr.-prefixed names in this seed;
+    // any real instructor works — R-14 is independent of office hours.)
+    const labCourse = courses.find(c => c.has_lab);
+    const hall = halls(venues, 1)[0];
+    const instr = instructors[0];
+    // Lec only, no Lab → R-14 fires.
+    await createSection(sched, { courseId: labCourse.id, instructorId: instr.id,
       venueId: hall.id, sectionNumber: '01', sectionType: 'Lec',
       days: ['Sunday','Tuesday','Thursday'], startTime: '14:30', endTime: '15:20' });
     const cs = await conflictsFor(sched);
@@ -415,16 +528,23 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-12: R-13 (instructor with no office hours)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    // Pick an instructor likely to have NO office hours configured.
-    // The seed data typically configures OH for the first few; later
-    // instructors may not have any. If all have OH, this scenario is
-    // a no-op — assert that case too.
-    const c = courses.find(c => c.course_code === 'SWE301');
-    const hall = venues.find(v => v.type === 'LectureHall');
-    // Use the LAST instructor (least likely to have OH in seed data).
-    const instr = instructors[instructors.length - 1];
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const c = byLevel(courses, 'Junior');
+    const hall = halls(venues, 1)[0];
+    // NEW-FU-673: pick a term-valid instructor that genuinely has ZERO
+    // office hours so R-13 actually fires (the old "last instructor"
+    // heuristic landed on one WITH OH after the re-seed). Fall back to the
+    // last instructor if every one happens to have OH (test stays tolerant).
+    const zeroOh = (await query(
+      `SELECT i.id FROM instructors i
+        LEFT JOIN office_hours o ON o.instructor_id = i.id
+        WHERE (i.owner_semester = $1 OR i.owner_semester IS NULL) AND i.is_dummy = false
+        GROUP BY i.id HAVING count(o.*) = 0
+        LIMIT 1`, [code])).rows[0];
+    const instr = zeroOh
+      ? instructors.find(i => i.id === zeroOh.id)
+      : instructors[instructors.length - 1];
     await createSection(sched, { courseId: c.id, instructorId: instr.id,
       venueId: hall.id, sectionNumber: '01',
       days: ['Sunday','Tuesday','Thursday'], startTime: '09:00', endTime: '09:50' });
@@ -442,12 +562,12 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
 
   // ── Adversarial / saturated paths (Q-13..Q-24) ────────────────────
   test('Q-13: R-02 in dense UG schedule — adjacent-level single-section overlap', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const f = courses.find(c => c.course_code === 'SWE101');
-    const s = courses.find(c => c.course_code === 'SWE201');
-    const h1 = venues.find(v => v.type === 'LectureHall' && v.name === 'H-101');
-    const h2 = venues.find(v => v.type === 'LectureHall' && v.name === 'H-201');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const f = byLevel(courses, 'Freshman');
+    const s = courses.find(c => c.academic_level === 'Sophomore' && c.category === 'UG' && !c.has_lab)
+           ?? byLevel(courses, 'Sophomore');
+    const [h1, h2] = halls(venues, 2);
     // MW 75min — legal for 3-credit. Overlapping → R-02 adjacent-level soft.
     await createSection(sched, { courseId: f.id, instructorId: instructors[2].id,
       venueId: h1.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '15:00', endTime: '16:15' });
@@ -458,19 +578,23 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
     assertQuickFixCoverage(planRes, 'R-02', cs);
   });
 
-  test('Q-14: R-02 same-level Graduate with escape (Phase 35 / R-FIX-18)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const g1 = courses.find(c => c.course_code === 'SWE501');
-    const g2 = courses.find(c => c.course_code === 'SWE510');
-    const h1 = venues.find(v => v.name === 'H-201');
-    const h2 = venues.find(v => v.name === 'H-301');
-    await createSection(sched, { courseId: g1.id, instructorId: instructors[0].id,
-      venueId: h1.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '17:00', endTime: '18:15' });
-    await createSection(sched, { courseId: g2.id, instructorId: instructors[1].id,
-      venueId: h2.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '17:00', endTime: '18:15' });
-    await createSection(sched, { courseId: g2.id, instructorId: instructors[2].id,
-      venueId: h2.id, sectionNumber: '02', days: ['Monday','Wednesday'], startTime: '18:30', endTime: '19:45' });
+  test('Q-14: R-02 same-level with escape (Phase 35 / R-FIX-18)', async () => {
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    // NEW-FU-673: was two Graduate courses, but FU-275 (Phase 52) made
+    // grad↔grad overlap a deliberate non-conflict (students elect between
+    // grad courses), so R-02 no longer fires for grad-grad. The rule under
+    // test is "R-02 SAME-LEVEL with an escape section" — exercise it with a
+    // same-level UG (Junior) pair instead: c1 has 1 section overlapping only
+    // ONE of c2's two sections, so an escape exists → R-02 SOFT.
+    const [c1, c2] = sameLevelPair(courses, 'Junior');
+    const [h1, h2, h3] = halls(venues, 3);
+    await createSection(sched, { courseId: c1.id, instructorId: instructors[0].id,
+      venueId: h1.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '13:00', endTime: '14:15' });
+    await createSection(sched, { courseId: c2.id, instructorId: instructors[1].id,
+      venueId: h2.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '13:00', endTime: '14:15' });
+    await createSection(sched, { courseId: c2.id, instructorId: instructors[2].id,
+      venueId: h3.id, sectionNumber: '02', days: ['Monday','Wednesday'], startTime: '14:30', endTime: '15:45' });
     const cs = await conflictsFor(sched);
     const planRes = await plan(sched);
     assertQuickFixCoverage(planRes, 'R-02', cs);
@@ -478,15 +602,14 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
 
   // NEW-FU-393 (Phase 37): superseded by P-Q15 in phase37PostApply.test.js.
   test.skip('Q-15: [superseded by P-Q15 in phase37PostApply.test.js]', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = courses.find(c => c.course_code === 'SWE301');
-    const c2 = courses.find(c => c.course_code === 'SWE321');
-    const halls = venues.filter(v => v.type === 'LectureHall');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const [c1, c2] = sameLevelPair(courses, 'Junior');
+    const hallList = halls(venues, 2);
     await createSection(sched, { courseId: c1.id, instructorId: instructors[0].id,
-      venueId: halls[0].id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '16:00', endTime: '17:15' });
+      venueId: hallList[0].id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '16:00', endTime: '17:15' });
     await createSection(sched, { courseId: c2.id, instructorId: instructors[0].id,
-      venueId: halls[1].id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '16:00', endTime: '17:15' });
+      venueId: hallList[1].id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '16:00', endTime: '17:15' });
     const cs = await conflictsFor(sched);
     const planRes = await plan(sched);
     const r04 = cs.some(c => c.ruleId === 'R-04');
@@ -499,11 +622,15 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-16: R-09 + R-10 simultaneously (missing both)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses } = await getRefs();
-    const c = courses.find(c => c.course_code === 'SWE301');
-    await createSection(sched, { courseId: c.id, instructorId: null, venueId: null,
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const c = byLevel(courses, 'Junior');
+    const h = halls(venues, 1)[0];
+    // NEW-FU-673: create a valid section, then clear BOTH instructor and venue
+    // in the DB (FU-475 blocks POSTing them null) → R-09 and R-10 both fire.
+    await createSection(sched, { courseId: c.id, instructorId: instructors[0].id, venueId: h.id,
       sectionNumber: '01', days: ['Sunday','Tuesday','Thursday'], startTime: '09:00', endTime: '09:50' });
+    await query('UPDATE sections SET instructor_id = NULL, venue_id = NULL WHERE schedule_id = $1', [sched]);
     const cs = await conflictsFor(sched);
     const planRes = await plan(sched);
     if (cs.some(c => c.ruleId === 'R-09')) assertQuickFixCoverage(planRes, 'R-09', cs);
@@ -511,10 +638,13 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-17: R-15 with credits=4 course only meeting one day', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c = courses.find(c => Number(c.credits) === 4) || courses.find(c => Number(c.credits) === 3);
-    const hall = venues.find(v => v.type === 'LectureHall');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    // No 4-credit course in the seed → falls back to a 3-credit non-lab UG
+    // course meeting only one day (50min ≪ 150min needed) → R-15.
+    const c = courses.find(c => c.credits === 4)
+           ?? courses.find(c => c.credits === 3 && !c.has_lab && c.category === 'UG');
+    const hall = halls(venues, 1)[0];
     await createSection(sched, { courseId: c.id, instructorId: instructors[0].id,
       venueId: hall.id, sectionNumber: '01', days: ['Sunday'], startTime: '09:00', endTime: '09:50' });
     const cs = await conflictsFor(sched);
@@ -523,10 +653,10 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-18: R-11 with no Laboratory venue free at the slot', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
     const labCourse = courses.find(c => c.has_lab);
-    const hall = venues.find(v => v.type === 'LectureHall');
+    const hall = halls(venues, 1)[0];
     await createSection(sched, { courseId: labCourse.id, instructorId: instructors[0].id,
       venueId: hall.id, sectionNumber: '50', sectionType: 'Lab',
       days: ['Sunday'], startTime: '07:00', endTime: '07:50' });
@@ -536,7 +666,7 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-19: clean schedule → 0 ops, 0 unresolved', async () => {
-    const sched = await freshTermSchedule();
+    const { scheduleId: sched } = await freshTermSchedule();   // NEW-FU-673
     const planRes = await plan(sched);
     expect(planRes.ops.length).toBe(0);
     expect(planRes.unresolvedRuleIds.length).toBe(0);
@@ -546,12 +676,12 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
     // Setup an R-02 SOFT (weight 50) where the resolution might create
     // a tiny weighted-cost R-13 (weight 5). Strict-count gating would
     // reject (still 1 conflict); weighted accepts (50→5).
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const f = courses.find(c => c.course_code === 'SWE101');
-    const s = courses.find(c => c.course_code === 'SWE201');
-    const h1 = venues.find(v => v.name === 'H-101');
-    const h2 = venues.find(v => v.name === 'H-201');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const f = byLevel(courses, 'Freshman');
+    const s = courses.find(c => c.academic_level === 'Sophomore' && c.category === 'UG' && !c.has_lab)
+           ?? byLevel(courses, 'Sophomore');
+    const [h1, h2] = halls(venues, 2);
     await createSection(sched, { courseId: f.id, instructorId: instructors[0].id,
       venueId: h1.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '11:00', endTime: '11:50' });
     await createSection(sched, { courseId: s.id, instructorId: instructors[1].id,
@@ -568,12 +698,12 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-21: R-02 + R-04 same pair (instructor reused + adjacent-level overlap)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const f = courses.find(c => c.course_code === 'SWE101');
-    const s = courses.find(c => c.course_code === 'SWE201');
-    const h1 = venues.find(v => v.name === 'H-101');
-    const h2 = venues.find(v => v.name === 'H-201');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const f = byLevel(courses, 'Freshman');
+    const s = courses.find(c => c.academic_level === 'Sophomore' && c.category === 'UG' && !c.has_lab)
+           ?? byLevel(courses, 'Sophomore');
+    const [h1, h2] = halls(venues, 2);
     // MW 75min — legal pattern, overlapping → both R-04 (instr reuse)
     // and R-02 (adjacent-level single-section overlap).
     await createSection(sched, { courseId: f.id, instructorId: instructors[2].id,
@@ -590,11 +720,10 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   }, 30000);
 
   test('Q-22: triple conflict — R-04 + R-05 (legal pattern, same instr+venue)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = courses.find(c => c.course_code === 'SWE301');
-    const c2 = courses.find(c => c.course_code === 'SWE321');
-    const hall = venues.find(v => v.type === 'LectureHall' && v.name === 'H-101');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const [c1, c2] = sameLevelPair(courses, 'Junior');
+    const hall = halls(venues, 1)[0];
     await createSection(sched, { courseId: c1.id, instructorId: instructors[0].id,
       venueId: hall.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '14:00', endTime: '15:15' });
     await createSection(sched, { courseId: c2.id, instructorId: instructors[0].id,
@@ -605,15 +734,14 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-23: R-02 reverse direction (multi-section course causes the overlap)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const f = courses.find(c => c.course_code === 'SWE101'); // 1 section
-    const j = courses.find(c => c.course_code === 'SWE201'); // we'll create 2
-    const h1 = venues.find(v => v.name === 'H-101');
-    const h2 = venues.find(v => v.name === 'H-201');
-    const h3 = venues.find(v => v.name === 'H-301');
-    // MW 75min legal for 3-credit. Two SWE201 sections at different times
-    // so SWE101 §01 overlaps only ONE of them → escape exists → R-02 SOFT.
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const f = byLevel(courses, 'Freshman');                         // 1 section
+    const j = courses.find(c => c.academic_level === 'Sophomore' && c.category === 'UG' && !c.has_lab)
+           ?? byLevel(courses, 'Sophomore');                        // we'll create 2
+    const [h1, h2, h3] = halls(venues, 3);
+    // MW 75min legal for 3-credit. Two Sophomore sections at different times
+    // so the Freshman §01 overlaps only ONE of them → escape exists → R-02 SOFT.
     await createSection(sched, { courseId: f.id, instructorId: instructors[2].id,
       venueId: h1.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '10:00', endTime: '11:15' });
     await createSection(sched, { courseId: j.id, instructorId: instructors[3].id,
@@ -628,10 +756,10 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-24: R-15 with both Lec and Lab present (only Lec affects credit coverage)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
     const labCourse = courses.find(c => c.has_lab);
-    const hall = venues.find(v => v.type === 'LectureHall');
+    const hall = halls(venues, 1)[0];
     const lab = venues.find(v => v.type === 'Laboratory');
     // 1 Lec day for what should be 2-credit lec coverage → R-15.
     await createSection(sched, { courseId: labCourse.id, instructorId: instructors[0].id,
@@ -649,19 +777,17 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
 
   // ── Combined / stress (Q-25..Q-30) ────────────────────────────────
   test('Q-25: plan endpoint returns unresolvedReasons map shape', async () => {
-    const sched = await freshTermSchedule();
+    const { scheduleId: sched } = await freshTermSchedule();   // NEW-FU-673
     const planRes = await plan(sched);
     expect(planRes).toHaveProperty('unresolvedReasons');
     expect(typeof planRes.unresolvedReasons).toBe('object');
   });
 
   test('Q-26: ops array stable shape — every op has id, type, resolves, willResolveCount', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = courses.find(c => c.course_code === 'SWE301');
-    const c2 = courses.find(c => c.course_code === 'SWE321');
-    const h1 = venues.find(v => v.name === 'H-101');
-    const h2 = venues.find(v => v.name === 'H-201');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const [c1, c2] = sameLevelPair(courses, 'Junior');
+    const [h1, h2] = halls(venues, 2);
     await createSection(sched, { courseId: c1.id, instructorId: instructors[0].id,
       venueId: h1.id, sectionNumber: '01', days: ['Sunday','Tuesday','Thursday'], startTime: '15:30', endTime: '16:20' });
     await createSection(sched, { courseId: c2.id, instructorId: instructors[0].id,
@@ -676,15 +802,13 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-27: large schedule — 8 sections, multiple conflicts, plan converges', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = courses.find(c => c.course_code === 'SWE301');
-    const c2 = courses.find(c => c.course_code === 'SWE321');
-    const c3 = courses.find(c => c.course_code === 'SWE411');
-    const c4 = courses.find(c => c.course_code === 'SWE422');
-    const h1 = venues.find(v => v.name === 'H-101');
-    const h2 = venues.find(v => v.name === 'H-201');
-    const h3 = venues.find(v => v.name === 'H-301');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    // c1 & c2 share level so the same-slot reuse fires R-04+R-05; c3 & c4 are
+    // any other distinct courses on other days. Was a fixed SWEnnn list.
+    const [c1, c2] = sameLevelPair(courses, 'Junior');
+    const [c3, c4] = pickMany(courses, 2, c => c.category === 'UG' && c.id !== c1.id && c.id !== c2.id);
+    const [h1, h2, h3] = halls(venues, 3);
     for (const [c, instrIdx, hall, day] of [
       [c1, 0, h1, 'Sunday'], [c2, 0, h1, 'Sunday'],     // R-04+R-05
       [c3, 1, h2, 'Monday'], [c4, 2, h3, 'Tuesday'],
@@ -699,7 +823,7 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-28: empty schedule produces 0-op plan in <500ms', async () => {
-    const sched = await freshTermSchedule();
+    const { scheduleId: sched } = await freshTermSchedule();   // NEW-FU-673
     const start = Date.now();
     const planRes = await plan(sched);
     const elapsed = Date.now() - start;
@@ -708,12 +832,10 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-29: every fired conflict has either an op OR an unresolvedReasons entry', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = courses.find(c => c.course_code === 'SWE301');
-    const c2 = courses.find(c => c.course_code === 'SWE321');
-    const h1 = venues.find(v => v.name === 'H-101');
-    const h2 = venues.find(v => v.name === 'H-201');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const [c1, c2] = sameLevelPair(courses, 'Junior');
+    const [h1, h2] = halls(venues, 2);
     await createSection(sched, { courseId: c1.id, instructorId: instructors[0].id,
       venueId: h1.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '12:00', endTime: '13:15' });
     await createSection(sched, { courseId: c2.id, instructorId: instructors[0].id,
@@ -736,12 +858,10 @@ describe('FU-383: Phase 36 Quick Fix red-team battery (30 scenarios)', () => {
   });
 
   test('Q-30: re-running plan twice on the same schedule is deterministic in ops count', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = courses.find(c => c.course_code === 'SWE301');
-    const c2 = courses.find(c => c.course_code === 'SWE321');
-    const h1 = venues.find(v => v.name === 'H-101');
-    const h2 = venues.find(v => v.name === 'H-201');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const [c1, c2] = sameLevelPair(courses, 'Junior');
+    const [h1, h2] = halls(venues, 2);
     await createSection(sched, { courseId: c1.id, instructorId: instructors[0].id,
       venueId: h1.id, sectionNumber: '01', days: ['Monday','Wednesday'], startTime: '16:00', endTime: '17:15' });
     await createSection(sched, { courseId: c2.id, instructorId: instructors[0].id,

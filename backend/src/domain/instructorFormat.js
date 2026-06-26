@@ -31,6 +31,12 @@ function instructorNameError(name) {
   // an interior NBSP both hides text and forges a look-alike DUPLICATE of an ASCII-space name.
   if (!/^[A-Za-z '-]+$/.test(trimmed))
     return 'name may contain only English letters, plain spaces, hyphens and apostrophes.';
+  // NEW-FU-672: reject CONSECUTIVE spaces. "John  Smith" is malformed for a name, and because the
+  // entity dedup key is `name.trim().toLowerCase()` (does NOT collapse interior whitespace) while
+  // the `/ +/` parts-split below TOLERATED it, a double-space name forged a look-alike DUPLICATE of
+  // its single-space twin — a second instructor row for the same person on both commit paths.
+  if (/ {2,}/.test(trimmed))
+    return 'name has consecutive spaces — use a single space between words.';
   const parts = trimmed.split(/ +/).filter(Boolean);
   if (parts.length < 2 || !parts.every(p => /^[A-Za-z][A-Za-z'-]*$/.test(p)))
     return 'Enter a full name — at least a first and last name (English letters only, separated by a space).';

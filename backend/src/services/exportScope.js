@@ -134,8 +134,15 @@ function tableTitle(semester, scope, entity) {
 // file with neither phrase is a whole-term export → 'full'.
 function detectScopeFromText(text) {
   const t = String(text || '');
-  if (/venue\s+schedule/i.test(t))      return 'venue';
-  if (/instructor\s+schedule/i.test(t)) return 'instructor';
+  // NEW-FU-677: anchor to the heading's "·" (U+00B7) bullet separator ("… Venue Schedule · {entity}"),
+  // NOT a bare phrase. A bare "venue schedule"/"instructor schedule" can be a legitimate ENTITY NAME
+  // (an instructor literally named "Venue Schedule" passes the name gate), and that name renders into
+  // the scanned body text — which flipped a WHOLE-TERM file's scope to 'venue'/'instructor', routing a
+  // destructive REPLACE down the additive MERGE path. The export heading uniquely places a "·" right
+  // after the phrase; no entity name can contain "·" (the name gates restrict the charset), so the
+  // bullet makes the marker un-spoofable while still matching every real scoped export.
+  if (/venue\s+schedule\s*[·•]/i.test(t))      return 'venue';
+  if (/instructor\s+schedule\s*[·•]/i.test(t)) return 'instructor';
   return 'full';
 }
 

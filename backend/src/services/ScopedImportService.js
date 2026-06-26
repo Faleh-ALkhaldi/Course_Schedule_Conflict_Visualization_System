@@ -33,7 +33,7 @@ const { sectionLabel } = require('../domain/sectionLabel');
 // legality) wrongly rejects legitimate rows. We derive has_lab from whatever Lab rows the
 // file carries; any residual pattern issue surfaces as a CONFLICT, not a pre-reject.
 const { deriveHasLabByCourse } = require('../domain/importValidation');
-const { courseNameError, courseCodeLevelError } = require('../domain/courseFormat');
+const { courseNameError, courseCodeLevelError, resolveAcademicLevel } = require('../domain/courseFormat');
 // NEW-FU-661: the SAME strict per-field gate the whole-term path runs (code, level↔number,
 // credits, flags, gender, type/number, days, times+window, venue type, email, capacity).
 const { validateImportFields } = require('../domain/importFieldValidation');
@@ -95,6 +95,7 @@ async function loadTermState(client, scheduleId) {
 
 // Canonical conflict key (rule + canonical description) — stable across the section-id
 // churn an insert causes, so baseline-vs-merged diffing finds the conflicts the merge ADDS.
+// HARD rules only (R-01/02/04/05/06) by design — see the dialog-decision note in mergeScopedImport.
 function conflictKeys(sections, ohMap) {
   return new Set(engine.evaluateAll(sections, ohMap).conflicts.map(c => `${c.ruleId}|${c.description}`));
 }
@@ -130,8 +131,10 @@ async function upsertEntities(client, scheduleId, ownerSemester, rowData, refs, 
       const key = row.courseCode.toLowerCase();
       if (courseByCode.has(key)) continue;
       const isGR = row.category?.toUpperCase() === 'GR';
-      const level = isGR ? 'Graduate'
-        : ['Freshman', 'Sophomore', 'Junior', 'Senior'].find(l => l.toLowerCase() === row.academicLevel?.toLowerCase()) ?? 'Freshman';
+      // NEW-FU-671 (re-audit): use the SHARED whitespace-tolerant resolver (domain/courseFormat).
+      // This scoped-merge copy had MISSED FU-671's whitespace fix, so a PDF-wrapped "Sophomor e"
+      // silently became "Freshman" here. One shared resolver keeps both import paths in lockstep.
+      const level = resolveAcademicLevel(row.academicLevel, row.category);
       // NEW-FU-661: a 4-credit course ALWAYS has a lab (domain invariant). A partial scoped
       // file may carry only the Lec, so force has_lab=true for 4cr on creation — otherwise the
       // merge would mint an invalid 4-credit no-lab course that no later UI add-section accepts.
@@ -314,6 +317,17 @@ async function mergeScopedImport(scheduleId, parsed, mode) {
     // Baseline (pre-merge) conflict set + current sections, for new-conflict diffing
     // and conflict-free placement.
     const base = await loadTermState(client, scheduleId);
+    // The dialog decision diffs on the HARD rules only (engine.evaluateAll = R-01/02/04/05/06).
+    // NEW-FU-673 (examined, INTENTIONAL — not the "bug" a round-3 auditor flagged): a scoped merge
+    // carries PARTIAL course data (an instructor's Lec without the Lab a colleague teaches), so the
+    // SOFT rules R-11..R-15 — missing-lab (R-14), credit-coverage (R-15), no-office-hours (R-13) —
+    // are EXPECTED artifacts of that partiality and must NOT block the merge (they'd prompt on every
+    // normal partial import). They still surface to the user: the controller runs revalidateSchedule
+    // right after the merge, so they appear in the conflict panel. Only HARD conflicts (double-book,
+    // same-level overlap, teaching-window) pause for the 3-option dialog. The whole-term path DOES
+    // block on soft conflicts because a whole-term file is COMPLETE — there a soft conflict means a
+    // genuinely broken schedule, not expected partiality. The asymmetry is the complete-vs-partial
+    // distinction, by design.
     const baseKeys = conflictKeys(base.sections, base.ohMap);
 
     let created = 0, skipped = 0, moved = 0;

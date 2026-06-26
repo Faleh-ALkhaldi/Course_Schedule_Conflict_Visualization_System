@@ -14,6 +14,7 @@
 
 const request = require('supertest');
 const app = require('../../src/app');
+const { query } = require('../../src/config/db');   // NEW-FU-673: term-valid resource selection
 const B = '/api/v1';
 const A = (r, t) => r.set('Authorization', `Bearer ${t}`);
 
@@ -31,13 +32,26 @@ async function freshTerm(code) {
   }
   return sched.id;
 }
-async function refs() {
-  const [courses, venues, instr] = await Promise.all([
-    A(request(app).get(`${B}/courses`), tok).then(r => r.body),
-    A(request(app).get(`${B}/venues`), tok).then(r => r.body),
-    A(request(app).get(`${B}/instructors`), tok).then(r => r.body),
-  ]);
-  return { courses, venues: venues.filter(v => v.type === 'LectureHall'), instr };
+// NEW-FU-673: resources OWNED BY THIS TERM (owner_semester = code). Post-FU-645 the global GET
+// /courses|instructors|venues lists also surface every OTHER term's private copies. Picking from
+// them grabs a foreign-term resource → section-create 409, which `mk` swallows (it doesn't assert
+// 201) → the venue-saturation fillers silently fail → V keeps free slots → the greedy can move the
+// "saturated" section → remainingSoft drops to 0 and the lastResort-drop assertion fails. The
+// resolver's reassign pool is also owner_semester=term ONLY, so owned-only both lets every section
+// create AND matches the pool the resolver draws from. A default-copy term owns a full private
+// pool (Junior+Senior UG courses, 20+ halls, 20+ instructors). The GET endpoints don't expose
+// owner_semester, so we query directly.
+async function refs(code) {
+  const courses = (await query(
+    `SELECT id, course_code, credits, has_lab, category, academic_level FROM courses
+      WHERE owner_semester = $1`, [code])).rows.map(c => ({ ...c, credits: Number(c.credits) }));
+  const venues = (await query(
+    `SELECT id, type FROM venues
+      WHERE owner_semester = $1 AND is_dummy = false AND type = 'LectureHall' ORDER BY name`, [code])).rows;
+  const instr = (await query(
+    `SELECT id, name FROM instructors
+      WHERE owner_semester = $1 AND is_dummy = false ORDER BY name`, [code])).rows;
+  return { courses, venues, instr };
 }
 const mk = (sid, cId, iId, vId, st, sn = '01') =>
   A(request(app).post(`${B}/schedules/${sid}/sections`), tok).send({
@@ -49,7 +63,7 @@ const plan = (sid) => A(request(app).post(`${B}/schedules/${sid}/quick-fix`), to
 describe('Batch 5 Issue 2 — Quick Fix resolver completeness', () => {
   test('movable soft R-02 is resolved by a non-destructive op (no drop)', async () => {
     const sid = await freshTerm('312');
-    const { courses, venues, instr } = await refs();
+    const { courses, venues, instr } = await refs('312');   // NEW-FU-673: term-owned
     const jun = courses.find(c => c.academic_level === 'Junior'  && c.credits === 3);
     const sen = courses.find(c => c.academic_level === 'Senior'  && c.credits === 3);
     await mk(sid, jun.id, instr[0].id, venues[0].id, '10:00');
@@ -62,21 +76,26 @@ describe('Batch 5 Issue 2 — Quick Fix resolver completeness', () => {
 
   test('saturated soft R-02 (cannot be moved) ships an opt-in lastResort drop → path to zero', async () => {
     const sid = await freshTerm('322');
-    const { venues, instr } = await refs();
-    const ug3 = (await A(request(app).get(`${B}/courses`), tok)).body
-      .filter(c => c.credits === 3 && !c.has_lab && c.category === 'UG');
+    // NEW-FU-673: term-owned resources only (see refs()) — the global GET re-fetch grabbed
+    // foreign-term courses/instructors whose section-creates 409'd silently, leaving V with free
+    // slots so the greedy could move the section and remainingSoft fell to 0.
+    const { courses, venues, instr } = await refs('322');
+    const ug3 = courses.filter(c => c.credits === 3 && !c.has_lab && c.category === 'UG');
     const V = venues[0].id;
     const jun = ug3.find(c => c.academic_level === 'Junior');
     const sen = ug3.find(c => c.academic_level === 'Senior' && c.id !== jun.id);
+    expect(jun && sen).toBeTruthy();
     await mk(sid, jun.id, instr[0].id, V, '10:00');               // A
     await mk(sid, sen.id, instr[1].id, venues[1].id, '10:00');    // B — overlaps A (soft R-02)
     // Saturate venue V at every other start slot so A's only free-venue slot is
-    // its current (overlapping) one → the greedy cannot move A away.
+    // its current (overlapping) one → the greedy cannot move A away. Assert each filler
+    // actually lands (201) — a swallowed failure here would leave V un-saturated.
     const slots = ['07:00', '08:00', '09:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'];
     let fi = 2;
     for (const st of slots) {
       const c = ug3[fi++ % ug3.length];
-      await mk(sid, c.id, instr[fi % instr.length].id, V, st, '0' + ((fi % 8) + 2));
+      const r = await mk(sid, c.id, instr[fi % instr.length].id, V, st, '0' + ((fi % 8) + 2));
+      expect(r.status).toBe(201);
     }
     const p = await plan(sid);
     const r02 = p.ops.filter(o => (o.resolves || []).includes('R-02'));

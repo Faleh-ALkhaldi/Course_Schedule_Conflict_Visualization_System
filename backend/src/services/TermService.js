@@ -572,13 +572,23 @@ async function renameTerm({ code, newCode, activeCode, departmentId = DEFAULT_DE
   return withTransaction(async (client) => {
     // Target must exist; new code must not.
     const target = await client.query(
-      `SELECT id FROM schedules WHERE department_id = $1 AND semester = $2`,
+      `SELECT id, status, archived_at FROM schedules WHERE department_id = $1 AND semester = $2 FOR UPDATE`,
       [departmentId, code]
     );
     if (target.rowCount === 0) {
       const err = new Error(`Term ${code} not found.`);
       err.code = 'NOT_FOUND';
       throw err;
+    }
+    // NEW-FU-678: a FINALIZED (published, immutable) or ARCHIVED (read-only snapshot) term must not be
+    // RENAMED. Every other mutation path is locked (assertSchedulerEditableLocked / setTermStatus /
+    // the section + import gates), but rename/delete skipped the check — so a finalized or archived
+    // term (including the protected, published 251 / 252) could be renamed or deleted outright. The
+    // `FOR UPDATE` above makes this race-safe vs a concurrent finalize. Unfinalize/unarchive first.
+    {
+      const t = target.rows[0];
+      if (t.status === 'Finalized') { const e = new Error(`Term ${code} is finalized and cannot be renamed — unfinalize it first.`); e.code = 'CONFLICT'; throw e; }
+      if (t.archived_at)            { const e = new Error(`Term ${code} is archived and cannot be renamed — unarchive it first.`);   e.code = 'CONFLICT'; throw e; }
     }
     const collision = await client.query(
       `SELECT id FROM schedules WHERE department_id = $1 AND semester = $2`,
@@ -594,6 +604,15 @@ async function renameTerm({ code, newCode, activeCode, departmentId = DEFAULT_DE
        WHERE department_id = $1 AND semester = $3`,
       [departmentId, newCode, code]
     );
+    // NEW-FU-673: per-term ISOLATION (FU-645) tags each term's PRIVATE courses / instructors /
+    // venues with owner_semester = the term CODE. A rename changes the code, so those owned rows
+    // must follow it — otherwise they're orphaned under the OLD code, which both breaks isolation
+    // AND (because owner_semester is half of the per-term unique keys uq_courses_code_per_term /
+    // uq_instructors_email_per_term) makes a later createTerm that REUSES the old code fail with a
+    // duplicate-key error. Migrate all three owner-scoped tables inside this same transaction.
+    await client.query(`UPDATE courses     SET owner_semester = $1 WHERE owner_semester = $2`, [newCode, code]);
+    await client.query(`UPDATE instructors SET owner_semester = $1 WHERE owner_semester = $2`, [newCode, code]);
+    await client.query(`UPDATE venues      SET owner_semester = $1 WHERE owner_semester = $2`, [newCode, code]);
     return { code: newCode };
   });
 }
@@ -608,13 +627,20 @@ async function deleteTerm({ code, activeCode, departmentId = DEFAULT_DEPT }) {
 
   return withTransaction(async (client) => {
     const sched = await client.query(
-      `SELECT id FROM schedules WHERE department_id = $1 AND semester = $2`,
+      `SELECT id, status, archived_at FROM schedules WHERE department_id = $1 AND semester = $2 FOR UPDATE`,
       [departmentId, code]
     );
     if (sched.rowCount === 0) {
       const err = new Error(`Term ${code} not found.`);
       err.code = 'NOT_FOUND';
       throw err;
+    }
+    // NEW-FU-678: a FINALIZED or ARCHIVED term must not be DELETED (see renameTerm) — the
+    // immutability / read-only contract that protects the published 251 / 252. Unfinalize/unarchive first.
+    {
+      const t = sched.rows[0];
+      if (t.status === 'Finalized') { const e = new Error(`Term ${code} is finalized and cannot be deleted — unfinalize it first.`); e.code = 'CONFLICT'; throw e; }
+      if (t.archived_at)            { const e = new Error(`Term ${code} is archived and cannot be deleted — unarchive it first.`);   e.code = 'CONFLICT'; throw e; }
     }
     const scheduleId = sched.rows[0].id;
 
@@ -659,13 +685,25 @@ async function deleteTerm({ code, activeCode, departmentId = DEFAULT_DEPT }) {
         AND id NOT IN (SELECT DISTINCT venue_id FROM sections WHERE venue_id IS NOT NULL) RETURNING id`, [refVenues]);
     // OH rows cascade with their parent instructor (FK ON DELETE CASCADE).
 
+    // NEW-FU-673: also drop this term's PRIVATE owner-scoped resources (FU-645 per-term isolation).
+    // The reference prune above only removes resources the term's CURRENT sections used — but a term
+    // can OWN resources its sections no longer reference (e.g. after sections were wiped + re-created,
+    // or a partial scoped merge), which would otherwise orphan under this code and make a later
+    // createTerm that REUSES the same code fail with a per-term-unique dup-key (the deleteTerm sibling
+    // of the renameTerm owner_semester defect, and the root of cross-file test-suite contention).
+    // Owner-scoped rows are private to this term, so once its schedule (and sections) is gone they are
+    // unreferenced and safe to remove; the NOT-IN guard keeps it FK-safe against any stray reference.
+    const ownC = (await client.query(`DELETE FROM courses     WHERE owner_semester=$1 AND id NOT IN (SELECT DISTINCT course_id     FROM sections) RETURNING id`, [code])).rowCount;
+    const ownI = (await client.query(`DELETE FROM instructors WHERE owner_semester=$1 AND id NOT IN (SELECT DISTINCT instructor_id FROM sections WHERE instructor_id IS NOT NULL) RETURNING id`, [code])).rowCount;
+    const ownV = (await client.query(`DELETE FROM venues      WHERE owner_semester=$1 AND id NOT IN (SELECT DISTINCT venue_id      FROM sections WHERE venue_id      IS NOT NULL) RETURNING id`, [code])).rowCount;
+
     return {
       deleted: {
         sections:    Number(counts.rows[0].section_count),
         conflicts:   Number(counts.rows[0].conflict_count),
-        courses:     prunedCourses.rowCount,
-        instructors: prunedInstructors.rowCount,
-        venues:      prunedVenues.rowCount,
+        courses:     prunedCourses.rowCount + ownC,
+        instructors: prunedInstructors.rowCount + ownI,
+        venues:      prunedVenues.rowCount + ownV,
       },
     };
   });

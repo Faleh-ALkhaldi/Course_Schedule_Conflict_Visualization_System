@@ -99,7 +99,15 @@ afterAll(async () => {
 // truncated into duplicates by a slice(0, N).
 let uniq = 0;
 const next = (prefix) => `${prefix}-FU213-${Date.now()}-${++uniq}`;
-const nextCourseCode = () => `T13C${Date.now().toString(36).slice(-4)}${++uniq}`; // ≤20 chars, unique
+// NEW-FU-673: course codes must now match "SWE" + space + a 3-digit number whose
+// hundreds digit fixes the academic level (FU-422/FU-576): 100–199 = Freshman.
+// Every course this suite creates is academicLevel 'Freshman', so codes live in
+// the 100s. SWE 101 is the only 100-level seed code, so 102+ never collides.
+// A dedicated counter keeps each create unique and in-range (the suite makes only
+// a handful of courses); globalSetup drops/reseeds the DB per run, so the counter
+// resetting to 0 each run can't clash with a prior run.
+let courseNum = 101;
+const nextCourseCode = () => `SWE ${++courseNum}`; // SWE 102, SWE 103, … (Freshman range)
 
 describe('FU-213: Cooperative active-term enforcement', () => {
 

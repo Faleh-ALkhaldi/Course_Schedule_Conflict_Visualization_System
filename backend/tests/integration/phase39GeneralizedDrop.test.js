@@ -15,6 +15,7 @@
 
 const request = require('supertest');
 const app     = require('../../src/app');
+const { query } = require('../../src/config/db');   // NEW-FU-673: term-valid resource selection
 
 const ADMIN = { username: 'admin1', password: 'password123' };
 const TERM_CODES = ['311','312','313','321','322','323','331','332','341','342'];
@@ -61,24 +62,29 @@ async function freshTermSchedule() {
     .get('/api/v1/departments/SWE-DEPT/schedules')
     .set('Authorization', `Bearer ${adminTok}`);
   const sched = sr.body.find(s => s.semester === code);
-  const existing = (await request(app)
-    .get(`/api/v1/schedules/${sched.id}/sections`)
-    .set('Authorization', `Bearer ${adminTok}`)).body;
-  for (const s of (existing.sections || existing)) {
-    await request(app)
-      .delete(`/api/v1/sections/${s.id}?scope=row`)
-      .set('Authorization', `Bearer ${adminTok}`)
-      .catch(() => {});
-  }
-  return sched.id;
+  // NEW-FU-673: SQL-level wipe of auto-cloned sections (one shot; FU-609-safe). Owned resources survive.
+  await query(`DELETE FROM sections WHERE schedule_id = $1`, [sched.id]);
+  // NEW-FU-673: return the code too so getRefs can scope to THIS term (see getRefs).
+  return { scheduleId: sched.id, code };
 }
 
-async function getRefs() {
-  const [courses, instructors, venues] = await Promise.all([
-    request(app).get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    request(app).get('/api/v1/instructors').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-    request(app).get('/api/v1/venues').set('Authorization', `Bearer ${adminTok}`).then(r => r.body),
-  ]);
+// NEW-FU-673: resources VALID FOR THIS TERM — owned by `code` OR template (owner IS NULL).
+// The global GET lists return templates + EVERY term's owner-scoped copies (FU-645), so
+// picking `instructors[0]` / `courses.find(...)` from them grabs another term's resource →
+// section-create 409 "belongs to term X". TERM_CODES here are Fall/Spring (xx1/xx2), which copy
+// a rich seeded base, so each term OWNS a usable pool (the resolver only draws candidates from
+// the owner-scoped pool). All Suggest-path tests build their own configs from these courses.
+async function getRefs(code) {
+  const courses = (await query(
+    `SELECT id, credits, has_lab, category, course_code FROM courses
+      WHERE owner_semester = $1 OR owner_semester IS NULL`, [code])).rows
+    .map(c => ({ ...c, credits: Number(c.credits), has_lab: c.has_lab }));
+  const instructors = (await query(
+    `SELECT id, name FROM instructors
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false ORDER BY name`, [code])).rows;
+  const venues = (await query(
+    `SELECT id, type, name FROM venues
+      WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false ORDER BY name`, [code])).rows;
   return { courses, instructors, venues };
 }
 
@@ -111,14 +117,16 @@ describe('FU-399: Phase 39 generalized lastResort drop', () => {
   // ── G-Q01..G-Q05: every unresolved conflict ships with a
   // lastResort drop the user can opt into ─────────────────────────
   test('G-Q01: R-14 still emits a tailored lastResort drop (regression vs Phase 38)', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
     const labCourse = courses.find(c => c.has_lab);
     const hall = venues.find(v => v.type === 'LectureHall');
     const hassan = instructors.find(i => i.name === 'Dr. Hassan') ?? instructors[1];
+    // NEW-FU-673: a 3-credit WITH-lab course's Lec is a 2-day pattern (ST/MW/TT) — STT (3 days)
+    // is rejected at create. ST (Sun/Tue) 50min is legal; with no Lab section, R-14 fires.
     await createSection(sched, { courseId: labCourse.id, instructorId: hassan.id,
       venueId: hall.id, sectionNumber: '01', sectionType: 'Lec',
-      days: ['Sunday','Tuesday','Thursday'], startTime: '14:30', endTime: '15:20' });
+      days: ['Sunday','Tuesday'], startTime: '14:30', endTime: '15:20' });
     const planRes = await plan(sched);
     const dropOps = (planRes.ops ?? []).filter(o => o.type === 'drop');
     expect(dropOps.length).toBeGreaterThanOrEqual(1);
@@ -132,12 +140,15 @@ describe('FU-399: Phase 39 generalized lastResort drop', () => {
   });
 
   test('G-Q02: R-10 with no free venue gets a lastResort drop', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors } = await getRefs();
-    const c = courses.find(c => c.course_code === 'SWE301');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const c = courses.find(c => c.course_code === 'SWE 316');   // real code ("SWE301" doesn't exist)
+    // NEW-FU-673: FU-475 made a missing venue a HARD create-time block; create a valid section
+    // then NULL the venue at the DB level to seed the R-10 state.
     await createSection(sched, { courseId: c.id, instructorId: instructors[0].id,
-      venueId: null, sectionNumber: '01',
+      venueId: venues.find(v => v.type === 'LectureHall').id, sectionNumber: '01',
       days: ['Sunday','Tuesday','Thursday'], startTime: '13:30', endTime: '14:20' });
+    await query(`UPDATE sections SET venue_id = NULL WHERE schedule_id = $1`, [sched]);
     const planRes = await plan(sched);
     // R-10 should have either resolved (free venue available) OR be
     // accompanied by a lastResort drop op.
@@ -150,8 +161,8 @@ describe('FU-399: Phase 39 generalized lastResort drop', () => {
   });
 
   test('G-Q03: dropSuffix in unresolved reasons mentions destructive drop option', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
     const labCourse = courses.find(c => c.has_lab);
     const hall = venues.find(v => v.type === 'LectureHall');
     await createSection(sched, { courseId: labCourse.id, instructorId: instructors[0].id,
@@ -175,10 +186,10 @@ describe('FU-399: Phase 39 generalized lastResort drop', () => {
   });
 
   test('G-Q04: lastResort drops never appear without lastResort:true flag', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
-    const c1 = courses.find(c => c.course_code === 'SWE301');
-    const c2 = courses.find(c => c.course_code === 'SWE321');
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
+    const c1 = courses.find(c => c.course_code === 'SWE 316');   // real codes
+    const c2 = courses.find(c => c.course_code === 'SWE 326');
     const hall = venues.find(v => v.type === 'LectureHall');
     await createSection(sched, { courseId: c1.id, instructorId: instructors[0].id,
       venueId: hall.id, sectionNumber: '01',
@@ -193,14 +204,16 @@ describe('FU-399: Phase 39 generalized lastResort drop', () => {
   });
 
   test('G-Q05: applying lastResort drop removes the section + clears its conflict', async () => {
-    const sched = await freshTermSchedule();
-    const { courses, instructors, venues } = await getRefs();
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses, instructors, venues } = await getRefs(code);
     const labCourse = courses.find(c => c.has_lab);
     const hall = venues.find(v => v.type === 'LectureHall');
     const hassan = instructors.find(i => i.name === 'Dr. Hassan') ?? instructors[1];
+    // NEW-FU-673: ST (Sun/Tue) — legal Lec pattern for a 3-credit WITH-lab course (STT is not);
+    // with no Lab section R-14 fires and the resolver emits a lastResort drop.
     await createSection(sched, { courseId: labCourse.id, instructorId: hassan.id,
       venueId: hall.id, sectionNumber: '01', sectionType: 'Lec',
-      days: ['Sunday','Tuesday','Thursday'], startTime: '14:30', endTime: '15:20' });
+      days: ['Sunday','Tuesday'], startTime: '14:30', endTime: '15:20' });
     const planRes = await plan(sched);
     const dropOp = (planRes.ops ?? []).find(o => o.type === 'drop' && o.lastResort);
     expect(dropOp).toBeTruthy();
@@ -221,12 +234,14 @@ describe('FU-399: Phase 39 generalized lastResort drop', () => {
   // ── G-S01..G-S03: Suggest infeasibility now produces a
   // lastResortPlan when Pass E finds a drop-able subset ────────────
   test('G-S01: response shape includes lastResortPlan field when feasible:false', async () => {
-    const sched = await freshTermSchedule();
-    const { courses } = await getRefs();
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses } = await getRefs(code);
     // Force infeasibility: 5 courses all forced to ONE_DAY Sunday at
     // the same time slot. Pass A-D can't resolve; Pass E should drop
     // some to make the remainder fit.
-    const codes = ['SWE101','SWE201','SWE301','SWE411','SWE422'];
+    // NEW-FU-673: real catalog codes (the old "SWE101"/"SWE201"… had no spaces and matched
+    // nothing, so configs was empty and suggest never exercised the infeasible path).
+    const codes = ['SWE 101', 'SWE 216', 'SWE 316', 'SWE 326', 'SWE 402'];
     const configs = codes
       .map(code => courses.find(c => c.course_code === code))
       .filter(Boolean)
@@ -250,12 +265,12 @@ describe('FU-399: Phase 39 generalized lastResort drop', () => {
   });
 
   test('G-S02: lastResortPlan (when populated) has zero residual conflicts on its own preview', async () => {
-    const sched = await freshTermSchedule();
-    const { courses } = await getRefs();
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses } = await getRefs(code);
     // Strongly infeasible config: 5 single-section courses all forced
     // to identical ONE_DAY 50min Sunday slot. Pass E should find that
     // dropping enough courses to leave one yields a feasible plan.
-    const codes = ['SWE101','SWE201','SWE301','SWE411','SWE422'];
+    const codes = ['SWE 101', 'SWE 216', 'SWE 316', 'SWE 326', 'SWE 402'];   // NEW-FU-673: real codes
     const configs = codes
       .map(code => courses.find(c => c.course_code === code))
       .filter(Boolean)
@@ -278,9 +293,9 @@ describe('FU-399: Phase 39 generalized lastResort drop', () => {
   });
 
   test('G-S03: applying lastResortPlan.keptConfigs yields 0 conflicts post-persist', async () => {
-    const sched = await freshTermSchedule();
-    const { courses } = await getRefs();
-    const codes = ['SWE101','SWE201','SWE301','SWE411','SWE422'];
+    const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
+    const { courses } = await getRefs(code);
+    const codes = ['SWE 101', 'SWE 216', 'SWE 316', 'SWE 326', 'SWE 402'];   // NEW-FU-673: real codes
     const configs = codes
       .map(code => courses.find(c => c.course_code === code))
       .filter(Boolean)

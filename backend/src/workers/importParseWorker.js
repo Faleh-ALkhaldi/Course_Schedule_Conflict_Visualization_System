@@ -29,7 +29,7 @@ if (parentPort) {
     memGuard.unref();
     try {
       const buffer = Buffer.from(req.buffer);   // structured-clone delivers a Uint8Array
-      uploadSafety.assertSafeUpload(buffer, req.format);        // throws { status:400/415 } on a bad file
+      await uploadSafety.assertSafeUpload(buffer, req.format);  // NEW-FU-675: async (jszip) — rejects { status:400/415 } on a bad file
       const parsed = await exportSvc.parseRows(buffer, req.format);
 
       parentPort.postMessage({ ok: true, parsed });

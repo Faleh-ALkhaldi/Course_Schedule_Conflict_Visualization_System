@@ -4,144 +4,49 @@
 // not replace) the multer 10MB size cap, the field-validation gate (FU-661), the parse
 // timeout + row/sheet/page caps in the parsers, and the DB constraints — defense in depth.
 //
-// Pure (no I/O) → unit-testable. Throws an Error with .status=400/415 (a user-facing,
-// plain-language message) on rejection; returns silently when the buffer is structurally safe.
+// NEW-FU-675 (ZIP-gate migration): the OOXML inspection now loads the archive with the SAME
+// unzipper the parsers use — jszip 3.10.1 (mammoth and exceljs both call `JSZip.loadAsync`).
+// The hand-rolled central-directory walk this replaces re-implemented jszip's byte-format reading
+// and diverged from it FOUR times across audits — FU-672 (EOCD entry-count), FU-673 (prepend /
+// `zero`-offset), FU-674 (0x7075 Unicode-Path name override), plus a latent ZIP64 gap — each one
+// letting a part be HIDDEN or RENAMED past the gate's name/size checks while the parser still saw
+// it. Inspecting via jszip makes "what the gate checked" identical to "what the parser runs" by
+// construction: there is no offset/name/count model left to model differently. `loadAsync` only
+// ENUMERATES (it stores each part compressed and never eagerly inflates), so enumeration is
+// bomb-safe; we then bound-inflate each part through a byte counter that aborts past the cap, so a
+// size-lying bomb is measured (not trusted) with peak memory ≈ the cap.
 //
-// What it defends against here:
-//   • Spoofed / renamed / polyglot files       → magic-byte (signature) verification.
-//   • Zip bombs (xlsx/docx are ZIP archives)    → entry-count + declared-size + ratio caps AND
-//     NEW-FU-663: a REAL decompression pass (each part is inflated through a hard byte ceiling
-//     via zlib's maxOutputLength), so a bomb that LIES about its declared sizes is still caught
-//     — we measure actual expanded bytes, not the central-directory's claim, and abort the
-//     inflate the moment it crosses the cap (peak memory ≈ the cap, never the full bomb).
-//   • XXE / SSRF / entity-expansion (billion-laughs)  → NEW-FU-663: reject any XML part carrying
-//     a <!DOCTYPE or <!ENTITY declaration. The OOXML spec forbids DTDs, so a real file has none;
-//     a present one is the ONLY way to reference an external entity or define an expansion bomb,
-//     so this is a definitive guard (no external fetch, no expansion) BEFORE any XML parser runs.
-//   • Embedded macros / active content          → reject a ZIP carrying vbaProject.bin etc.
-//   • Truncated / corrupt office files          → a valid OOXML zip must carry its core parts.
-const zlib = require('zlib');
+// Pure-ish (no DB; one jszip dependency) → unit-testable. assertSafeUpload is ASYNC (jszip is).
+// Throws / rejects with an Error carrying .status=400/415 (a user-facing, plain-language message);
+// resolves to { kind } when the buffer is structurally safe.
+//
+// What it defends against:
+//   • Spoofed / renamed / polyglot files     → magic-byte (signature) verification.
+//   • Zip bombs (incl. size-LYING ones)      → jszip enumerate + bounded streaming inflate of every
+//                                               part through a per-part + total byte ceiling.
+//   • XXE / SSRF / billion-laughs            → reject any XML/.rels part carrying <!DOCTYPE/<!ENTITY
+//                                               (the OOXML spec forbids DTDs; a real file has none).
+//   • Macros / OLE / ActiveX / external data → reject vbaProject.bin / oleObject / activeX /
+//                                               externalLink / connections.xml — on jszip's EXACT names.
+//   • Truncated / corrupt office files       → jszip fails to load, or a required core part is missing.
 
 // ── Caps (generous vs. real exports, which are ~10–300 KB / a few dozen ZIP entries) ──────
 const MAX_ZIP_ENTRIES      = 2000;
-// NEW-FU-669: tightened from 100/60 MB. Real exports are ~10–300 KB, so even a huge term's
-// document.xml / sharedStrings is a few MB. The OLD 60 MB single-part ceiling let a ~10 MB
-// .docx inflate to ~59 MB of XML and keep mammoth's SYNCHRONOUS parser (uninterruptible by
-// withParseTimeout) busy 15–23 s. A 25 MB part / 40 MB total cap is still 80×+ any real file
-// but bounds that synchronous burst to a few seconds.
-const MAX_ZIP_UNCOMPRESSED = 40 * 1024 * 1024;    // 40 MB total expanded (declared AND actual)
-const MAX_ZIP_RATIO        = 200;                 // expanded ÷ stored — a classic zip-bomb tell
-const MAX_SINGLE_ENTRY     = 25 * 1024 * 1024;    // 25 MB any one part (declared AND actual)
+const MAX_ZIP_UNCOMPRESSED = 40 * 1024 * 1024;    // 40 MB total expanded (measured)
+const MAX_SINGLE_ENTRY     = 25 * 1024 * 1024;    // 25 MB any one part (measured)
 
 // File signatures (magic bytes).
 const ZIP_SIGS = [Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from([0x50, 0x4b, 0x05, 0x06]), Buffer.from([0x50, 0x4b, 0x07, 0x08])];
 const PDF_SIG  = Buffer.from('%PDF-', 'latin1');
 
-function reject(message, status = 415) { const e = new Error(message); e.status = status; throw e; }
-
+function statusError(message, status) { const e = new Error(message); e.status = status; return e; }
+function reject(message, status = 415) { throw statusError(message, status); }
 function startsWithAny(buf, sigs) { return sigs.some(sig => buf.length >= sig.length && buf.subarray(0, sig.length).equals(sig)); }
 
-// Find the End-Of-Central-Directory record (sig 0x06054b50). The comment trailer can be up
-// to 65535 bytes, so scan back from the end.
-function findEOCD(buf) {
-  const SIG = 0x06054b50;
-  const min = Math.max(0, buf.length - (22 + 0xffff));
-  for (let i = buf.length - 22; i >= min; i--) {
-    if (buf.readUInt32LE(i) === SIG) return i;
-  }
-  return -1;
-}
-
-// Walk the ZIP central directory (no decompression) and return { entries, names, total }.
-// Throws on a corrupt/oversized/ZIP64 archive. Relies on declared sizes — a deliberate
-// lie there is still backstopped by the post-parse row/cell caps + the parse timeout.
-function inspectZip(buf) {
-  if (!startsWithAny(buf, ZIP_SIGS)) reject("This file isn't a valid Office (.xlsx/.docx) file — its contents don't match its type.");
-  const eocd = findEOCD(buf);
-  if (eocd < 0 || eocd + 22 > buf.length) reject("This Office file looks corrupt — it has no valid archive index.");
-  const entryCount = buf.readUInt16LE(eocd + 10);
-  const cdOffset   = buf.readUInt32LE(eocd + 16);
-  if (entryCount === 0xffff || cdOffset === 0xffffffff) reject('This file uses an unsupported ZIP64 layout and was rejected.');
-  if (entryCount > MAX_ZIP_ENTRIES) reject(`This file has too many internal parts (${entryCount}) and was rejected as unsafe.`, 400);
-
-  let off = cdOffset, total = 0, comp = 0;
-  const names = [], entries = [];
-  for (let i = 0; i < entryCount; i++) {
-    if (off + 46 > buf.length || buf.readUInt32LE(off) !== 0x02014b50) reject('This Office file looks corrupt — its archive index is malformed.');
-    const method     = buf.readUInt16LE(off + 10);
-    const compSize   = buf.readUInt32LE(off + 20);
-    const uncompSize = buf.readUInt32LE(off + 24);
-    const nameLen    = buf.readUInt16LE(off + 28);
-    const extraLen   = buf.readUInt16LE(off + 30);
-    const commentLen = buf.readUInt16LE(off + 32);
-    const localOff   = buf.readUInt32LE(off + 42);
-    if (uncompSize === 0xffffffff || compSize === 0xffffffff || localOff === 0xffffffff)
-      reject('This file uses an unsupported ZIP64 layout and was rejected.');
-    if (uncompSize > MAX_SINGLE_ENTRY) reject('This file contains an oversized internal part and was rejected as unsafe.', 400);
-    const name = buf.toString('utf8', off + 46, off + 46 + nameLen);
-    names.push(name);
-    entries.push({ name, method, compressedSize: compSize, uncompressedSize: uncompSize, localHeaderOffset: localOff });
-    total += uncompSize; comp += compSize;
-    off += 46 + nameLen + extraLen + commentLen;
-  }
-  if (total > MAX_ZIP_UNCOMPRESSED) reject('This file expands to too much data and was rejected as unsafe (possible zip bomb).', 400);
-  if (comp > 0 && total / comp > MAX_ZIP_RATIO) reject('This file has an abnormal compression ratio and was rejected as unsafe (possible zip bomb).', 400);
-  return { entryCount, names, total, entries };
-}
-
-// NEW-FU-663: the DEFINITIVE pass — actually inflate every part through a hard byte ceiling
-// (so a size-LYING bomb is measured, not trusted) and scan every XML part for a DTD/entity
-// declaration (XXE / billion-laughs). Dependency-free: Node's zlib does raw-DEFLATE inflate,
-// and `maxOutputLength` makes the sync inflate THROW the instant output would cross the cap,
-// so peak memory is the cap — never the bomb's full expansion.
-function inspectZipDeep(buf, entries) {
-  let actualTotal = 0;
-  for (const e of entries) {
-    const lh = e.localHeaderOffset;
-    if (lh + 30 > buf.length || buf.readUInt32LE(lh) !== 0x04034b50)
-      reject('This Office file looks corrupt — an internal part is misaligned.');
-    const nameLen  = buf.readUInt16LE(lh + 26);
-    const extraLen = buf.readUInt16LE(lh + 28);
-    const dataStart = lh + 30 + nameLen + extraLen;
-    if (dataStart > buf.length) reject('This Office file looks corrupt — an internal part is truncated.');
-
-    let content;
-    if (e.method === 0) {                       // stored (no compression) — actual == compressed
-      const end = e.compressedSize > 0 ? dataStart + e.compressedSize : buf.length;
-      content = buf.subarray(dataStart, Math.min(end, buf.length));
-      if (content.length > MAX_SINGLE_ENTRY) reject('This file contains an oversized internal part and was rejected as unsafe.', 400);
-    } else if (e.method === 8) {                // DEFLATE — inflate with a hard ceiling
-      const slice = e.compressedSize > 0 ? buf.subarray(dataStart, dataStart + e.compressedSize) : buf.subarray(dataStart);
-      try {
-        content = zlib.inflateRawSync(slice, { maxOutputLength: MAX_SINGLE_ENTRY });
-      } catch (err) {
-        // ERR_BUFFER_TOO_LARGE (cap exceeded) ⇒ a size-lying bomb; any other inflate error ⇒
-        // the part isn't valid DEFLATE (corrupt/crafted). Either way the file is unsafe.
-        reject('This file expands to too much data and was rejected as unsafe (possible zip bomb).', 400);
-      }
-    } else {
-      reject('This Office file uses an unsupported internal compression method and was rejected.', 400);
-    }
-    actualTotal += content.length;
-    if (actualTotal > MAX_ZIP_UNCOMPRESSED) reject('This file expands to too much data and was rejected as unsafe (possible zip bomb).', 400);
-
-    // XXE / entity-expansion guard: an OOXML part NEVER legitimately carries a DTD. The
-    // `<!DOCTYPE`/`<!ENTITY` prolog is the only place external entities or expansion bombs can
-    // be declared, so its presence ⇒ reject (definitive, before any XML parser sees it).
-    if (/\.(xml|rels)$/i.test(e.name)) {
-      const head = content.subarray(0, Math.min(content.length, 1 << 20)).toString('latin1');
-      if (/<!DOCTYPE/i.test(head) || /<!ENTITY/i.test(head))
-        reject('This Office file contains a document-type/entity declaration (a possible XXE or entity-expansion attack) and was rejected for safety.', 400);
-    }
-  }
-  return { actualTotal };
-}
-
-// Reject macro-enabled / active-content / remote-data Office files. A schedule export is
-// a plain workbook/document — it never carries macros, OLE/ActiveX objects, or external-data
-// links — so any of these parts means the file is not a clean export and is rejected.
-// NEW-FU-664: extended beyond vbaProject.bin to OLE/ActiveX objects and external-data links
-// (xl/externalLinks/, connections.xml) — the remote-data / "prohibited content" vectors.
+// Reject macro-enabled / active-content / remote-data Office files. A schedule export is a plain
+// workbook/document — it never carries macros, OLE/ActiveX objects, or external-data links — so any
+// of these parts means the file is not a clean export. Runs on jszip's RESOLVED part names (FU-675),
+// so a 0x7075 rename can no longer hide a vbaProject.bin behind a benign central-header name.
 function assertNoActiveContent(names) {
   const lc = names.map(n => n.toLowerCase());
   const macro = lc.some(n => n.includes('vbaproject.bin') || (n.endsWith('.bin') && n.includes('vba')));
@@ -152,28 +57,95 @@ function assertNoActiveContent(names) {
   if (activeOrRemote) reject('This file contains active content or an external-data link and was rejected for safety. Re-export a plain schedule file.', 400);
 }
 
+// Stream-inflate a jszip part through a hard byte ceiling. jszip's nodeStream decompresses
+// INCREMENTALLY, so destroying the stream the moment the running total crosses `cap` stops the
+// inflate with peak memory ≈ the cap — never the bomb's full expansion. (Verified against a
+// 300 MB-from-299 KB DEFLATE bomb: peak RSS stayed ≈ baseline + a couple MB, not + 300 MB.)
+function readBoundedPart(file, cap) {
+  return new Promise((resolve, rej) => {
+    const chunks = []; let n = 0, done = false;
+    const stream = file.nodeStream('nodebuffer');
+    const finish = (err, val) => {
+      if (done) return; done = true;
+      try { stream.destroy(); } catch { /* already torn down */ }
+      err ? rej(err) : resolve(val);
+    };
+    // The `done` guard makes further 'data'/'error' after destroy() no-ops — we do NOT
+    // removeAllListeners() (that interferes with jszip's stream teardown and hangs the inflate).
+    stream.on('data', (c) => {
+      if (done) return;
+      n += c.length;
+      if (n > cap) finish(statusError('This file contains an oversized internal part and was rejected as unsafe (possible zip bomb).', 400));
+      else chunks.push(c);
+    });
+    stream.on('end',   () => finish(null, Buffer.concat(chunks)));
+    stream.on('error', (e) => finish(e && e.status ? e : statusError('This Office file looks corrupt — an internal part could not be read.', 400)));
+  });
+}
+
+// NEW-FU-676 (DoS pre-filter — NOT a security inspection; jszip stays authoritative below): read
+// ONLY the 2-byte EOCD "total entries" field. A ZIP that HONESTLY declares a huge entry count makes
+// JSZip.loadAsync build that many JS objects before the post-load MAX_ZIP_ENTRIES check can fire (a
+// ~10 MB / ~126k-entry file → ~90 MB heap, ~800 ms). Reject an oversized declared count up front in
+// microseconds (a real export declares a few dozen). This is a single field read, NOT the
+// divergence-prone central-directory walk this gate replaced.
+function eocdEntryCount(buf) {
+  const min = Math.max(0, buf.length - (22 + 0xffff));
+  for (let i = buf.length - 22; i >= min; i--) if (buf.readUInt32LE(i) === 0x06054b50) return buf.readUInt16LE(i + 10);
+  return 0;   // no EOCD found → let jszip's loadAsync decide (it will reject a non-archive)
+}
+
+// Inspect an OOXML upload by loading it with jszip (the parser's own unzipper) and bound-inflating
+// every part. Throws (with .status) on anything unsafe; resolves on success.
+async function inspectOoxmlViaJszip(buffer, format) {
+  const JSZip = require('jszip');
+  // Fast DoS pre-reject for an honestly-declared oversized entry count (see eocdEntryCount). A file
+  // that LIES (declares few, holds many) still passes here but is bounded by the worker pool — the
+  // authoritative count check on jszip's ACTUAL part set runs below.
+  const declared = eocdEntryCount(buffer);
+  if (declared > MAX_ZIP_ENTRIES) reject(`This file has too many internal parts (${declared}) and was rejected as unsafe.`, 400);
+
+  let zip;
+  try { zip = await JSZip.loadAsync(buffer); }
+  catch { reject('This Office file looks corrupt — its archive could not be read.'); }
+
+  const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir);
+  if (names.length > MAX_ZIP_ENTRIES) reject(`This file has too many internal parts (${names.length}) and was rejected as unsafe.`, 400);
+
+  assertNoActiveContent(names);
+
+  // Structural sanity — a real OOXML package carries the content-types map + the format's main part.
+  const lc = names.map((n) => n.toLowerCase());
+  if (!lc.includes('[content_types].xml')) reject("This file isn't a valid Office document (missing its content-types index).");
+  if (format === 'xlsx' && !lc.some((n) => n.startsWith('xl/')))   reject("This file isn't a valid Excel workbook.");
+  if (format === 'docx' && !lc.some((n) => n.startsWith('word/'))) reject("This file isn't a valid Word document.");
+
+  // Bounded inflate of every part (measures ACTUAL expanded bytes — a size-lying bomb is caught at
+  // the per-part / total ceiling) + a <!DOCTYPE/<!ENTITY scan of each XML/.rels part (XXE / billion-laughs).
+  let total = 0;
+  for (const name of names) {
+    const content = await readBoundedPart(zip.files[name], MAX_SINGLE_ENTRY);
+    total += content.length;
+    if (total > MAX_ZIP_UNCOMPRESSED) reject('This file expands to too much data and was rejected as unsafe (possible zip bomb).', 400);
+    if (/\.(xml|rels)$/i.test(name)) {
+      const head = content.toString('latin1');
+      if (/<!DOCTYPE/i.test(head) || /<!ENTITY/i.test(head))
+        reject('This Office file contains a document-type/entity declaration (a possible XXE or entity-expansion attack) and was rejected for safety.', 400);
+    }
+  }
+}
+
 /**
- * Validate the raw upload buffer for a declared format. Throws (err.status set) on anything
- * unsafe; returns { kind } on success. `format` ∈ 'xlsx' | 'docx' | 'pdf'.
+ * Validate the raw upload buffer for a declared format. Rejects (err.status set) on anything
+ * unsafe; resolves to { kind } on success. `format` ∈ 'xlsx' | 'docx' | 'pdf'. ASYNC (FU-675).
  */
-function assertSafeUpload(buffer, format) {
+async function assertSafeUpload(buffer, format) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) reject('The uploaded file is empty.', 400);
 
   if (format === 'xlsx' || format === 'docx') {
-    const { names, entries } = inspectZip(buffer);
-    assertNoActiveContent(names);
-    // Structural sanity — a real OOXML package always carries the content-types map, and the
-    // format-specific main part. A ZIP that doesn't is not an importable schedule file.
-    const lc = names.map(n => n.toLowerCase());
-    if (!lc.includes('[content_types].xml'))
-      reject("This file isn't a valid Office document (missing its content-types index).");
-    if (format === 'xlsx' && !lc.some(n => n.startsWith('xl/')))
-      reject("This file isn't a valid Excel workbook.");
-    if (format === 'docx' && !lc.some(n => n.startsWith('word/')))
-      reject("This file isn't a valid Word document.");
-    // NEW-FU-663: only AFTER the cheap structural checks pass do we pay for the real
-    // decompression + DTD scan (catches a size-lying zip bomb and any XXE/entity-bomb XML).
-    inspectZipDeep(buffer, entries);
+    // Cheap magic-byte pre-reject before paying for a jszip load.
+    if (!startsWithAny(buffer, ZIP_SIGS)) reject("This file isn't a valid Office (.xlsx/.docx) file — its contents don't match its type.");
+    await inspectOoxmlViaJszip(buffer, format);
     return { kind: 'ooxml' };
   }
 
@@ -189,7 +161,7 @@ function assertSafeUpload(buffer, format) {
 
 // ── Parse-layer caps (enforced INSIDE the parsers, after the lib has the document) ──────
 // Real exports: ~6 sheets, a few hundred rows/sheet, ~6 PDF pages. These bound a file that
-// passed the zip gate but is still abnormally large (or lied about its declared sizes).
+// passed the zip gate but is still abnormally large.
 const MAX_SHEETS    = 30;
 const MAX_ROWS      = 100000;   // per worksheet / table
 const MAX_PDF_PAGES = 300;
@@ -219,8 +191,8 @@ function withParseTimeout(promise, ms = PARSE_TIMEOUT_MS) {
 }
 
 module.exports = {
-  assertSafeUpload, inspectZip, inspectZipDeep, assertNoActiveContent,
+  assertSafeUpload, inspectOoxmlViaJszip, assertNoActiveContent,
   assertRowCount, assertSheetCount, assertPageCount, withParseTimeout,
-  MAX_ZIP_ENTRIES, MAX_ZIP_UNCOMPRESSED, MAX_ZIP_RATIO,
+  MAX_ZIP_ENTRIES, MAX_ZIP_UNCOMPRESSED, MAX_SINGLE_ENTRY,
   MAX_SHEETS, MAX_ROWS, MAX_PDF_PAGES, MAX_TEXT_ITEMS, PARSE_TIMEOUT_MS,
 };

@@ -70,6 +70,12 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
   // the schedule.
   const [stagedFile, setStagedFile] = useState(null);
   const fileRef = useRef();
+  // NEW-FU-677: synchronous in-flight guard. `importing` is React state (batched), so it doesn't
+  // update within a rapid click-burst on the conflict-dialog option buttons — three quick clicks
+  // otherwise fired three concurrent import POSTs. A ref flips synchronously, so the 2nd/3rd clicks
+  // bail before issuing a request. (The backend already serializes via SELECT … FOR UPDATE, so this
+  // is wasted-work prevention, not a correctness fix.)
+  const importingRef = useRef(false);
 
   // The current format's metadata — used for the button label and the toast.
   const fmtMeta = EXPORT_FORMATS.find(f => f.id === format) ?? EXPORT_FORMATS[0];
@@ -158,6 +164,8 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
       showToast?.('That file is too large (max 10 MB). A schedule export is only a few hundred KB.', 'error');
       return;
     }
+    if (importingRef.current) return;   // NEW-FU-677: block a rapid second/third click before it POSTs
+    importingRef.current = true;
     setImporting(true); setImportResult(null);
     try {
       const result = await api.importSchedule(schedule.id, stagedFile, inferred, mode);
@@ -166,6 +174,7 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
       // show the 3-option dialog instead of treating it as a finished import.
       if (result.needsDecision) {
         setDecision(result);
+        importingRef.current = false;
         setImporting(false);
         return;
       }
@@ -211,7 +220,7 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
       const msg = err.response?.data?.error ?? 'Import failed.';
       setImportResult({ created: 0, skipped: 0, errors: [msg] });
       showToast && showToast('Import failed: ' + msg, 'error');
-    } finally { setImporting(false); }
+    } finally { importingRef.current = false; setImporting(false); }
   }
 
   // NEW-FU-660 / NEW-FU-668: the conflict-dialog options, worded per scope. A whole-term
@@ -527,11 +536,12 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
                       <button
                         key={opt.mode}
                         type="button"
+                        disabled={importing}
                         onClick={() => handleImport(opt.mode)}
                         style={{
-                          textAlign:'left', padding:'9px 12px', borderRadius:8, cursor:'pointer',
+                          textAlign:'left', padding:'9px 12px', borderRadius:8, cursor: importing ? 'wait' : 'pointer',
                           background:'var(--bg-elevated)', border:'1.5px solid var(--slate-200)',
-                          display:'flex', flexDirection:'column', gap:2,
+                          display:'flex', flexDirection:'column', gap:2, opacity: importing ? 0.6 : 1,
                         }}
                       >
                         <span style={{fontWeight:600, fontSize:'.82rem', color:'var(--fg)'}}>{opt.title}</span>

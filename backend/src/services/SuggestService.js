@@ -1230,12 +1230,17 @@ class SuggestService {
       // gender exemption (threaded into the conflict rows below) lets a Male and Female section share
       // a slot without a false clash, so the greedy still lands a conflict-free arrangement.
       const hasSplit    = cfg.maleSections != null || cfg.femaleSections != null;
-      const maleCount   = hasSplit ? Math.max(0, Number(cfg.maleSections)   || 0) : Math.max(0, Number(cfg.sections) || 1);
-      const femaleCount = hasSplit ? Math.max(0, Number(cfg.femaleSections) || 0) : 0;
+      // NEW-FU-678: clamp counts to a sane ceiling (≤20). The HTTP controller already caps to 1-10,
+      // so this is defense-in-depth for any non-controller caller — without it, an Infinity / 1e308
+      // count (which `Number(x) || 0` does NOT bound) drove the task-builder loop unboundedly and
+      // OOM-crashed the process. `Math.floor` also rejects fractional counts.
+      const clampCount  = (x, dflt) => Math.min(20, Math.max(0, Math.floor(Number(x) || dflt)));
+      const maleCount   = hasSplit ? clampCount(cfg.maleSections, 0) : clampCount(cfg.sections, 1);
+      const femaleCount = hasSplit ? clampCount(cfg.femaleSections, 0) : 0;
       // NEW-FU-651: per-gender LAB counts — EXPLICIT when the modal sends maleLabSections /
       // femaleLabSections, else auto-derived ceil(lectures/3) (one lab per up to 3 lectures).
       const labCountFor = (lecCount, explicit) =>
-        explicit != null ? Math.max(0, Number(explicit) || 0)
+        explicit != null ? clampCount(explicit, 0)
                          : (lecCount >= 1 ? Math.ceil(lecCount / 3) : 0);
       const maleLabCount   = info.hasLab ? labCountFor(maleCount,   cfg.maleLabSections)   : 0;
       const femaleLabCount = info.hasLab ? labCountFor(femaleCount, cfg.femaleLabSections) : 0;
