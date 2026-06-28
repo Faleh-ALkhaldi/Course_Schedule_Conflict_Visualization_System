@@ -6,9 +6,9 @@
 
 ## 🟢 Current status
 - **Active agent:** Codex  <!-- handing OVER from Claude to Codex -->
-- **Branch:** `scheduler-modernization` (up to date with `origin/scheduler-modernization`)
-- **Last updated:** 2026-06-28 by Claude (migration report for Codex)
-- **Where we are (one line):** The registrar "Activity flag" arc **FU-688 → FU-690** is **code-complete and verified this session**, but it sits as a **large UNCOMMITTED working-tree change set** on top of commit `3c5859b`. Nothing since `3c5859b` is committed. **No new feature is queued** — this is a clean, verified checkpoint awaiting (a) your authorization to commit the feature blob and (b) a graded-doc reconciliation decision.
+- **Branch:** `codex/checkpoint-verify` (branched from `scheduler-modernization`; dirty FU-680→690 working tree carried over intact)
+- **Last updated:** 2026-06-28 by Codex (checkpoint verification)
+- **Where we are (one line):** The registrar "Activity flag" arc **FU-688 → FU-690** is still **code-complete but UNCOMMITTED** on top of `3c5859b`. Codex re-ran the requested checkpoint: unit tests and frontend build pass; the isolated integration suite did not produce a single clean full run because two known/observed timing flakes failed in different full runs, but both failed files passed standalone. **No new feature is queued** — awaiting owner direction on B1/B2.
 
 ## ✅ Done (complete + verified this session)
 Evidence runs (verified 2026-06-28):
@@ -16,6 +16,14 @@ Evidence runs (verified 2026-06-28):
 - `cd frontend && npm run build` → **✓ built** (vite). ✅
 - `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` → **45 files, 0 failed** (verified earlier this session; re-run to re-confirm — needs Postgres, see 🧪). ✅
 - Live browser (Playwright) earlier this session: terms 251 & 252 render with **no crash, 0 console errors**.
+
+Codex re-verification (2026-06-28, branch `codex/checkpoint-verify`, no code edits):
+- `cd backend && npm install` → up to date; npm audit still reports **20 moderate** backend vulnerabilities (unchanged by this checkpoint).
+- `cd backend && npm run test:unit` → **33 suites passed, 453 tests passed**. ✅
+- `cd frontend && npm install` → up to date; **0 vulnerabilities**.
+- `cd frontend && npm run build` → **✓ built in 1.03s**, 533 modules transformed; Vite emitted existing chunking/dynamic-import warnings. ✅
+- `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` full run #1 → **44 files passed, 1 failed** (`phase37PostApply.test.js`; 3 tests timed out at 5000 ms). Rerun of `phase37PostApply.test.js` standalone → **60 tests passed**. ⚠️
+- `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` full rerun → **44 files passed, 1 failed** (`terms.test.js`; 2 archived-schedule tests failed). Rerun of `terms.test.js` standalone → **50 tests passed**. ⚠️ Known baton note already called out `terms.test.js` as an archived-schedule timing flake.
 
 Feature work landed in the working tree (all on top of `3c5859b`; see `git diff`):
 - **FU-688 — registrar Activity flag set.** Section "activity" semantics mirroring the KFUPM registrar:
