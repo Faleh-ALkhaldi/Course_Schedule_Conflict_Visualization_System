@@ -244,7 +244,7 @@ app.use((err, req, res, next) => {
         // NEW-FU-477 (Phase 115): a duplicate VENUE name was wrongly showing the
         // section-number message inside the Add-Venue modal — attribute it to the venue.
         : /venue/i.test(c)
-        ? 'A room with this building and room number already exists. Pick a different one.'
+        ? 'A venue with this building and room number already exists. Pick a different one.'
         : 'That section number is already used for this course on one of these days. Pick a different number.';
     } else if (err.code === '23514') {
       message = 'Section number is outside the allowed range for its type (Lecture 01–49, Lab 50–99).';

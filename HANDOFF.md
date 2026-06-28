@@ -6,9 +6,9 @@
 
 ## 🟢 Current status
 - **Active agent:** Codex  <!-- handing OVER from Claude to Codex -->
-- **Branch:** `codex/info-project-semantics` (branched from `scheduler-modernization`; dirty FU-680→690 working tree carried over intact)
-- **Last updated:** 2026-06-28 by Codex (info-only + Project scheduling semantics)
-- **Where we are (one line):** Codex implemented and verified the requested scheduling-semantics correction for information-only activities and Project courses. The registrar "Activity flag" arc **FU-688 → FU-690 plus this follow-up** is still **code-complete but UNCOMMITTED** on top of `3c5859b` unless B1 is approved; only this handoff update is safe to commit separately without accidentally committing the inherited feature blob.
+- **Branch:** `codex/ux-output-audit` (branched with the dirty FU-680→690 working tree carried over intact)
+- **Last updated:** 2026-06-29 by Codex (UX/content/output audit)
+- **Where we are (one line):** Codex completed the requested UX/content/export-output audit and fixed safe terminology/output issues. The registrar "Activity flag" arc **FU-688 → FU-690 plus follow-ups** is still **code-complete but largely UNCOMMITTED** on top of `3c5859b` unless B1 is approved; only clean, safely separable audit files plus this handoff can be committed without accidentally committing the inherited feature blob.
 
 ## ✅ Done (complete + verified this session)
 Evidence runs (verified 2026-06-28):
@@ -51,6 +51,25 @@ Codex info-only / Project semantics fix (2026-06-28, branch `codex/info-project-
 - **Test fixes/coverage:** added and adjusted regression coverage across `fu688Registrar`, `fu687ReclassThesis`, `phase33`, `smartRecommend`, `suggestPatterns`, `suggestConflictFree`, and resolver completeness to reflect the clarified semantics.
 - **Verification:** `cd backend && npm run test:unit` → **34 suites passed, 464 tests passed**. `cd frontend && npm run build` → **✓ built in 930ms**, existing Vite dynamic-import/chunk-size warnings only. `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` → **45 files passed, 0 failed** (`fu683ImportScoping.test.js` retried once by the isolated runner, then passed). Targeted integrations also passed for `fu687ReclassThesis`, `batch5ResolverCompleteness`, `suggestConflictFree`, `phase33`, `smartRecommend`, and `suggestPatterns`.
 - **Browser/UI smoke:** ran Playwright against frontend `127.0.0.1:3100` + isolated backend `127.0.0.1:4100` with `DB_NAME_TEST=scheduler_db_modz`. Created disposable isolated test course `SWE 489` (Thesis) only in the test DB. Confirmed its sidebar card has no drag role/tabindex, cursor is default, tooltip says information-only, and no grid block renders. Confirmed Add Section for the Thesis exposes only Course, Section number, and Instructor fields. Confirmed Project edit shows the meeting-time toggle, 50/75/100/160 duration controls, fixed Project type, no Thesis toggle, and optional venue.
+
+Codex UX/content/output audit (2026-06-29, branch `codex/ux-output-audit`):
+- **Graphify:** reused the graphify map and direct source reads to trace the high-blast UX/export paths before editing: frontend `SchedulerPage`, `SidePanel`, `ScheduleGrid`, `AddCourseModal`, `SectionModal`, `SuggestModal`, `QuickFixModal`, `ExportModal`, `AppContext`, plus backend `ExportService`, `PdfExportService`, `DocxExportService`, `ImportParserService`, `QuickFixService`, `exportScope`, and import validators.
+- **Systematic debugging:** used when the full unit run caught an audit-induced regression in `VENUE_EXPORT_NOTE`; root cause was removing the tested "expected/not an error" reassurance while polishing wording. Fixed by restoring "This is expected..." in clearer language. The SonarQube skill was read but not applied because no specific Sonar rule/issue was encountered.
+- **Safe fixes applied:**
+  - Reworded user-facing import/export copy away from internal phrases like "round-trip/lossless", "rooms" where the app means venues, and developer restart commands. Suggest/build-mismatch copy now tells a scheduler to restart local CSCVS services or contact the maintainer, without exposing `EADDRINUSE`, backend port details, or terminal commands.
+  - Standardized visible terminology around venues, venue types, temporary placeholders, conflict explanations, import errors, and quick-fix labels. Quick Fix no longer leads unresolved descriptions with raw rule codes or internal planning phrases like "strict-monotone gate".
+  - Export/scoped-import notes now keep the required reassurance that extra rows are expected while saying they keep the file complete and ready for re-import.
+  - `backend/src/db/seed.js` now gives the synthetic `SWE 101` course a formal title for future seeded databases: "Introduction to Software Engineering". This did **not** reseed or mutate the protected dev DB.
+  - Import validation errors now display `Lecture Hall` instead of the stored `LectureHall` code; duplicate venue errors now say "venue" instead of "room".
+- **Export inspection:** generated representative full-term, instructor, and venue exports in PDF/XLSX/DOCX/PNG from the isolated test DB only, under `/tmp/cscvs-ux-output-audit`. Inspected PDF text with `pypdf`, XLSX/DOCX content with Node libraries, and PNG dimensions/nonblank pixels with Pillow/file. PDF/DOCX/XLSX outputs showed formal titles/headings, scoped metadata, venue terminology, and no visible raw labels such as `LectureHall`, `visual-grid-only`, `round-trip`, `lossless`, or `EADDRINUSE`. Existing isolated DB data still produced the old `SWE 101 ... (DUMMY...)` title in already-generated full exports because that DB was seeded before the source cleanup; future seeds are fixed.
+- **Verification:**
+  - Targeted: `SKIP_TEST_DB=1 npx jest tests/unit/importFieldValidation.test.js tests/unit/exportLabels.test.js --runInBand --forceExit` → **2 suites passed, 84 tests passed**.
+  - Targeted: `SKIP_TEST_DB=1 npx jest tests/unit/quickFix*.test.js --runInBand --forceExit` → **4 suites passed, 15 tests passed**.
+  - `cd backend && npm run test:unit` first caught the export-note wording regression; after the fix, rerun → **34 suites passed, 464 tests passed**.
+  - `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` → **45 files passed, 0 failed**.
+  - `cd frontend && npm run build` → **✓ built in 944ms**, existing Vite dynamic-import/chunk-size warnings only.
+  - Browser smoke: temporary current-code servers on backend `127.0.0.1:4100` + frontend `127.0.0.1:3100` using `DB_NAME=scheduler_db_modz`. Logged in as `admin1`; app loaded term 251; export modal opened; no console/page errors; no visible raw technical terms found. Venue-capacity visible-text check was inconclusive because the active isolated test data exposed no venue rows in that side panel state.
+- **Residual notes:** PNG export generation emitted existing Node/PDF font/localStorage warnings but wrote valid nonblank PNGs for all three scopes. Do not claim the UI/output is perfect; this audit fixed and verified the known safe/actionable findings it found.
 
 Feature work landed in the working tree (all on top of `3c5859b`; see `git diff`):
 - **FU-688 — registrar Activity flag set.** Section "activity" semantics mirroring the KFUPM registrar:

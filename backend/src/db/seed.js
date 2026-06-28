@@ -405,14 +405,13 @@ async function seed() {
     // ─ Courses ─────────────────────────────────────────────────────────────
     const courseIds = new Map();
 
-    // NEW-FU-272 (Phase 50 #4): SWE 101 dummy for Freshman-tier exercise.
-    // Title carries an explicit marker so a reviewer sees at a glance it's
-    // not real KFUPM data.
+    // NEW-FU-272 (Phase 50 #4): SWE 101 synthetic course for the Freshman-tier
+    // exercise. Keep the title formal because seed data appears in exports.
     {
       const r = await client.query(
         `INSERT INTO courses
            (course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone)
-         VALUES ('SWE 101', 'Introduction to SE (DUMMY — Freshman-tier demo)', 3, 'Freshman', 'UG', 1, FALSE, FALSE)
+         VALUES ('SWE 101', 'Introduction to Software Engineering', 3, 'Freshman', 'UG', 1, FALSE, FALSE)
          RETURNING id`
       );
       courseIds.set('SWE101', r.rows[0].id);
