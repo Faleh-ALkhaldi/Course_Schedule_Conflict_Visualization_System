@@ -8,6 +8,8 @@ const { SEVERITY, RULE_IDS, TIME_WINDOWS, R06_TIME_EXEMPT_COURSES } = require('.
 const Conflict = require('../../domain/Conflict');
 const Section  = require('../../domain/Section');
 
+const CONFLICT_EXEMPT_SECTION_TYPES = new Set(['Prj', 'Ths', 'St', 'Int', 'Res']);
+
 // Render a window as "07:00–17:10" from {start,end} minutes-from-midnight.
 const fmt = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 
@@ -16,22 +18,11 @@ function evaluate(changed) {
   // NEW-FU-497 (Phase 121): SWE 412 is registrar-scheduled in the evening
   // (Tue 17:20–20:00) and is the one capstone exempt from the R-06 window.
   if (R06_TIME_EXEMPT_COURSES.has(changed.courseCode)) return [];
-  // NEW-FU-495 (Phase 120): capstone courses are NO LONGER time-exempt.
-  // The prior Phase-51 logic let capstone meet any time (full day); that was
-  // wrong. Every capstone is an Undergraduate Senior course, so it follows the
-  // UG window (07:00–17:10) here — there is no longer a capstone early-return.
-  // Capstone remains VENUE-exempt (see R05Rule, which keeps its isCapstone
-  // early-return). External courses have no section row, so R-06 never runs.
 
-  // NEW-FU-572 (audit-2 Phase-11 follow-up): Project/Thesis sections are
-  // TIME-flexible. They are already exempt from the rigid sectionPattern day/
-  // duration rules and are venue-optional (FU-567) because they meet wherever and
-  // whenever the instructor and students agree — so the fixed UG/GR time-of-day
-  // window does not apply to them either. (Lecture and Lab sections still do.)
-  // NOTE: inferred from the established Prj/Ths flexibility model; trivially
-  // reversible (delete this guard) if the registrar requires grad Prj/Ths to keep
-  // the GR evening window.
-  if (changed.sectionType === 'Prj' || changed.sectionType === 'Ths') return [];
+  // Conflict-exempt activities are fully skipped by ConflictEngine before this
+  // rule is called. Keep the local guard too so direct R06Rule unit calls and
+  // future callers preserve the same contract.
+  if (changed.isConflictExempt || CONFLICT_EXEMPT_SECTION_TYPES.has(changed.sectionType)) return [];
 
   const window = TIME_WINDOWS[changed.category];
   if (!window) return [];

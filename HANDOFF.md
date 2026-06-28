@@ -7,8 +7,8 @@
 ## 🟢 Current status
 - **Active agent:** Codex  <!-- handing OVER from Claude to Codex -->
 - **Branch:** `codex/checkpoint-verify` (branched from `scheduler-modernization`; dirty FU-680→690 working tree carried over intact)
-- **Last updated:** 2026-06-28 by Codex (checkpoint verification)
-- **Where we are (one line):** The registrar "Activity flag" arc **FU-688 → FU-690** is still **code-complete but UNCOMMITTED** on top of `3c5859b`. Codex re-ran the requested checkpoint: unit tests and frontend build pass; the isolated integration suite did not produce a single clean full run because two known/observed timing flakes failed in different full runs, but both failed files passed standalone. **No new feature is queued** — awaiting owner direction on B1/B2.
+- **Last updated:** 2026-06-28 by Codex (full-system audit)
+- **Where we are (one line):** Codex completed a graphify-assisted full-system audit and applied the safe, separable fixes found. The registrar "Activity flag" arc **FU-688 → FU-690** is still **code-complete but UNCOMMITTED** on top of `3c5859b` unless B1 is approved. Current verification: backend unit tests, frontend build, and a second full isolated integration run pass; the first integration run hit the known `phase37PostApply` flake and passed standalone.
 
 ## ✅ Done (complete + verified this session)
 Evidence runs (verified 2026-06-28):
@@ -24,6 +24,12 @@ Codex re-verification (2026-06-28, branch `codex/checkpoint-verify`, no code edi
 - `cd frontend && npm run build` → **✓ built in 1.03s**, 533 modules transformed; Vite emitted existing chunking/dynamic-import warnings. ✅
 - `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` full run #1 → **44 files passed, 1 failed** (`phase37PostApply.test.js`; 3 tests timed out at 5000 ms). Rerun of `phase37PostApply.test.js` standalone → **60 tests passed**. ⚠️
 - `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` full rerun → **44 files passed, 1 failed** (`terms.test.js`; 2 archived-schedule tests failed). Rerun of `terms.test.js` standalone → **50 tests passed**. ⚠️ Known baton note already called out `terms.test.js` as an archived-schedule timing flake.
+
+Codex full-system audit (2026-06-28, branch `codex/checkpoint-verify`):
+- **Graphify:** loaded `/Users/livyw/.agents/skills/graphify/SKILL.md`; generated `graphify-out/graph.json`, `GRAPH_REPORT.md`, `graph.html` from deterministic AST/static extraction because no Gemini key was available for semantic labeling. Result: **2,018 nodes / 3,199 edges / 165 communities**. High-blast areas: DB/query/repositories/scheduling, import/export pipeline, and frontend `AppContext`/`SchedulerPage`/grid/sidebar state flow. `graphify-out/` is ignored and intentionally not committed.
+- **Static audit:** import-resolution scan found no missing runtime imports. Confirmed real dead frontend helpers: `frontend/src/hooks/useRenderStrategy.js`, `frontend/src/utils/renderStrategy.js`, `frontend/src/utils/motion.js`.
+- **Fixes applied:** removed those dead helpers; hardened `backend/src/engine/rules/R06Rule.js` so direct rule calls honor the same conflict-exempt family the engine already skips (`Project`, `Thesis`, `Research`, `External` / `Prj`, `Ths`, `Res`, `St`, `Int`); added `backend/tests/unit/r06ConflictExempt.test.js`; corrected stale architecture comments in dirty FU files (these comment-only edits remain in the uncommitted feature blob because staging the files wholesale would commit B1).
+- **Verification:** `cd backend && npm run test:unit` → **34 suites passed, 454 tests passed**. `cd frontend && npm run build` → **✓ built**, existing Vite dynamic-import/chunk-size warnings only. `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` run #1 → **44 files passed, 1 failed** (`phase37PostApply.test.js` P-Q01); standalone `DB_NAME_TEST=scheduler_db_modz NODE_ENV=test npx jest tests/integration/phase37PostApply.test.js --runInBand --forceExit` → **60/60 passed**; full run #2 → **45 files passed, 0 failed**. `git diff --check` clean.
 
 Feature work landed in the working tree (all on top of `3c5859b`; see `git diff`):
 - **FU-688 — registrar Activity flag set.** Section "activity" semantics mirroring the KFUPM registrar:
