@@ -5,7 +5,7 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 ## Current Repo State
 
 - Repo: `/Users/livyw/Downloads/SWE_412/Course_Schedule_Conflict_Visualization_System`
-- Branch at last memory update: `codex/info-only-regression`
+- Branch at last memory update: `codex/seminar-venue-rules`
 - Memory checkpoint was first committed as `11e98b7 docs(handoff): add continuity memory checkpoint`; run `git log --oneline -12` for the current latest commit.
 - Remote verified during prior session: `origin https://github.com/Faleh-ALkhaldi/Course_Schedule_Conflict_Visualization_System.git`
 - Git identity verified during prior session: `FALEH AL KHALDI <voidn49@gmail.com>`
@@ -24,10 +24,11 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 
 ## Database / Migration State
 
-- Migrations `024_phase125_thesis_flag.js`, `025_phase126_registrar_flags.js`, `026_phase127_seminar_course_flag.js`, and `027_phase128_info_only_backfill.js` exist in the working tree and were applied to the dev DB/private test flow during prior work, but are untracked until the FU blob or a scoped source slice is committed.
+- Migrations `024_phase125_thesis_flag.js`, `025_phase126_registrar_flags.js`, `026_phase127_seminar_course_flag.js`, `027_phase128_info_only_backfill.js`, and `028_phase129_seminar_venue_rules.js` exist in the working tree and were applied to the dev DB/private test flow during prior work, but are untracked until the FU blob or a scoped source slice is committed.
 - On 2026-06-29, `026_phase127_seminar_course_flag.js` was applied to live dev DB `scheduler_db` with `npm run migrate` to repair the runtime error `column c.is_seminar does not exist`. This was additive only and did not reseed/reset data.
 - On 2026-06-29, `027_phase128_info_only_backfill.js` was applied to live dev DB `scheduler_db` with `npm run migrate` to repair stale non-protected Thesis / Research / Summer Training / Internship rows that were being treated as scheduled lecture rows. This was additive/idempotent data repair and did not reseed/reset data.
-- Protected data remained intact after the info-only repair: term 251 = 81 sections, term 252 = 97 sections. Term 253 is now 37 sections; term 282 is now 76 after stale scheduled `SWE 610` thesis artifacts were collapsed into side-panel info-only instructor rows.
+- On 2026-06-30, `028_phase129_seminar_venue_rules.js` was applied to live dev DB `scheduler_db` with `npm run migrate` to repair stale non-protected Seminar rows that were stored as 3-credit lecture-like rows. This was additive/idempotent data repair and did not reseed/reset data. A live adjustment was also applied for already-migrated late Seminar rows so 75-minute Graduate meetings stay within the 17:20-22:00 window.
+- Protected data remained intact after the info-only and Seminar repairs: term 251 = 81 sections, term 252 = 97 sections. Term 253 is now 36 sections; term 282 is now 72 after stale scheduled Thesis and Seminar artifacts were collapsed/normalized.
 - Dev DB has manual, non-seeded data: real UG thesis courses `SWE 494` and `SWE 496` inserted into protected terms `251` and `252`. A reseed would erase them.
 - Use `DB_NAME_TEST=scheduler_db_modz` for integration tests. The default shared test DB can produce spurious failures when sessions overlap.
 - Use `npm run test:int:isolated`, not the shared `npm run test:int`.
@@ -149,9 +150,29 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 - Verification: targeted `fu688Registrar.test.js` passed (1 suite / 7 tests); backend unit passed (34 suites / 479 tests); isolated backend integration passed (45 files / 0 failed); frontend build passed after final UI copy cleanup with only existing Vite warnings; `git diff --check` clean.
 - Commit/staging note: source/migration/test changes are interleaved with the inherited dirty FU blob and migration `027` depends on the untracked `024`/`025`/`026` stack. Commit only continuity docs unless the owner authorizes staging the source/migration/test slice.
 
+### 2026-06-30 Seminar and Venue-Option Regression Repair
+
+- Branch: `codex/seminar-venue-rules`.
+- Symptom: `SWE 599 - Seminar` was treated like a regular Lecture. Add Section / Change Time / Change Details / Suggest could expose multi-day patterns, 50-minute duration, and normal lecture copy. The venue selector also exposed `-- No venue --` for ordinary scheduled sections.
+- Root cause: the live dev DB and seed source had `SWE 599` stored as `credits=3`, `is_seminar=false`, and `section_type='Lec'` with stale multi-day/50-minute rows, so the existing Seminar-aware UI/API logic received lecture-like data. Separately, `SectionModal` rendered the no-venue option unconditionally and backend section update paths did not reject clearing venue from scheduled non-Project sections.
+- Graphify was used before editing via `/Users/livyw/.agents/skills/graphify/SKILL.md` and `references/query.md`. Relevant blast radius: backend course-format validation, controllers, seed, migrations, import validation, Suggest/Quick Fix/conflict/import-export mirrors; frontend Add Course, Section, Suggest, Scheduler, AppContext, grid, and side panel.
+- Source fixes in the dirty working tree:
+  - `backend/src/domain/courseFormat.js` now rejects Seminar unless it is exactly 1 credit.
+  - `backend/src/controllers/index.js` passes credits to Seminar validation and rejects direct update payloads that leave scheduled non-Project sections without a venue.
+  - `backend/src/db/seed.js` persists registrar Seminar rows as Graduate/GR, 1-credit, `is_seminar=true` courses and seeds Seminar sections as one-day, 75-minute `Sem` rows.
+  - `backend/src/db/migrations/028_phase129_seminar_venue_rules.js` repairs non-protected stale Seminar data and adds a NOT VALID future-course constraint for `is_seminar`.
+  - `frontend/src/components/modals/AddCourseModal.jsx` forces Seminar to 1 credit.
+  - `frontend/src/components/modals/SectionModal.jsx` shows `-- No venue --` only for Project sections; required scheduled sections use a disabled `-- Select venue --` placeholder. Info-only activities still have no time/venue controls.
+  - `backend/src/domain/importFieldValidation.js`, `backend/tests/integration/fu688Registrar.test.js`, `backend/tests/unit/importFieldValidation.test.js`, and `backend/tests/unit/fu688Registrar.test.js` were updated for regression coverage.
+- Live API/UI state after repair: term 253 `SWE 599` is one `Sem` row from `17:50-19:05` with venue `22-134`. Term 282 `SWE 599` has two `Sem` rows, both 75 minutes with venue, including the female row adjusted to `20:45-22:00`. No invalid scheduled Seminar row remains in the checked terms.
+- Verification: backend syntax checks passed; targeted `fu688Registrar.test.js` passed (1 suite / 7 tests); backend unit passed (34 suites / 481 tests); isolated backend integration passed (45 files / 0 failed); frontend build passed with only existing Vite warnings; API smoke for term 253 passed; Playwright/Chromium UI smoke confirmed Seminar only allows single-day Sunday-Thursday and 75 minutes, Lecture 1-credit still uses 50 minutes, `-- No venue --` appears only for Project, and info-only activities have no time/venue controls.
+- Commit/staging note: source/migration/test changes are interleaved with the inherited dirty FU blob and migration `028` depends on the untracked `024`/`025`/`026`/`027` stack. Commit only continuity docs unless the owner authorizes staging the source/migration/test slice.
+
 ## Verification History
 
 Most recent semantic checkpoint:
+
+- Seminar/venue repair on `codex/seminar-venue-rules`: targeted `fu688Registrar.test.js` passed (1 suite / 7 tests); backend unit tests passed (34 suites / 481 tests); full isolated backend integration passed (45 files / 0 failed); frontend build passed with only existing Vite warnings; API smoke for term 253 passed; Playwright/Chromium browser smoke for Seminar add/edit/suggest and venue selection passed.
 
 - Info-only activity repair on `codex/info-only-regression`: targeted `fu688Registrar.test.js` passed (1 suite / 7 tests); backend unit tests passed (34 suites / 479 tests); full isolated backend integration passed (45 files / 0 failed); frontend build passed with only existing Vite warnings; browser/API smoke for term 253 passed.
 
