@@ -5,7 +5,7 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 ## Current Repo State
 
 - Repo: `/Users/livyw/Downloads/SWE_412/Course_Schedule_Conflict_Visualization_System`
-- Branch at last memory update: `codex/course-flag-suggest-semantics`
+- Branch at last memory update: `codex/full-system-audit`
 - Memory checkpoint was first committed as `11e98b7 docs(handoff): add continuity memory checkpoint`; run `git log --oneline -12` for the current latest commit.
 - Remote verified during prior session: `origin https://github.com/Faleh-ALkhaldi/Course_Schedule_Conflict_Visualization_System.git`
 - Git identity verified during prior session: `FALEH AL KHALDI <voidn49@gmail.com>`
@@ -107,9 +107,24 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 - Project, Thesis, Research, ST/INT, and Seminar derive their section/activity type from the course flag.
 - Auto-Suggest now excludes information-only and Project courses, constrains Seminar to one-day/75-minute patterns, and avoids invalid controls for Thesis/Research/ST/INT/Project.
 
+### 2026-06-29 Full-System Audit/Fix Pass
+
+- Branch: `codex/full-system-audit`.
+- Graphify was used before editing. The high-blast hubs were backend scheduling/conflict services (`ScheduleService`, `ConflictEngine`, rules, repositories), import/export services, `ScopedImportService`, `SuggestService`, `QuickFixService`, `SectionRepository`, and frontend mirrors (`AppContext`, `SchedulerPage`, grid, side panel, modals).
+- Quick Fix in-memory evaluation now matches authoritative instructor-warning behavior for information-only activities and dedupes R-09/R-10/R-12 by course, section number, and gender.
+- Import section-type error text now lists all accepted round-trip activity labels, including Summer Training, Internship, and Research; tests confirm those labels are accepted.
+- Suggest forced-capacity warning wording now checks stored section-type codes (`Lec`, `Lab`, `Sem`) correctly.
+- The next-section-number endpoint now echoes valid requested section types instead of coercing all non-lab requests to `Lec`.
+- Direct API misuse with a private course row from another term is now rejected for manual section creation and Suggest when `owner_semester` is non-null and mismatched.
+- Catalog/template course IDs with `owner_semester IS NULL` are still accepted for backward compatibility. Stricter template-to-local resolution is an open owner decision because it changes persisted/returned `courseId` expectations.
+- Source edits from this audit are interleaved with the inherited dirty FU blob; do not stage broad source files unless B1 is approved.
+
 ## Verification History
 
 Most recent semantic checkpoint:
+
+- Full-system audit/fix pass on `codex/full-system-audit`: `git diff --check` clean; backend unit tests passed (34 suites / 479 tests); focused `batch6TermIsolation` passed (1 suite / 2 tests); focused `suggestPatterns` passed (1 suite / 7 tests); full isolated backend integration passed (45 files / 0 failed); frontend build passed with only existing Vite warnings.
+- Browser/UI smoke was not rerun during this pass because no frontend behavior changed. Export/import artifact inspection was not rerun because output-generation code was not changed; isolated integration covered the FU export/import/round-trip suites.
 
 - Targeted backend unit tests for registrar/import/export labels: 3 suites passed, 119 tests passed.
 - Targeted backend integration `fu688Registrar.test.js`: 1 suite passed, 6 tests passed. Existing duplicate-key console noise from old test setup did not fail the suite.
@@ -137,7 +152,7 @@ As of the last service restart, the app was running in detached `tmux` sessions:
 - Backend session: `cscvs-backend`
 - Frontend session: `cscvs-frontend`
 - Frontend URL: `http://127.0.0.1:3000/`
-- Backend health: `http://127.0.0.1:4000/api/v1/health`
+- Backend health: `http://127.0.0.1:4000/health`
 - Backend health returned `{"status":"ok"}`.
 - Frontend returned HTTP 200.
 - Dev login: `admin1` / `password123`
@@ -158,6 +173,7 @@ tmux kill-session -t cscvs-frontend
 - B3: Confirm author/remote before any push.
 - B4: Decide what to do about backend `exceljs -> uuid` audit advisory.
 - B5: Decide whether ST and INT should remain season-derived from `is_external` or become separate stored DB flags.
+- B6: Decide whether catalog/template course IDs (`owner_semester IS NULL`) should continue to be accepted by term APIs, or whether a coordinated API/test update should map them to term-owned rows.
 
 ## First Actions for a New Session
 
