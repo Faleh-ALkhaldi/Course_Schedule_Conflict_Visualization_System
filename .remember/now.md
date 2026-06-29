@@ -5,7 +5,7 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 ## Current Repo State
 
 - Repo: `/Users/livyw/Downloads/SWE_412/Course_Schedule_Conflict_Visualization_System`
-- Branch at last memory update: `codex/fix-seminar-schema`
+- Branch at last memory update: `codex/info-only-regression`
 - Memory checkpoint was first committed as `11e98b7 docs(handoff): add continuity memory checkpoint`; run `git log --oneline -12` for the current latest commit.
 - Remote verified during prior session: `origin https://github.com/Faleh-ALkhaldi/Course_Schedule_Conflict_Visualization_System.git`
 - Git identity verified during prior session: `FALEH AL KHALDI <voidn49@gmail.com>`
@@ -24,8 +24,10 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 
 ## Database / Migration State
 
-- Migrations `024_phase125_thesis_flag.js`, `025_phase126_registrar_flags.js`, and `026_phase127_seminar_course_flag.js` exist in the working tree and were applied to the dev DB and private test DB during prior work, but are untracked until the FU blob is committed.
+- Migrations `024_phase125_thesis_flag.js`, `025_phase126_registrar_flags.js`, `026_phase127_seminar_course_flag.js`, and `027_phase128_info_only_backfill.js` exist in the working tree and were applied to the dev DB/private test flow during prior work, but are untracked until the FU blob or a scoped source slice is committed.
 - On 2026-06-29, `026_phase127_seminar_course_flag.js` was applied to live dev DB `scheduler_db` with `npm run migrate` to repair the runtime error `column c.is_seminar does not exist`. This was additive only and did not reseed/reset data.
+- On 2026-06-29, `027_phase128_info_only_backfill.js` was applied to live dev DB `scheduler_db` with `npm run migrate` to repair stale non-protected Thesis / Research / Summer Training / Internship rows that were being treated as scheduled lecture rows. This was additive/idempotent data repair and did not reseed/reset data.
+- Protected data remained intact after the info-only repair: term 251 = 81 sections, term 252 = 97 sections. Term 253 is now 37 sections; term 282 is now 76 after stale scheduled `SWE 610` thesis artifacts were collapsed into side-panel info-only instructor rows.
 - Dev DB has manual, non-seeded data: real UG thesis courses `SWE 494` and `SWE 496` inserted into protected terms `251` and `252`. A reseed would erase them.
 - Use `DB_NAME_TEST=scheduler_db_modz` for integration tests. The default shared test DB can produce spurious failures when sessions overlap.
 - Use `npm run test:int:isolated`, not the shared `npm run test:int`.
@@ -131,9 +133,27 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 - Browser smoke after fix: `http://localhost:3000/?term=251`, login `admin1` / `password123`, showed Fall 2025 / 251 with populated Courses and Sections, no `c.is_seminar` toast, and no console errors.
 - No source edit was needed. The applied migration file is still part of the inherited untracked FU blob; do not stage it alone unless the owner approves committing that feature slice/B1.
 
+### 2026-06-29 Info-Only Activity Regression Repair
+
+- Branch: `codex/info-only-regression`.
+- Symptom: Thesis, Research, Internship, and Summer Training were being treated like scheduled Lecture sections. In term 253, `SWE 610 - Thesis` could appear as a grid/scheduled activity and opened lecture-style controls; `SWE 399` had a stale scheduled placeholder row.
+- Root cause: the frontend/backend info-only paths mostly obeyed course flags, but the active DB and seed source had stale registrar activity rows with lecture-like flags/meeting fields. Seed ingestion tracked raw registrar activity values such as `THS` and `ST`, but did not persist the corresponding course flags for seeded UG/GR courses, and the old `SWE 399` placeholder used sentinel day/time fields from pre-nullable days.
+- Graphify was used before editing. Blast radius included frontend `AppContext`, `SchedulerPage`, `SidePanel`, `ScheduleGrid`, `SectionModal`; backend controllers, `seed.js`, repositories, `ScheduleService`, `ConflictEngine`, `QuickFixService`, `SuggestService`, import/export/scoped import, import validators, migrations, and tests.
+- Source fixes in the dirty working tree:
+  - `backend/src/db/seed.js` now carries registrar activity flags into seeded course rows (`THS` thesis, `RES` research, `ST`/`INT` external, `SEM` seminar), inserts info-only rows with NULL meeting fields when the raw activity has no meeting time, and stops creating the old scheduled `SWE 399` sentinel row.
+  - `backend/src/db/migrations/027_phase128_info_only_backfill.js` repairs existing stale non-protected info-only rows by setting flags, collapsing stale multi-day artifacts, and clearing day/start/end/venue fields.
+  - `frontend/src/components/modals/SectionModal.jsx` keeps info-only add/edit UI minimal and removes stale scheduling labels from info-only edit panels.
+  - `backend/tests/integration/fu688Registrar.test.js` covers seeded info-only rows and direct scheduled-payload rejection.
+- Live API/UI state after repair: `SWE 399` and `SWE 610` in term 253 show only as `No fixed time` sidebar rows, have no grid blocks, are not draggable, and expose only course/activity identity, section number, and instructor in Add Section. Existing `SWE 610 §01` edit exposes only instructor and section number.
+- Live API misuse check: POSTing a scheduled `SWE 610` payload for term 253 returned 400 `Information-only activities must not have meeting days or times.` and left scheduled info-only row count at 0.
+- Verification: targeted `fu688Registrar.test.js` passed (1 suite / 7 tests); backend unit passed (34 suites / 479 tests); isolated backend integration passed (45 files / 0 failed); frontend build passed after final UI copy cleanup with only existing Vite warnings; `git diff --check` clean.
+- Commit/staging note: source/migration/test changes are interleaved with the inherited dirty FU blob and migration `027` depends on the untracked `024`/`025`/`026` stack. Commit only continuity docs unless the owner authorizes staging the source/migration/test slice.
+
 ## Verification History
 
 Most recent semantic checkpoint:
+
+- Info-only activity repair on `codex/info-only-regression`: targeted `fu688Registrar.test.js` passed (1 suite / 7 tests); backend unit tests passed (34 suites / 479 tests); full isolated backend integration passed (45 files / 0 failed); frontend build passed with only existing Vite warnings; browser/API smoke for term 253 passed.
 
 - Seminar schema hotfix on `codex/fix-seminar-schema`: backend unit tests passed (34 suites / 479 tests); full isolated backend integration passed (45 files / 0 failed); frontend build passed with only existing Vite warnings; browser smoke for term 251 passed.
 
