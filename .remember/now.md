@@ -6,7 +6,7 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 
 - Repo: `/Users/livyw/Downloads/SWE_412/Course_Schedule_Conflict_Visualization_System`
 - Branch at last memory update: `codex/course-flag-suggest-semantics`
-- Latest committed checkpoint at last memory update: `00bd574 docs(handoff): record course flag semantics audit`
+- Latest committed checkpoint at last memory update: `11e98b7 docs(handoff): add continuity memory checkpoint`
 - Remote verified during prior session: `origin https://github.com/Faleh-ALkhaldi/Course_Schedule_Conflict_Visualization_System.git`
 - Git identity verified during prior session: `FALEH AL KHALDI <voidn49@gmail.com>`
 - There is a large dirty working tree. Do not assume `git status` is clean.
