@@ -6,9 +6,9 @@
 
 ## 🟢 Current status
 - **Active agent:** Codex  <!-- handing OVER from Claude to Codex -->
-- **Branch:** `codex/full-system-audit` (branched with the dirty FU-680→690 working tree carried over intact)
-- **Last updated:** 2026-06-29 by Codex (full-system audit/fix pass)
-- **Where we are (one line):** Codex completed a graphify-guided full-system audit/fix pass and verified the backend unit suite, isolated backend integration suite, and frontend build. The registrar "Activity flag" arc **FU-688 → FU-690 plus follow-ups** remains **code-complete but largely UNCOMMITTED** on top of `3c5859b`; this audit's source edits are interleaved with that dirty feature blob, so do not stage source files wholesale unless B1 is approved.
+- **Branch:** `codex/fix-seminar-schema` (branched with the dirty FU-680→690 working tree carried over intact)
+- **Last updated:** 2026-06-29 by Codex (applied pending Seminar schema migration)
+- **Where we are (one line):** Codex fixed the live dev regression where term data disappeared with `column c.is_seminar does not exist` by applying the pending additive migration `026_phase127_seminar_course_flag.js` to `scheduler_db` without reseeding or changing protected rows. The registrar "Activity flag" arc **FU-688 → FU-690 plus follow-ups** remains **code-complete but largely UNCOMMITTED** on top of `3c5859b`; do not stage source files wholesale unless B1 is approved.
 
 ## ✅ Done (complete + verified this session)
 Evidence runs (verified 2026-06-28):
@@ -114,6 +114,16 @@ Codex full-system audit/fix pass (2026-06-29, branch `codex/full-system-audit`):
 - **Smoke/export note:** no browser/UI smoke was run because this audit did not change frontend behavior. Full export/import artifact inspection was not rerun because output generation code was not changed; isolated integration still covered the FU export/import/round-trip suites.
 - **Commit/staging note:** the source edits above are interleaved with the inherited dirty FU feature blob. Unless the owner authorizes B1, commit only the updated continuity docs from this pass and leave the source tree dirty.
 
+Codex Seminar schema hotfix (2026-06-29, branch `codex/fix-seminar-schema`):
+- **Root cause:** backend code from the dirty Seminar feature arc selected `c.is_seminar` from `courses`, but the live dev database `scheduler_db` had only migrations through `025_phase126_registrar_flags.js` applied. The untracked additive migration `026_phase127_seminar_course_flag.js` existed on disk but was pending, so `/api/v1/courses?term=...` and `SectionRepository.findBySchedule` failed with PostgreSQL `42703` and the UI rendered empty Courses/Sections.
+- **Blast radius:** all term course/section loads through the backend could fail anywhere `courses.is_seminar` was selected, making data appear missing across terms. The data itself was present; the API queries were failing before returning it.
+- **Fix:** ran `cd backend && npm run migrate`, which applied only `026_phase127_seminar_course_flag.js` to `scheduler_db`. This added `courses.is_seminar BOOLEAN NOT NULL DEFAULT false`. No reseed/reset/stash/clean was run, and protected terms 251/252 plus owner term 282 were not mutated.
+- **Protected-data check:** before and after the migration, term 251 had **81** sections, term 252 had **97**, and term 282 had **80**. Manual protected UG thesis rows `SWE 494` and `SWE 496` remained present in terms 251 and 252; after the migration they correctly show `is_seminar = false`.
+- **Graphify/log evidence:** graphify query on the existing graph confirmed the relevant blast area is the course/section/repository/schedule/import surface, but the graph predates the new Seminar symbol. Backend logs showed `SectionRepository.findBySchedule` failing on `column c.is_seminar does not exist`; after the migration, the same term-251 sections query returned 81 rows.
+- **API/UI verification:** backend health `/health` returned 200 `{"status":"ok"}`. `GET /api/v1/courses?term=251` returned 200 with 16 courses. `GET /api/v1/schedules/c2536f22-4003-4a79-9794-0089d05a73ac/sections?view=course` returned 200 with the restored term-251 section payload. Browser smoke on `http://localhost:3000/?term=251` logged in as `admin1`, rendered Fall 2025 / 251 with populated Courses/Sections and no `c.is_seminar` toast or console errors.
+- **Test verification:** `cd backend && npm run test:unit` -> **34 suites passed, 479 tests passed**. `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` -> **45 files passed, 0 failed**. `cd frontend && npm run build` -> **built successfully** with the existing Vite dynamic/static import and chunk-size warnings only.
+- **Commit/staging note:** no source-code edit was needed for this hotfix. The migration file that was applied is still part of the inherited untracked FU feature blob, so do not stage it alone unless the owner approves committing the relevant feature slice/B1. Commit only this handoff/memory update separately.
+
 Feature work landed in the working tree (all on top of `3c5859b`; see `git diff`):
 - **FU-688 — registrar Activity flag set.** Section "activity" semantics mirroring the KFUPM registrar:
   - **ST / INT** = the existing `is_external` flag; label DERIVED from term season (code last digit `3`=summer→ST, `1`/`2`=fall/spring→INT). No new column.
@@ -146,7 +156,7 @@ Feature work landed in the working tree (all on top of `3c5859b`; see `git diff`
      - docs: `CLAUDE.md`, `AGENTS.md` (symlink→CLAUDE.md), `HANDOFF.md` (these three are committed by this handoff)
    - **DANGER:** do **NOT** `git stash`, `git reset --hard`, `git checkout -- .`, or `git clean` — you will lose ~2 weeks of FU-680→690 work that is in **no commit**. To start a Codex branch: `git switch -c codex/<task>` — the working-tree changes carry over.
 2. **DB has manual data NOT reproducible from git.** The FU-689 UG-thesis courses (SWE 494/496 in terms 251 & 252) were inserted by direct SQL, **not** by a migration or `seed.js`. A fresh DB from `npm run migrate && npm run seed` will **NOT** contain them, so the new "protected" section baselines (**251 = 81, 252 = 97**, 282 = 80) exist **only in the current dev DB**. Reset/reseed → that data vanishes and the invariant reverts to 251=78/252=95. (No code depends on the exact counts.)
-3. **Migrations 024/025/026 are applied to the dev DB + private test DB this session but are untracked.** They auto-run via `npm run migrate` (discovered + sorted). A teammate pulling only committed code won't have them until the blob is committed.
+3. **Migrations 024/025/026 are applied to the dev DB + private test DB this session but are untracked.** `026_phase127_seminar_course_flag.js` was applied to the live dev DB on 2026-06-29 to fix the `c.is_seminar` runtime regression. They auto-run via `npm run migrate` (discovered + sorted). A teammate pulling only committed code won't have them until the blob is committed.
 
 ## 🚧 Blockers / open decisions (need the human)
 - **B1 — Authorize committing the feature blob.** Standing instruction all session was "do NOT commit/push until I tell you." This turn authorized committing only the **handoff docs**, so FU-680→690 plus the info-only/Project follow-up stays intentionally uncommitted. **Decision:** commit it (how to split?) and whether to push.

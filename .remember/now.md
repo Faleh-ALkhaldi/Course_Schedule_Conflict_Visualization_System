@@ -5,7 +5,7 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 ## Current Repo State
 
 - Repo: `/Users/livyw/Downloads/SWE_412/Course_Schedule_Conflict_Visualization_System`
-- Branch at last memory update: `codex/full-system-audit`
+- Branch at last memory update: `codex/fix-seminar-schema`
 - Memory checkpoint was first committed as `11e98b7 docs(handoff): add continuity memory checkpoint`; run `git log --oneline -12` for the current latest commit.
 - Remote verified during prior session: `origin https://github.com/Faleh-ALkhaldi/Course_Schedule_Conflict_Visualization_System.git`
 - Git identity verified during prior session: `FALEH AL KHALDI <voidn49@gmail.com>`
@@ -25,6 +25,7 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 ## Database / Migration State
 
 - Migrations `024_phase125_thesis_flag.js`, `025_phase126_registrar_flags.js`, and `026_phase127_seminar_course_flag.js` exist in the working tree and were applied to the dev DB and private test DB during prior work, but are untracked until the FU blob is committed.
+- On 2026-06-29, `026_phase127_seminar_course_flag.js` was applied to live dev DB `scheduler_db` with `npm run migrate` to repair the runtime error `column c.is_seminar does not exist`. This was additive only and did not reseed/reset data.
 - Dev DB has manual, non-seeded data: real UG thesis courses `SWE 494` and `SWE 496` inserted into protected terms `251` and `252`. A reseed would erase them.
 - Use `DB_NAME_TEST=scheduler_db_modz` for integration tests. The default shared test DB can produce spurious failures when sessions overlap.
 - Use `npm run test:int:isolated`, not the shared `npm run test:int`.
@@ -119,9 +120,22 @@ This file is a compact memory checkpoint for Codex/Claude continuity. It is not 
 - Catalog/template course IDs with `owner_semester IS NULL` are still accepted for backward compatibility. Stricter template-to-local resolution is an open owner decision because it changes persisted/returned `courseId` expectations.
 - Source edits from this audit are interleaved with the inherited dirty FU blob; do not stage broad source files unless B1 is approved.
 
+### 2026-06-29 Seminar Schema Hotfix
+
+- Branch: `codex/fix-seminar-schema`.
+- Symptom: term 251 / Fall 2025 rendered empty Courses and Sections with toast `column c.is_seminar does not exist`.
+- Root cause: backend code selected `courses.is_seminar`, but live dev DB `scheduler_db` had applied migrations only through `025_phase126_registrar_flags.js`; the untracked additive migration `026_phase127_seminar_course_flag.js` was pending.
+- Fix: ran `cd backend && npm run migrate`, applying `026_phase127_seminar_course_flag.js` only. This added `courses.is_seminar BOOLEAN NOT NULL DEFAULT false`.
+- Protected data remained intact before and after: term 251 = 81 sections, term 252 = 97 sections, term 282 = 80 sections. Manual protected thesis rows `SWE 494` and `SWE 496` remained present in 251/252 and now have `is_seminar = false`.
+- API smoke after fix: backend `/health` returned 200; `GET /api/v1/courses?term=251` returned 200 with 16 courses; `GET /api/v1/schedules/c2536f22-4003-4a79-9794-0089d05a73ac/sections?view=course` returned 200 with restored section data.
+- Browser smoke after fix: `http://localhost:3000/?term=251`, login `admin1` / `password123`, showed Fall 2025 / 251 with populated Courses and Sections, no `c.is_seminar` toast, and no console errors.
+- No source edit was needed. The applied migration file is still part of the inherited untracked FU blob; do not stage it alone unless the owner approves committing that feature slice/B1.
+
 ## Verification History
 
 Most recent semantic checkpoint:
+
+- Seminar schema hotfix on `codex/fix-seminar-schema`: backend unit tests passed (34 suites / 479 tests); full isolated backend integration passed (45 files / 0 failed); frontend build passed with only existing Vite warnings; browser smoke for term 251 passed.
 
 - Full-system audit/fix pass on `codex/full-system-audit`: `git diff --check` clean; backend unit tests passed (34 suites / 479 tests); focused `batch6TermIsolation` passed (1 suite / 2 tests); focused `suggestPatterns` passed (1 suite / 7 tests); full isolated backend integration passed (45 files / 0 failed); frontend build passed with only existing Vite warnings.
 - Browser/UI smoke was not rerun during this pass because no frontend behavior changed. Export/import artifact inspection was not rerun because output-generation code was not changed; isolated integration covered the FU export/import/round-trip suites.
