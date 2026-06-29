@@ -7,8 +7,8 @@
 ## 🟢 Current status
 - **Active agent:** Codex  <!-- handing OVER from Claude to Codex -->
 - **Branch:** `codex/course-flag-suggest-semantics` (branched with the dirty FU-680→690 working tree carried over intact)
-- **Last updated:** 2026-06-29 by Codex (course flag / section-type / suggest-panel semantics)
-- **Where we are (one line):** Codex completed the course flag, section-type, Seminar, and Auto-Suggest semantics fix in the working tree. The registrar "Activity flag" arc **FU-688 → FU-690 plus follow-ups** is still **code-complete but largely UNCOMMITTED** on top of `3c5859b` unless B1 is approved; these new edits are interleaved with that dirty feature blob, so do not stage source files wholesale unless B1 is being committed too.
+- **Last updated:** 2026-06-29 by Codex (memory checkpoint added)
+- **Where we are (one line):** Codex added `.remember/now.md` as a compact continuity memory for future sessions. The course flag, section-type, Seminar, and Auto-Suggest semantics fix is complete in the working tree. The registrar "Activity flag" arc **FU-688 → FU-690 plus follow-ups** is still **code-complete but largely UNCOMMITTED** on top of `3c5859b` unless B1 is approved; these new edits are interleaved with that dirty feature blob, so do not stage source files wholesale unless B1 is being committed too.
 
 ## ✅ Done (complete + verified this session)
 Evidence runs (verified 2026-06-28):
@@ -94,6 +94,10 @@ Codex course flag / section-type / suggest semantics fix (2026-06-29, branch `co
 - **Verification:** targeted backend unit tests for registrar/import/export labels -> **3 suites passed, 119 tests passed**. Targeted backend integration `fu688Registrar.test.js` -> **1 suite passed, 6 tests passed** (existing duplicate-key console noise from old test setup, non-failing). Full `cd backend && npm run test:unit` -> **34 suites passed, 473 tests passed**. Full `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` -> **45 files passed, 0 failed**. `cd frontend && npm run build` -> **✓ built in 967ms**, existing Vite dynamic-import/chunk-size warnings only. `git diff --check` clean.
 - **Browser/UI note:** dev servers were already running on backend `:4000` and frontend `:3000`. Chrome DevTools automation was attempted, but the MCP Chrome profile was locked by an existing browser instance. Source-level UI checks plus frontend build confirmed the selector gating and suggest-panel semantics; manual browser verification remains a reasonable follow-up in the already-running app.
 - **Commit/staging note:** the semantic code edits touch files that already contain inherited uncommitted FU feature work. Staging those files from `git diff` would commit unrelated B1 work too, so only this handoff should be committed separately until the owner authorizes committing the full blob.
+
+Codex continuity memory checkpoint (2026-06-29, branch `codex/course-flag-suggest-semantics`):
+- Added `.remember/now.md`, a repo-local memory file summarizing current branch/state, guardrails, dirty-tree risks, DB/migration traps, completed feature/audit work, current scheduling semantics, verification history, service status, and open owner decisions.
+- Future sessions should still read `HANDOFF.md`, `CLAUDE.md`/`AGENTS.md`, `README.md`, and `PER_TERM_ISOLATION_PLAN.md`; `.remember/now.md` is a catch-up aid, not a replacement for those authoritative files.
 
 Feature work landed in the working tree (all on top of `3c5859b`; see `git diff`):
 - **FU-688 — registrar Activity flag set.** Section "activity" semantics mirroring the KFUPM registrar:

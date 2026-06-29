@@ -1,0 +1,170 @@
+# CSCVS Session Memory - Read Before Acting
+
+This file is a compact memory checkpoint for Codex/Claude continuity. It is not a replacement for `HANDOFF.md`, `CLAUDE.md`/`AGENTS.md`, `README.md`, or `PER_TERM_ISOLATION_PLAN.md`; read those first when starting a new session.
+
+## Current Repo State
+
+- Repo: `/Users/livyw/Downloads/SWE_412/Course_Schedule_Conflict_Visualization_System`
+- Branch at last memory update: `codex/course-flag-suggest-semantics`
+- Latest committed checkpoint at last memory update: `00bd574 docs(handoff): record course flag semantics audit`
+- Remote verified during prior session: `origin https://github.com/Faleh-ALkhaldi/Course_Schedule_Conflict_Visualization_System.git`
+- Git identity verified during prior session: `FALEH AL KHALDI <voidn49@gmail.com>`
+- There is a large dirty working tree. Do not assume `git status` is clean.
+
+## Non-Negotiable Guardrails
+
+- Do not run `git stash`, `git reset --hard`, `git checkout -- .`, or `git clean`.
+- Do not reseed/reset the dev database.
+- Do not mutate protected terms `251` or `252`. Term `282` is the owner's and should stay consistent.
+- The FU-680 to FU-690 feature arc plus follow-up fixes are mostly uncommitted and interleaved with later work. Do not stage broad source files unless the owner explicitly authorizes committing the feature blob.
+- If a safe scoped commit is needed, stage only the exact docs or hunks that belong to that task.
+- Do not invent behavior outside the prompt, repo docs, SRS/SDD, or `HANDOFF.md`. If unclear, add an open question to `HANDOFF.md`.
+- Use clean professional commit messages only. Do not include AI/tool attribution.
+- Before pushing, verify the remote is under `Faleh-ALkhaldi`, not `Valonyx`.
+
+## Database / Migration State
+
+- Migrations `024_phase125_thesis_flag.js`, `025_phase126_registrar_flags.js`, and `026_phase127_seminar_course_flag.js` exist in the working tree and were applied to the dev DB and private test DB during prior work, but are untracked until the FU blob is committed.
+- Dev DB has manual, non-seeded data: real UG thesis courses `SWE 494` and `SWE 496` inserted into protected terms `251` and `252`. A reseed would erase them.
+- Use `DB_NAME_TEST=scheduler_db_modz` for integration tests. The default shared test DB can produce spurious failures when sessions overlap.
+- Use `npm run test:int:isolated`, not the shared `npm run test:int`.
+
+## Major Work Completed
+
+### FU-688 to FU-690 Registrar Activity Flag Arc
+
+- Registrar-style activity flags were added/refined:
+  - `ST` / `INT`: existing `is_external`, display derived by term season (`ST` in summer, `INT` otherwise).
+  - `RES`: new `courses.is_research`, behaves like thesis.
+  - `THS`: `courses.is_thesis`, information-only thesis activity.
+  - `PRJ`: `is_capstone` project activity, now conflict-exempt and time-optional.
+  - `SEM`: Seminar activity, stored as section type `Sem`, display label `SEM`.
+- `Section.isConflictExempt` covers external, thesis, research, and project/capstone activities.
+- `effectiveSectionType` is display/derivation logic and must stay mirrored between backend `backend/src/domain/exportLabels.js` and frontend `frontend/src/context/AppContext.jsx`.
+- Info-only NULL-time rows are preserved in import/export round trips.
+- Sidebar/grid code was hardened for NULL `day`, `start_time`, and `end_time`.
+
+### Full-System Audit Fixes
+
+- Graphify was used to map blast radius. Existing graph output lives under `graphify-out/` and is ignored.
+- Removed dead frontend helpers:
+  - `frontend/src/hooks/useRenderStrategy.js`
+  - `frontend/src/utils/renderStrategy.js`
+  - `frontend/src/utils/motion.js`
+- Hardened direct R-06 conflict checks to honor conflict-exempt activity families.
+- Fixed frontend drag/drop mirrors so Project/info-only conflict exemptions agree with backend.
+- Fixed scoped import in-memory conflict modeling to carry thesis/research flags.
+- Expanded import validation mutual-exclusion tests and guards.
+
+### Information-Only and Project Semantics
+
+- Information-only activities are Thesis, Research, Summer Training, and Internship.
+- Information-only sections:
+  - exist in the side panel/course list only;
+  - are not draggable to the grid;
+  - do not create grid blocks;
+  - do not have day/start/end/duration/pattern/venue;
+  - persist meeting fields as `NULL` where applicable;
+  - only allow instructor and section number edits.
+- Project sections:
+  - may have no time/no venue;
+  - may have time without venue;
+  - may have time with venue;
+  - may not have venue without time;
+  - clearing time must also clear venue;
+  - timed projects meet on exactly one day;
+  - timed project duration options are 50, 75, 100, and 160 minutes;
+  - untimed projects stay out of the grid.
+
+### UX / Content / Export Audit
+
+- Reworded scheduler-facing copy to avoid internal terms like "round-trip", "lossless", raw rule codes, backend port errors, or developer commands.
+- Standardized "venue" wording instead of "room" where appropriate.
+- Improved import/export, quick-fix, suggest/build mismatch, and validation copy.
+- Seed source now gives synthetic `SWE 101` the formal title "Introduction to Software Engineering" for future seeds; the protected dev DB was not reseeded.
+- Export artifacts were generated and inspected for full-term, instructor, and venue scopes in PDF/XLSX/DOCX/PNG during prior audits.
+
+### Scoped Export Accuracy
+
+- Scoped instructor/venue exports are focused views, not "only this instructor/venue".
+- Scoped exports may include complementary lecture/lab sections, instructors, venues, and resources needed for schedule completeness and safe re-import.
+- UI and generated export wording was updated to avoid "nothing else from the term".
+- Shared carried-complement heading: "Carried complementary sections - included for schedule completeness".
+
+### Course Flag / Section-Type / Suggest Semantics
+
+- Added course-level Seminar support via `courses.is_seminar` and migration `026_phase127_seminar_course_flag.js`.
+- Seminar rules:
+  - Graduate only.
+  - SWE course code must be `500-699`.
+  - Mutually exclusive with Has-lab, Project, Thesis, Research, External/ST/INT, and other exclusive activity flags.
+  - Exactly one day.
+  - Exactly 75 minutes.
+  - Section/activity type derives as `Sem`; UI display is `SEM`.
+- Course/activity flags are fixed after creation. To change a flag, the user must delete and recreate the course/activity.
+- The section-type selector now appears only for Has-lab courses and only offers Lecture/Lab.
+- Lecture-only courses derive Lecture automatically.
+- Project, Thesis, Research, ST/INT, and Seminar derive their section/activity type from the course flag.
+- Auto-Suggest now excludes information-only and Project courses, constrains Seminar to one-day/75-minute patterns, and avoids invalid controls for Thesis/Research/ST/INT/Project.
+
+## Verification History
+
+Most recent semantic checkpoint:
+
+- Targeted backend unit tests for registrar/import/export labels: 3 suites passed, 119 tests passed.
+- Targeted backend integration `fu688Registrar.test.js`: 1 suite passed, 6 tests passed. Existing duplicate-key console noise from old test setup did not fail the suite.
+- Full backend unit tests: 34 suites passed, 473 tests passed.
+- Full isolated backend integration: 45 files passed, 0 failed.
+- Frontend build: built successfully in about 967 ms; only existing Vite dynamic-import/chunk-size warnings.
+- `git diff --check`: clean.
+
+Earlier related checkpoints:
+
+- Info-only/project semantics: backend unit 34 suites / 464 tests passed; isolated integration 45 files / 0 failed; frontend build passed.
+- UX/output audit: backend unit 34 suites / 464 tests passed; isolated integration 45 files / 0 failed; frontend build passed; representative exports inspected.
+- Scoped export audit: backend unit 34 suites / 465 tests passed; isolated integration 45 files / 0 failed; frontend build passed; representative scoped exports inspected.
+
+Known residual notes:
+
+- Chrome DevTools MCP browser automation was once blocked by a locked Chrome profile. Do not kill the user's browser just to clear that.
+- Backend `npm audit --omit=dev` previously reported 2 moderate production advisories through `exceljs -> uuid`; `npm audit fix` suggested a risky major downgrade, so it was left as an owner decision.
+- Some isolated integration files have historical timing flakes but pass standalone/harness retry.
+
+## Running Services
+
+As of the last service restart, the app was running in detached `tmux` sessions:
+
+- Backend session: `cscvs-backend`
+- Frontend session: `cscvs-frontend`
+- Frontend URL: `http://127.0.0.1:3000/`
+- Backend health: `http://127.0.0.1:4000/api/v1/health`
+- Backend health returned `{"status":"ok"}`.
+- Frontend returned HTTP 200.
+- Dev login: `admin1` / `password123`
+
+Useful commands:
+
+```bash
+tmux capture-pane -pt cscvs-backend -S -80
+tmux capture-pane -pt cscvs-frontend -S -80
+tmux kill-session -t cscvs-backend
+tmux kill-session -t cscvs-frontend
+```
+
+## Current Open Decisions
+
+- B1: Owner must decide whether/how to commit the large FU-680 to FU-690 dirty feature blob. Do not commit it accidentally.
+- B2: Graded SRS/SDD/Test Plan/User Manual predate the June feature arc; owner must decide whether to update docs or constrain behavior.
+- B3: Confirm author/remote before any push.
+- B4: Decide what to do about backend `exceljs -> uuid` audit advisory.
+- B5: Decide whether ST and INT should remain season-derived from `is_external` or become separate stored DB flags.
+
+## First Actions for a New Session
+
+1. Read `HANDOFF.md` top to bottom.
+2. Read `CLAUDE.md` / `AGENTS.md`.
+3. Read `README.md` and `PER_TERM_ISOLATION_PLAN.md`.
+4. Read this file: `.remember/now.md`.
+5. Run `git status --short --branch`, `git log --oneline -12`, `git remote -v`, and `git config user.name && git config user.email`.
+6. If architecture/blast radius matters, use graphify at `/Users/livyw/.agents/skills/graphify/SKILL.md`.
+7. Only then start the requested work.
