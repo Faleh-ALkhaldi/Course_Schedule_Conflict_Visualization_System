@@ -6,9 +6,9 @@
 
 ## 🟢 Current status
 - **Active agent:** Codex  <!-- handing OVER from Claude to Codex -->
-- **Branch:** `codex/scoped-export-accuracy` (branched with the dirty FU-680→690 working tree carried over intact)
-- **Last updated:** 2026-06-29 by Codex (scoped export wording/behavior accuracy audit)
-- **Where we are (one line):** Codex completed the focused scoped-export accuracy audit and fixed safe wording/output-label issues in the working tree. The registrar "Activity flag" arc **FU-688 → FU-690 plus follow-ups** is still **code-complete but largely UNCOMMITTED** on top of `3c5859b` unless B1 is approved; these export wording edits are interleaved with that dirty feature blob, so do not stage those files wholesale unless B1 is being committed too.
+- **Branch:** `codex/course-flag-suggest-semantics` (branched with the dirty FU-680→690 working tree carried over intact)
+- **Last updated:** 2026-06-29 by Codex (course flag / section-type / suggest-panel semantics)
+- **Where we are (one line):** Codex completed the course flag, section-type, Seminar, and Auto-Suggest semantics fix in the working tree. The registrar "Activity flag" arc **FU-688 → FU-690 plus follow-ups** is still **code-complete but largely UNCOMMITTED** on top of `3c5859b` unless B1 is approved; these new edits are interleaved with that dirty feature blob, so do not stage source files wholesale unless B1 is being committed too.
 
 ## ✅ Done (complete + verified this session)
 Evidence runs (verified 2026-06-28):
@@ -82,6 +82,19 @@ Codex scoped export wording/behavior accuracy audit (2026-06-29, branch `codex/s
 - **Verification:** `cd backend && npm run test:unit` -> **34 suites passed, 465 tests passed**. `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` -> **45 files passed, 0 failed** (`r15QuickFix.test.js` and `smartRecommend.test.js` passed on harness retry). `cd frontend && npm run build` -> **✓ built in 932ms**, existing Vite dynamic-import/chunk-size warnings only. Browser smoke on `http://localhost:3000/?term=251` confirmed normal login (`admin1` / `password123`) and scheduler data load with Export enabled; automated Export-button clicks did not surface the modal in the pre-existing dev session, and a clean temporary `:3001` server could not authenticate because the backend CORS allowlist only includes `localhost:3000`. Source/build/export-artifact verification covered the wording change; leave the `:3001` CORS mismatch alone unless the owner wants multi-port dev origins supported.
 - **Commit/staging note:** the code edits above touch files already carrying uncommitted FU-680→690 feature work. Staging those files from `git diff` would commit the inherited feature blob too, so only this handoff should be committed separately until B1 is approved.
 
+Codex course flag / section-type / suggest semantics fix (2026-06-29, branch `codex/course-flag-suggest-semantics`):
+- **Graphify:** read `/Users/livyw/.agents/skills/graphify/SKILL.md` plus the relevant query reference, then queried the existing graph map for course flags, section creation/editing, suggest, import/export, and validation. The blast radius matched the expected high-coupling areas: backend `courseFormat`, `sectionPattern`, `controllers/index.js`, repositories, import/export/scoped import, `SuggestService`, schedule/quick-fix checks, plus frontend `AppContext`, `AddCourseModal`, `SectionModal`, `SuggestModal`, side panel, grid, and scheduler page mirrors.
+- **Safe fixes applied in existing dirty FU files (not separately committed to avoid accidentally committing B1):**
+  - Added canonical course-level Seminar support using the repo's existing `Sem` stored section type and `SEM` display label: new additive `courses.is_seminar` migration `026_phase127_seminar_course_flag.js`, backend model/repository/export/import propagation, and frontend flag handling.
+  - Seminar is now graduate-only for SWE course codes `500-699`, mutually exclusive with Has-lab, Project, Thesis, Research, and External/ST/INT flags, and scheduled as exactly one 75-minute meeting.
+  - Course/activity flags are fixed after creation in backend update validation; attempts to change flags in place now return the delete-and-recreate guidance instead of silently reclassifying the course.
+  - Section type derivation is centralized across backend/frontend flows: lab courses may choose only Lecture/Lab, lecture-only courses derive Lecture, Project derives Project, Thesis/Research/ST/INT remain information-only, and Seminar derives Seminar. The old Lecture/Seminar selector for ordinary sections is removed.
+  - Auto-Suggest excludes information-only and Project courses, constrains Seminar choices to one-day/75-minute patterns, and no longer offers invalid controls for Thesis/Research/ST/INT/Project rows.
+  - Import, scoped import, export labels, term clone, conflict/quick-fix/schedule validation, and tests were updated so the backend, frontend, generated files, and parser round-trips agree on these flags.
+- **Verification:** targeted backend unit tests for registrar/import/export labels -> **3 suites passed, 119 tests passed**. Targeted backend integration `fu688Registrar.test.js` -> **1 suite passed, 6 tests passed** (existing duplicate-key console noise from old test setup, non-failing). Full `cd backend && npm run test:unit` -> **34 suites passed, 473 tests passed**. Full `cd backend && DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` -> **45 files passed, 0 failed**. `cd frontend && npm run build` -> **✓ built in 967ms**, existing Vite dynamic-import/chunk-size warnings only. `git diff --check` clean.
+- **Browser/UI note:** dev servers were already running on backend `:4000` and frontend `:3000`. Chrome DevTools automation was attempted, but the MCP Chrome profile was locked by an existing browser instance. Source-level UI checks plus frontend build confirmed the selector gating and suggest-panel semantics; manual browser verification remains a reasonable follow-up in the already-running app.
+- **Commit/staging note:** the semantic code edits touch files that already contain inherited uncommitted FU feature work. Staging those files from `git diff` would commit unrelated B1 work too, so only this handoff should be committed separately until the owner authorizes committing the full blob.
+
 Feature work landed in the working tree (all on top of `3c5859b`; see `git diff`):
 - **FU-688 — registrar Activity flag set.** Section "activity" semantics mirroring the KFUPM registrar:
   - **ST / INT** = the existing `is_external` flag; label DERIVED from term season (code last digit `3`=summer→ST, `1`/`2`=fall/spring→INT). No new column.
@@ -108,13 +121,13 @@ Feature work landed in the working tree (all on top of `3c5859b`; see `git diff`
 1. **HUGE UNCOMMITTED WORKING TREE — do NOT discard it.** Last commit is `3c5859b` (FU-672→679). **Everything FU-680 → FU-690 is uncommitted:**
    - **33 modified tracked files** (`git diff --stat`: ~+1389/-351), backend + frontend.
    - **Untracked (new) files** (`git status`):
-     - `backend/src/db/migrations/024_phase125_thesis_flag.js`, `025_phase126_registrar_flags.js`
+     - `backend/src/db/migrations/024_phase125_thesis_flag.js`, `025_phase126_registrar_flags.js`, `026_phase127_seminar_course_flag.js`
      - `backend/src/domain/complementPlanner.js`
      - tests: `backend/tests/integration/fu679Export…fu688Registrar.test.js`, `fu690Roundtrip.test.js`; `backend/tests/unit/complementPlanner.test.js`, `fu679ExportLayout.test.js`, `fu680ExportLayout.test.js`, `fu688Registrar.test.js`
      - docs: `CLAUDE.md`, `AGENTS.md` (symlink→CLAUDE.md), `HANDOFF.md` (these three are committed by this handoff)
    - **DANGER:** do **NOT** `git stash`, `git reset --hard`, `git checkout -- .`, or `git clean` — you will lose ~2 weeks of FU-680→690 work that is in **no commit**. To start a Codex branch: `git switch -c codex/<task>` — the working-tree changes carry over.
 2. **DB has manual data NOT reproducible from git.** The FU-689 UG-thesis courses (SWE 494/496 in terms 251 & 252) were inserted by direct SQL, **not** by a migration or `seed.js`. A fresh DB from `npm run migrate && npm run seed` will **NOT** contain them, so the new "protected" section baselines (**251 = 81, 252 = 97**, 282 = 80) exist **only in the current dev DB**. Reset/reseed → that data vanishes and the invariant reverts to 251=78/252=95. (No code depends on the exact counts.)
-3. **Migrations 024/025 are applied to the dev DB + private test DB this session but are untracked.** They auto-run via `npm run migrate` (discovered + sorted). A teammate pulling only committed code won't have them until the blob is committed.
+3. **Migrations 024/025/026 are applied to the dev DB + private test DB this session but are untracked.** They auto-run via `npm run migrate` (discovered + sorted). A teammate pulling only committed code won't have them until the blob is committed.
 
 ## 🚧 Blockers / open decisions (need the human)
 - **B1 — Authorize committing the feature blob.** Standing instruction all session was "do NOT commit/push until I tell you." This turn authorized committing only the **handoff docs**, so FU-680→690 plus the info-only/Project follow-up stays intentionally uncommitted. **Decision:** commit it (how to split?) and whether to push.
@@ -151,7 +164,7 @@ node -e "const{query}=require('./src/config/db');query('SELECT 1 AS ok').then(r=
 ```
 - Login (dev): `admin1` / `password123` (also `scheduler1` / `password123`).
 - API base `/api/v1`; JWT in `Authorization: Bearer …` + `X-Active-Term: <termCode>` header.
-- **API contract changes this arc (additive only):** `courses.is_thesis` + `courses.is_research` flow through create/update/import/export; section `day/start/end` may be `null`; section_type adds `Sem`. No endpoint signatures changed. Frontend already mirrors all of it.
+- **API contract changes this arc (additive only):** `courses.is_thesis`, `courses.is_research`, and `courses.is_seminar` flow through create/update/import/export; section `day/start/end` may be `null`; section_type adds `Sem`. No endpoint signatures changed. Frontend already mirrors all of it.
 
 ---
 
