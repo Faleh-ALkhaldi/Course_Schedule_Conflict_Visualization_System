@@ -3,7 +3,7 @@ import { motion, useReducedMotion } from 'framer-motion';
 import {
   DndContext, PointerSensor, useSensor, useSensors, DragOverlay, closestCenter,
 } from '@dnd-kit/core';
-import { useApp, VIEWS, DAY_DURATION, LEVEL_COLORS, fromMinutes, TIME_WINDOWS } from '../context/AppContext.jsx';
+import { useApp, VIEWS, DAY_DURATION, LEVEL_COLORS, fromMinutes, TIME_WINDOWS, isInfoOnlyCourse } from '../context/AppContext.jsx';
 
 const DAY_GROUPS = {
   Sunday:'STT', Tuesday:'STT', Thursday:'STT',
@@ -445,6 +445,11 @@ export default function SchedulerPage() {
     } else if (sections.some(s => s.id === id)) {
       setActiveDrag({ type: 'section', id });
     } else {
+      const course = courses.find(c => c.id === id);
+      if (course && isInfoOnlyCourse(course)) {
+        setActiveDrag(null);
+        return;
+      }
       setActiveDrag({ type: 'course', id });
     }
   }
@@ -603,10 +608,15 @@ export default function SchedulerPage() {
         // Prevents dragging a section outside its teaching window at the frontend
         // so the user gets an instant toast instead of a backend 400 that
         // would leave the grid in an unresolved conflict state.
-        // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00. Capstone is
-        // bound to the UG window (venue-exempt but NOT time-exempt); external exempt.
-        // NEW-FU-497 (Phase 121): SWE 412 is exempt from the R-06 window (evening capstone).
-        if (!sec.isExternal && sec.courseCode !== 'SWE 412') {
+        // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00.
+        // NEW-FU-497/688: SWE 412 plus the conflict-exempt activity family
+        // (info-only + Project) skip this window guard, matching SectionModal
+        // and the backend conflict engine.
+        const dragWindowExempt =
+          isInfoOnlyCourse(sec) ||
+          (sec.isCapstone ?? sec.is_capstone) === true ||
+          sec.courseCode === 'SWE 412';
+        if (!dragWindowExempt) {
           const dragEnd   = fromMinutes(timeToMin(startTime) + duration);
           const sMin      = timeToMin(startTime);
           const eMin      = timeToMin(dragEnd);
@@ -616,7 +626,7 @@ export default function SchedulerPage() {
           const winStart  = win.start;
           const winEnd    = win.end;
           if (sMin < winStart || eMin > winEnd) {
-            const lbl = isCap ? '07:00–17:10 (Capstone)'
+            const lbl = isCap ? '07:00–17:10 (Project)'   // NEW-FU-687: capstone surfaces as "Project"
                       : isGR  ? '17:20–22:00 (Graduate)'
                                : '07:00–17:10 (Undergraduate)';
             showToast(`Cannot move here — ${sec.courseCode ?? 'section'} must run within ${lbl}.`, 'error');
@@ -663,6 +673,11 @@ export default function SchedulerPage() {
         // Reload to show all siblings at new time
         if (schedule) loadView(schedule.id, view, filterId);
       } else if (prev?.type === 'course') {
+        const course = courses.find(c => c.id === active.id);
+        if (course && isInfoOnlyCourse(course)) {
+          showToast(`${course.course_code} is information-only and is edited from the side panel, not the grid.`, 'info');
+          return;
+        }
         setSectionModal({
           mode: 'add',
           initial: { courseId: active.id, day, startTime, duration: DAY_DURATION[day] ?? 50 },
@@ -777,7 +792,7 @@ export default function SchedulerPage() {
       const { restructureSection } = await import('../api/index.js');
       await restructureSection(sec.id, { days: newDays, startTime: appliedStart, endTime: appliedEnd });
       recordMutation('move section');   // NEW-FU-549: one undo step for the restructure
-      showToast(`✓ Section moved to ${tgt.days.map(d => d.slice(0,3)).join('/')} · ${tgt.duration} min.`, 'success');
+      showToast(`✓ Section moved to ${tgt.days.filter(Boolean).map(d => d.slice(0,3)).join('/')} · ${tgt.duration} min.`, 'success');   // NEW-FU-690: null-day safe
       loadView(schedule.id, view, filterId);
     } catch(err) {
       showToast(err.response?.data?.error || 'Failed to change group.', 'error');
@@ -1084,7 +1099,8 @@ export default function SchedulerPage() {
         const addParts = [];
         if (nDI) addParts.push(`${nDI} instructor${nDI > 1 ? 's' : ''}`);
         if (nDV) addParts.push(`${nDV} venue${nDV > 1 ? 's' : ''}`);
-        const addText = addParts.join(' and ') || 'placeholders';
+        const addText = addParts.join(' and ');
+        const placeholderText = addText || 'the required resources';
         const dummyConfigs = withDummy.relaxed ? withDummy.relaxedConfigs : courseConfigs;
 
         // BOTH directions viable → the user chooses (Phase 106 item 1).
@@ -1095,12 +1111,12 @@ export default function SchedulerPage() {
             title: 'Not enough real instructors/venues for every section',
             lead: 'Every section can stay conflict-free — you choose how:',
             bullets: [
-              `Keep all courses — add ${addText} as clearly-labeled "dummy" placeholders (this term only)`,
+              `Keep all courses — add ${placeholderText} as clearly-labeled temporary placeholders (this term only)`,
               `Keep everything real — drop ${count} section${count > 1 ? 's' : ''}: ${bullets.join('; ')}`,
             ],
             question: 'Which direction would you like?',
             options: [
-              { label: `Keep all — add ${addText}`, value: 'placeholders', tone: 'primary' },
+              { label: `Keep all — add ${placeholderText}`, value: 'placeholders', tone: 'primary' },
               { label: `Keep real — drop ${count} section${count > 1 ? 's' : ''}`, value: 'drop', tone: 'danger' },
               { label: 'Cancel', value: 'cancel', tone: 'neutral' },
             ],
@@ -1108,7 +1124,7 @@ export default function SchedulerPage() {
           });
           if (choice === 'cancel') { showToast('Suggest cancelled — no changes applied.', 'info'); return { proceed: false }; }
           if (choice === 'placeholders') {
-            showToast(`✓ Keeping all sections with ${addText} — applying.`, 'success');
+            showToast(`✓ Keeping all sections with temporary placeholders${addText ? ` (${addText})` : ''} — applying.`, 'success');
             return { proceed: true, configs: dummyConfigs, allowDummy: true };
           }
           showToast(`✓ Conflict-free plan applied (dropped ${count} section${count > 1 ? 's' : ''}).`, 'success');
@@ -1119,10 +1135,10 @@ export default function SchedulerPage() {
         if (dummyWorks) {
           await askDecision({
             icon: 'ℹ️',
-            title: 'Kept every section using placeholders',
-            lead: `To fit all sections conflict-free, the planner added ${addText} as clearly-labeled "dummy" placeholders (only in this term). To run this schedule for real, add:`,
+            title: 'Kept every section using temporary placeholders',
+            lead: `To fit all sections conflict-free, the planner added ${placeholderText} as clearly-labeled temporary placeholders (only in this term). To run this schedule for real, add:`,
             bullets: addParts,
-            options: [{ label: 'Apply with placeholders', value: 'ok', tone: 'primary' }],
+            options: [{ label: 'Apply with temporary placeholders', value: 'ok', tone: 'primary' }],
             dismissValue: 'ok',
           });
           showToast('✓ Conflict-free plan found — applying.', 'success');
@@ -1393,7 +1409,7 @@ export default function SchedulerPage() {
                 <span className="view-hint"> — select a{view === VIEWS.TEACHER ? 'n instructor' : ' venue'} from the sidebar</span>
               )}
               {/* NEW-FU-480 (Phase 115): tell the secretary how many real instructors/venues
-                  to register — placeholders ("dummies") still stand in for missing ones. */}
+                  to register — temporary placeholders still stand in for missing ones. */}
               {view === VIEWS.COURSE && (dummyInstrCount > 0 || dummyVenueCount > 0) && (
                 <span className="view-dummy-advisory" role="status"
                   style={{ marginLeft: 14, fontSize: '.78rem', fontWeight: 600,

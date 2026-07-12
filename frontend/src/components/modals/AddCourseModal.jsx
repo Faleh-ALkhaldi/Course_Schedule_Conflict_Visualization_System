@@ -78,6 +78,9 @@ export default function AddCourseModal({ onClose, showToast }) {
     hasLab: false,
     isCapstone: false,
     isExternal: false,
+    isThesis: false,   // NEW-FU-687
+    isResearch: false, // NEW-FU-688
+    isSeminar: false,
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -95,10 +98,22 @@ export default function AddCourseModal({ onClose, showToast }) {
   // in the useEffect dependency array.
   const capstoneAllowed = form.category === 'UG' && form.academicLevel === 'Senior';
   const externalAllowed = form.category === 'UG' && form.academicLevel === 'Junior';
+  // NEW-FU-689: Thesis + Research carry NO level gate — they are allowed at both Undergraduate and
+  // Graduate level (KFUPM SWE has UG thesis courses, e.g. in terms 251/252). The only constraints are
+  // the mutual-exclusion gate (pickFlag/credit reconcile) and the info-only behavior. (No *Allowed
+  // consts: the checkboxes are always enabled.)
   // NEW-FU-600 (Batch 28): a lab only makes sense for a 3- or 4-credit course (4-credit MUST
   // have one; 3-credit may). 0/1/2-credit courses meet too few hours to carry a lab section, so
   // the "Has lab" flag is DISABLED for them (and cleared if credits drop into that range).
   const labAllowed = form.credits === '3' || form.credits === '4';
+  const courseNumberValue = (() => {
+    const m = /^SWE (\d{3})$/.exec((form.courseCode || '').trim());
+    return m ? parseInt(m[1], 10) : null;
+  })();
+  const seminarAllowed = form.category === 'GR'
+    && form.academicLevel === 'Graduate'
+    && courseNumberValue >= 500
+    && courseNumberValue <= 699;
   // NEW-FU-595 (Batch 27): only ONE external (internship / summer-training co-op) course is
   // allowed per term. If the active term already has one, disable the External toggle with a
   // clear note. `courses` is the term-scoped reference list, so an external course here is
@@ -113,12 +128,13 @@ export default function AddCourseModal({ onClose, showToast }) {
   // the locked (disabled) checkbox + "required" note in the UI.
   const labForced      = form.credits === '4';
   const capstoneForced = form.credits === '0' && capstoneAllowed;
+  const seminarCreditForced = form.isSeminar;
   // NEW-FU-602 (Batch 28 item 3): a 0-credit course must be a Capstone. The effect above
   // auto-ticks Capstone when the level allows it (UG Senior); this error covers the case where
   // it can't (non-Senior 0-credit) — Save is blocked until the user sets the level to Senior,
   // which enables Capstone. Mirrors the backend creditsFlagError 0cr⇒capstone gate.
   const creditCapstoneError = (form.credits === '0' && !form.isCapstone)
-    ? 'A 0-credit course must be a Capstone (Senior graduation project, e.g. SWE 413). Set the academic level to Senior to enable it.'
+    ? 'A 0-credit course must be a Project (Senior capstone/graduation project, e.g. SWE 413). Set the academic level to Senior to enable it.'
     : null;
 
   // NEW-FU-422 (Phase 104 item 4): LIVE code/name validation mirroring the API
@@ -192,6 +208,7 @@ export default function AddCourseModal({ onClose, showToast }) {
   })();
   const formInvalid = !!codeError || !!nameError || !!dupCodeError || !!dupNameError
     || !!creditCapstoneError   // FU-602: 0-credit must be a Capstone
+    || (form.isSeminar && form.credits !== '1')
     || !(form.courseCode || '').trim() || !(form.name || '').trim();
 
   // NEW-FU-484 (Phase 118 item 3): auto-uncheck gated flags when the user switches to a
@@ -212,6 +229,10 @@ export default function AddCourseModal({ onClose, showToast }) {
       if (!capstoneAllowed && f.isCapstone) next.isCapstone = false;
       // NEW-FU-595 (Batch 27): clear External when not selectable (wrong level, or term already has one).
       if ((!externalAllowed || externalTaken) && f.isExternal) next.isExternal = false;
+      if (!seminarAllowed && f.isSeminar) next.isSeminar = false;
+      if (f.isSeminar && f.credits !== '1') next.credits = '1';
+      // NEW-FU-689: Thesis/Research carry no level gate (UG or GR), so no permit-based clear here —
+      // the credit-mandate clears below (0cr⇒Project, 4cr⇒Has-lab) still apply.
       // NEW-FU-600 (Batch 28): clear Has-lab when credits drop to 0/1/2 (no lab allowed there).
       if (!labAllowed && f.hasLab) next.hasLab = false;
       // (2) NEW-FU-647: on a REAL credit change, drop the flag the PREVIOUS credit MANDATED
@@ -225,24 +246,31 @@ export default function AddCourseModal({ onClose, showToast }) {
       //     0 ⇒ Capstone (when the level allows it — SWE 413; else creditCapstoneError blocks Save),
       //     4 ⇒ Has-lab (every 4-credit course carries a lab — forced so the on-save error is
       //     unreachable; backend creditsFlagError stays the backstop).
-      if (f.credits === '0' && capstoneAllowed) { next.isCapstone = true; next.hasLab = false; next.isExternal = false; }
-      if (f.credits === '4')                    { next.hasLab = true; next.isCapstone = false; next.isExternal = false; }
+      if (!f.isSeminar && f.credits === '0' && capstoneAllowed) { next.isCapstone = true; next.hasLab = false; next.isExternal = false; next.isThesis = false; next.isResearch = false; next.isSeminar = false; }
+      if (!f.isSeminar && f.credits === '4')                    { next.hasLab = true; next.isCapstone = false; next.isExternal = false; next.isThesis = false; next.isResearch = false; next.isSeminar = false; }
       // No flag actually changed → return the same object so we don't trigger a wasted render.
-      if (next.isCapstone === f.isCapstone && next.hasLab === f.hasLab && next.isExternal === f.isExternal) return f;
+      if (next.credits === f.credits && next.isCapstone === f.isCapstone && next.hasLab === f.hasLab && next.isExternal === f.isExternal && next.isThesis === f.isThesis && next.isResearch === f.isResearch && next.isSeminar === f.isSeminar) return f;
       return next;
     });
-  }, [capstoneAllowed, externalAllowed, externalTaken, labAllowed, form.credits]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [capstoneAllowed, externalAllowed, externalTaken, labAllowed, seminarAllowed, form.credits, form.isSeminar]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // NEW-FU-423 (Phase 104 item 3): course type flags are mutually exclusive —
   // pick AT MOST ONE of has-lab / capstone / external. Selecting one clears the
   // others; unchecking leaves a plain lecture course (none).
   function pickFlag(flag) {
-    setForm(f => ({
-      ...f,
-      hasLab:     flag === 'hasLab'     ? !f.hasLab     : false,
-      isCapstone: flag === 'isCapstone' ? !f.isCapstone : false,
-      isExternal: flag === 'isExternal' ? !f.isExternal : false,
-    }));
+    setForm(f => {
+      const enablingSeminar = flag === 'isSeminar' && !f.isSeminar;
+      return {
+        ...f,
+        credits: enablingSeminar ? '1' : f.credits,
+        hasLab:     flag === 'hasLab'     ? !f.hasLab     : false,
+        isCapstone: flag === 'isCapstone' ? !f.isCapstone : false,
+        isExternal: flag === 'isExternal' ? !f.isExternal : false,
+        isThesis:   flag === 'isThesis'   ? !f.isThesis   : false,   // NEW-FU-687
+        isResearch: flag === 'isResearch' ? !f.isResearch : false,   // NEW-FU-688
+        isSeminar:  flag === 'isSeminar'  ? !f.isSeminar  : false,
+      };
+    });
   }
 
   async function handleSubmit(e) {
@@ -263,10 +291,11 @@ export default function AddCourseModal({ onClose, showToast }) {
 
   // Chip-pill button helper. Reuses .sm-daymode-btn from SectionModal.css
   // so the appearance is identical to the section modal's pills.
-  function Chip({ active, onClick, children, style }) {
+  function Chip({ active, disabled, onClick, children, style }) {
     return (
       <button type="button"
         className={`sm-daymode-btn ${active ? 'active' : ''}`}
+        disabled={disabled}
         style={style}
         onClick={onClick}>
         {children}
@@ -358,6 +387,7 @@ export default function AddCourseModal({ onClose, showToast }) {
             <div style={{ display: 'flex', gap: 6 }}>
               {['0', '1', '2', '3', '4'].map(c => (
                 <Chip key={c} active={form.credits === c}
+                  disabled={seminarCreditForced && c !== '1'}
                   onClick={() => setForm(f => ({ ...f, credits: c }))}
                   style={{ flex: 1 }}>{c}</Chip>
               ))}
@@ -366,6 +396,9 @@ export default function AddCourseModal({ onClose, showToast }) {
                 when the level is Senior; this flags the non-Senior case and blocks Save. */}
             {creditCapstoneError && (
               <p className="sm-inline-error" role="alert"><span>{creditCapstoneError}</span></p>
+            )}
+            {seminarCreditForced && (
+              <p className="sm-hint">Seminar courses are fixed at exactly 1 credit.</p>
             )}
           </div>
 
@@ -424,9 +457,9 @@ export default function AddCourseModal({ onClose, showToast }) {
                 disabled={!capstoneAllowed || capstoneForced}
                 onChange={() => pickFlag('isCapstone')} />
               <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
-                <strong>Capstone</strong>{' '}
+                <strong>Project</strong>{' '}
                 <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
-                  — graduation project; has a time slot but no room, so only instructor and student clashes are checked.
+                  — a capstone / graduation project. Its time and place are optional and it never raises a conflict. Its sessions are shown as “Project” (PRJ).
                 </span>
                 {capstoneForced && (
                   <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
@@ -435,7 +468,7 @@ export default function AddCourseModal({ onClose, showToast }) {
                 )}
                 {!capstoneAllowed && (
                   <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
-                    Only for Undergraduate → Senior courses.
+                    Undergraduate Senior courses only.
                   </span>
                 )}
               </span>
@@ -453,17 +486,71 @@ export default function AddCourseModal({ onClose, showToast }) {
               <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
                 <strong>External</strong>{' '}
                 <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
-                  — off-campus course (e.g., internship); not scheduled on campus, so no conflict checks.
+                  — off-campus training. It is not scheduled on campus, so it has no conflict checks. Its sessions are shown as “Summer Training” (ST) in summer terms and “Internship” (INT) in fall and spring terms.
                 </span>
                 {!externalAllowed && (
                   <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
-                    Only for Undergraduate → Junior courses.
+                    Undergraduate Junior courses only.
                   </span>
                 )}
                 {/* NEW-FU-595 (Batch 27): one external course per term. */}
                 {externalAllowed && externalTaken && (
                   <span style={{ display: 'block', marginTop: 3, color: 'var(--amber-500, #d97706)', fontStyle: 'italic', fontSize: '.8rem' }}>
-                    This term already has an external course ({externalCourse.course_code ?? externalCourse.courseCode}). Only one internship / co-op course is allowed per term.
+                    This term already has an off-campus course ({externalCourse.course_code ?? externalCourse.courseCode}). Only one is allowed per term.
+                  </span>
+                )}
+              </span>
+            </label>
+
+            {/* NEW-FU-687/689: Thesis — a research/thesis course (Undergraduate or Graduate). Like External
+                it has no fixed time or place (independent research), so no conflict checks; sessions show as “Thesis” (THS). */}
+            <label className="acm-flag-row" style={{
+              display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0', cursor: 'pointer',
+            }}>
+              <input type="checkbox" checked={form.isThesis}
+                style={{ marginTop: 3, flex: '0 0 auto' }}
+                onChange={() => pickFlag('isThesis')} />
+              <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
+                <strong>Thesis</strong>{' '}
+                <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
+                  — an undergraduate or graduate thesis; independent study with no fixed time or place, so no conflict checks. Its sessions are shown as “Thesis” (THS).
+                </span>
+              </span>
+            </label>
+
+            {/* NEW-FU-688/689: Research — the sibling of Thesis (Undergraduate or Graduate): independent
+                research with no fixed time or place, so no conflict checks; sessions show as “Research” (RES). */}
+            <label className="acm-flag-row" style={{
+              display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0', cursor: 'pointer',
+            }}>
+              <input type="checkbox" checked={form.isResearch}
+                style={{ marginTop: 3, flex: '0 0 auto' }}
+                onChange={() => pickFlag('isResearch')} />
+              <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
+                <strong>Research</strong>{' '}
+                <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
+                  — an undergraduate or graduate research course (like Thesis); independent study with no fixed time or place, so no conflict checks. Its sessions are shown as “Research” (RES).
+                </span>
+              </span>
+            </label>
+
+            <label className="acm-flag-row" style={{
+              display: 'flex', alignItems: 'flex-start', gap: 10, padding: '6px 0',
+              cursor: seminarAllowed ? 'pointer' : 'default',
+              opacity: seminarAllowed ? 1 : 0.45,
+            }}>
+              <input type="checkbox" checked={form.isSeminar}
+                style={{ marginTop: 3, flex: '0 0 auto' }}
+                disabled={!seminarAllowed}
+                onChange={() => pickFlag('isSeminar')} />
+              <span style={{ fontSize: '.85rem', lineHeight: 1.4, flex: 1 }}>
+                <strong>Seminar</strong>{' '}
+                <span style={{ color: 'var(--slate-500)', fontWeight: 'normal' }}>
+                  — a graduate 1-credit course with one 75-minute weekly meeting. Its sections are shown as “Seminar” (SEM).
+                </span>
+                {!seminarAllowed && (
+                  <span style={{ display: 'block', marginTop: 3, color: 'var(--slate-400)', fontStyle: 'italic', fontSize: '.8rem' }}>
+                    Graduate SWE 500–699 courses only; selecting Seminar fixes credits to 1.
                   </span>
                 )}
               </span>

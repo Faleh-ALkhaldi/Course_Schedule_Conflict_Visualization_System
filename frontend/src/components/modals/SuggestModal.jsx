@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 // NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
 import Ico from '../shared/Icons.jsx';
-import { useApp, LEVEL_COLORS } from '../../context/AppContext.jsx';
+import { useApp, LEVEL_COLORS, isInfoOnlyCourse } from '../../context/AppContext.jsx';
 import { suggestRecommend, getCourses } from '../../api/index.js';
 import './SectionModal.css';
 import './SuggestModal.css';
@@ -26,26 +26,27 @@ const DAY_TEMPLATE_LABELS = {
 // 75 min for 2-credit, the 3-day STT for 3-credit-with-lab @ 50, STT+2-day for 4-credit, and
 // had no 0-credit case. Rewritten to reproduce the canonical OFFERING set EXACTLY (decomposed
 // into the duration → day-template two-step the modal renders), so every course shows only the
-// legal options for its (credits × has-lab) and an illegal duration/pattern can't be picked:
+// legal options for its (credits × has-lab × activity flag) and an illegal duration/pattern can't be picked:
 //   0/1 cr ............... 50 → Any day (single meeting)
 //   2 cr ................. 50 → Sun/Tue, Mon/Wed, Tue/Thu   (no 75)
 //   3 cr (no lab) ....... 50 → Sun/Tue/Thu  |  75 → Mon/Wed, Sun/Tue, Tue/Thu
-//   3 cr (WITH lab) ..... 50 → Sun/Tue, Mon/Wed, Tue/Thu   (2×50 lecture + lab; NO 75, NO 3-day)
+//   3 cr (WITH lab) ..... 50 → Sun/Tue, Mon/Wed, Tue/Thu  |  75 → Mon/Wed, Sun/Tue, Tue/Thu
 //   4 cr (always lab) ... 50 → Sun/Tue/Thu  |  75 → Mon/Wed, Sun/Tue, Tue/Thu
-// Accepts either `hasLab` or the course's raw `has_lab` so every call site works unchanged.
-function legalDurationsForCourse({ credits, hasLab, has_lab }) {
+//   Seminar ............. 75 → Any day (single meeting)
+// Accepts camelCase or the API's raw snake_case flags so every call site works unchanged.
+function legalDurationsForCourse({ credits, hasLab, has_lab, isSeminar, is_seminar }) {
+  if (isSeminar ?? is_seminar) return [75];
   const c = Number(credits);
-  const lab = hasLab ?? has_lab ?? false;
-  if (c === 4) return [50, 75];
-  if (c === 3) return lab ? [50] : [50, 75];
   if (c === 0 || c === 1 || c === 2) return [50];
+  if (c === 3 || c === 4) return [50, 75];
   return [];
 }
-function legalDayTemplatesForCourse({ credits, hasLab, has_lab, duration }) {
+function legalDayTemplatesForCourse({ credits, hasLab, has_lab, duration, isSeminar, is_seminar }) {
   const c = Number(credits);
   const lab = hasLab ?? has_lab ?? false;
   const d = Number(duration);
-  if (d === 75) return ((c === 3 && !lab) || c === 4) ? ['MW', 'ST', 'TT'] : [];
+  if (isSeminar ?? is_seminar) return d === 75 ? ['ONE_DAY'] : [];
+  if (d === 75) return (c === 3 || c === 4) ? ['MW', 'ST', 'TT'] : [];
   // d === 50
   if (c === 0 || c === 1) return ['ONE_DAY'];
   if (c === 2)            return ['ST', 'MW', 'TT'];
@@ -63,7 +64,10 @@ function defaultDurationFor(course) {
 }
 function defaultDayTemplateFor(course, duration) {
   const opts = legalDayTemplatesForCourse({
-    credits: course.credits, hasLab: course.has_lab, duration,
+    credits: course.credits,
+    hasLab: course.has_lab,
+    isSeminar: isSeminarCourse(course),
+    duration,
   });
   return opts[0] ?? 'STT';
 }
@@ -76,6 +80,14 @@ const LAB_DURATIONS = [50, 75, 160];
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
 // Short labels for the day buttons to keep the row compact.
 const DAY_SHORT = { Sunday: 'Sun', Monday: 'Mon', Tuesday: 'Tue', Wednesday: 'Wed', Thursday: 'Thu' };
+
+function isSuggestableCourse(course) {
+  return !isInfoOnlyCourse(course) && !(course?.isCapstone ?? course?.is_capstone);
+}
+
+function isSeminarCourse(course) {
+  return !!(course?.isSeminar ?? course?.is_seminar);
+}
 
 export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   useFocusTrap();
@@ -98,7 +110,8 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   // evening window, so once they're offered here the rest works end-to-end.
   const { courses: termCourses, schedule } = useApp();
   const termCode = schedule?.semester ?? null;   // NEW-FU-650: scope the course list to THIS term
-  const [courses, setCourses] = useState(termCourses);
+  const schedulableTermCourses = termCourses.filter(isSuggestableCourse);
+  const [courses, setCourses] = useState(schedulableTermCourses);
 
   // NEW-FU-264 / FU-266: smart auto-suggester state.
   //   • loading           — pre-flight call to /suggest-recommend is in
@@ -150,7 +163,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
   // "Run Suggest" regenerates exactly the term's existing courses — unchanged
   // behaviour for populated terms (251/262). The user opts a grad course in by
   // ticking it; the run then places it in the GR evening window.
-  const [applyToCourseIds, setApplyToCourseIds] = useState(() => new Set(termCourses.map(c => c.id)));
+  const [applyToCourseIds, setApplyToCourseIds] = useState(() => new Set(schedulableTermCourses.map(c => c.id)));
   // NEW-FU-381 (Phase 99 items 2/3): user-intent tracking for the live solver.
   //   • userEditedRef           — courseIds the user manually changed (sections /
   //                               duration / day-pattern). The live auto-choose
@@ -291,11 +304,12 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
       try {
         const all = await loadTermCourses();
         if (cancelled || !all) return;
-        setCourses(all);
-        setConfig(prev => {
-          const next = { ...prev };
-          for (const c of all) {
-            if (next[c.id]) continue; // keep any value the term init / recommend set
+          const schedulable = all.filter(isSuggestableCourse);
+          setCourses(schedulable);
+          setConfig(prev => {
+            const next = { ...prev };
+            for (const c of schedulable) {
+              if (next[c.id]) continue; // keep any value the term init / recommend set
             let duration = defaultDurationFor(c);
             if (c.category === 'GR' && legalDurationsForCourse(c).includes(75)) duration = 75;
             next[c.id] = {
@@ -314,7 +328,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
         });
         // Default EVERY course in the term ON (they're all this term's own courses now).
         if (!userTouchedSelectionRef.current) {
-          setApplyToCourseIds(new Set(all.map(c => c.id)));
+          setApplyToCourseIds(new Set(schedulable.map(c => c.id)));
         }
       } catch { /* retries failed — keep the term-scoped seed; modal still works */ }
     })();
@@ -391,7 +405,7 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
               line === 'GET /api/v1/schedules/:scheduleId/suggest-recommend'
             );
             if (!hasRoute) {
-              message = 'The backend is running an older build that does not have the /suggest-recommend route. Restart the dev server and refresh.';
+              message = 'The scheduling service is not using the same application version as this page. Restart the local CSCVS services, then refresh.';
             }
           } catch { /* probe failed — keep the original message */ }
         }
@@ -417,7 +431,10 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
       if (field === 'duration') {
         const course = courses.find(c => c.id === courseId);
         const legalDayTemplates = legalDayTemplatesForCourse({
-          credits: course.credits, hasLab: course.has_lab, duration: value,
+          credits: course.credits,
+          hasLab: course.has_lab,
+          isSeminar: isSeminarCourse(course),
+          duration: value,
         });
         if (!legalDayTemplates.includes(next[courseId].dayPattern)) {
           next[courseId].dayPattern = legalDayTemplates[0] ?? next[courseId].dayPattern;
@@ -728,50 +745,25 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
         {buildMismatch && (
           <div className="suggest-banner suggest-banner-warn">
             <div>
-              <Ico name="alert" /> The backend on port 4000 is running an older build than this page.
-              Your previous <code>npm run dev</code> likely hit <code>EADDRINUSE</code> and
-              the new process crashed without replacing the old one.
+              <Ico name="alert" /> The scheduling service is not using the same application version as this page.
+              Restart the local CSCVS services, then refresh this page.
             </div>
-            <div style={{marginTop: 8, fontSize: '.82em', fontFamily: 'var(--font-mono)'}}>
-              <div>One-line fix (kills any stale process, then starts fresh):</div>
-              <pre style={{
-                margin: '4px 0',
-                padding: '6px 8px',
-                background: 'rgba(0,0,0,0.06)',
-                borderRadius: 4,
-                fontSize: '.92em',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-all',
-              }}>
-{`cd backend && npm run dev:fresh`}
-              </pre>
-              <div style={{marginTop: 4}}>Or, manually:</div>
-              <pre style={{
-                margin: '4px 0',
-                padding: '6px 8px',
-                background: 'rgba(0,0,0,0.06)',
-                borderRadius: 4,
-                fontSize: '.92em',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-all',
-              }}>
-{`lsof -ti:4000 | xargs kill -9 && cd backend && npm run dev`}
-              </pre>
-              <div style={{marginTop: 4}}>Then hard-refresh this page (Cmd+Shift+R).</div>
+            <div style={{marginTop: 8, fontSize: '.82em'}}>
+              <div>If this appears during a demonstration, ask the system maintainer to restart CSCVS.</div>
               <div style={{marginTop: 6}}>
                 <a
                   href="/api/v1/health/version"
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{textDecoration: 'underline', color: 'inherit'}}
-                >Check running backend version</a>
+                >Open service status</a>
                 {' · '}
                 <a
                   href="/api/v1/health/routes"
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{textDecoration: 'underline', color: 'inherit'}}
-                >Verify routes loaded</a>
+                >Open service route check</a>
               </div>
             </div>
           </div>
@@ -787,34 +779,22 @@ export default function SuggestModal({ scheduleId, onConfirm, onClose }) {
                 diagnostic in a new tab. The user has hit this banner
                 across multiple phases despite the route being in code;
                 actionable next-steps shortens the time-to-fix. */}
-            {/older build/i.test(recommendError) && (
-              <div style={{marginTop: 8, fontSize: '.82em', fontFamily: 'var(--font-mono)'}}>
-                <div>To restart the backend:</div>
-                <pre style={{
-                  margin: '4px 0',
-                  padding: '6px 8px',
-                  background: 'rgba(0,0,0,0.06)',
-                  borderRadius: 4,
-                  fontSize: '.92em',
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-all',
-                }}>
-{`# In the terminal running the backend, hit Ctrl+C, then:
-cd backend && npm run dev`}
-                </pre>
+            {/application version|older build/i.test(recommendError) && (
+              <div style={{marginTop: 8, fontSize: '.82em'}}>
+                <div>Ask the system maintainer to restart CSCVS, then refresh this page.</div>
                 <a
                   href="/api/v1/health/routes"
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{textDecoration: 'underline', color: 'inherit'}}
-                >Verify routes loaded</a>
+                >Open service route check</a>
                 {' · '}
                 <a
                   href="/api/v1/health/version"
                   target="_blank"
                   rel="noopener noreferrer"
                   style={{textDecoration: 'underline', color: 'inherit'}}
-                >Check running build version</a>
+                >Open service status</a>
               </div>
             )}
           </div>
@@ -887,6 +867,7 @@ cd backend && npm run dev`}
                     const legalDurs  = legalDurationsForCourse(course);
                     const legalDays  = legalDayTemplatesForCourse({
                       credits: course.credits, hasLab: course.has_lab,
+                      isSeminar: isSeminarCourse(course),
                       duration: cfg.duration,
                     });
                     // Hide the duration toggle when only one is legal
@@ -916,7 +897,7 @@ cd backend && npm run dev`}
                             <span className="suggest-code">{course.course_code}</span>
                             <span className="suggest-name">{course.name}</span>
                             <span className="suggest-credits">
-                              {course.credits} cr{course.has_lab ? ' · lab' : ''}
+                              {course.credits} cr{course.has_lab ? ' · lab' : isSeminarCourse(course) ? ' · seminar' : ''}
                             </span>
                           </span>
                           <span className="suggest-cat"
@@ -995,7 +976,9 @@ cd backend && npm run dev`}
                                   <span
                                     className="suggest-pattern-btn active suggest-pattern-btn-fixed"
                                     aria-disabled="true"
-                                    title={`A ${course.credits}-credit${course.has_lab ? ' with-lab' : ''} course meets only in ${legalDurs[0]}-minute sessions — its credits and flags fix the lecture duration, so there's nothing to choose here.`}
+                                    title={isSeminarCourse(course)
+                                      ? 'A seminar meets once per week for 75 minutes.'
+                                      : `A ${course.credits}-credit${course.has_lab ? ' with-lab' : ''} course meets only in ${legalDurs[0]}-minute sessions — its credits and flags fix the lecture duration, so there's nothing to choose here.`}
                                   >{legalDurs[0]} min</span>
                                 )}
                               </div>

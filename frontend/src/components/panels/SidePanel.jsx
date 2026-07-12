@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 // NEW-FU-503 (Phase 123): shared SVG icons replace emoji glyphs.
 import Ico from '../shared/Icons.jsx';
 import { useDraggable } from '@dnd-kit/core';
-import { useApp, VIEWS, LEVEL_COLORS, DAYS, DAY_DURATION, sectionLabel } from '../../context/AppContext.jsx';
+import { useApp, VIEWS, LEVEL_COLORS, DAYS, DAY_DURATION, sectionLabel, isInfoOnlyCourse } from '../../context/AppContext.jsx';
 import * as api from '../../api/index.js';
 import AddCourseModal     from '../modals/AddCourseModal.jsx';
 import AddInstructorModal from '../modals/AddInstructorModal.jsx';
@@ -18,6 +18,11 @@ import OfficeHoursManagerModal from '../modals/OfficeHoursManagerModal.jsx'; // 
 import './SidePanel.css';
 
 const LEVEL_ORDER = ['Freshman','Sophomore','Junior','Senior','Graduate'];
+const VENUE_TYPE_LABEL = {
+  LectureHall: 'Lecture Hall',
+  Laboratory: 'Laboratory',
+  Multipurpose: 'Multipurpose',
+};
 
 // NEW-FU-608 (Batch 30 item 1): compact, professional status flag for the Instructor/Venue
 // sidebars — a distinct color + icon + tooltip per state so the user can triage at a glance:
@@ -405,7 +410,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
       </div>
 
       {/* NEW-FU-433 (Phase 106 item 5): advisory — how many real instructors/
-          venues to add to replace the "dummy" placeholders Suggest/Quick Fix
+          venues to add to replace the temporary placeholders Suggest/Quick Fix
           created so the schedule can run for real. Shown in every view. */}
       {schedule && (() => {
         const dI = (instructors ?? []).filter(i => i.is_dummy).length;
@@ -419,7 +424,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
             <span className="sp-dummy-advisory-icon" aria-hidden="true"><Ico name="info" /></span>
             <div className="sp-dummy-advisory-text">
               <strong>To implement this schedule for real, add {parts.join(' and ')}.</strong>
-              <span> These swap out the “dummy” placeholders Suggest added — creating a real instructor or venue replaces one automatically.</span>
+              <span> These replace the temporary placeholders Suggest added — creating a real instructor or venue replaces one automatically.</span>
             </div>
           </div>
         );
@@ -478,7 +483,11 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                         </div>
                         <ul className="sp-list" style={{marginTop:2}}>
                           {courseGrps.sort((a,b) => a.sectionNumber.localeCompare(b.sectionNumber, undefined, {numeric:true})).map(grp => {
-                            const days = grp.days.sort((a,b)=>{
+                            // NEW-FU-690: an info-only section (Thesis / Research / untimed Project /
+                            // Summer Training / Internship) carries a NULL day — drop those before
+                            // formatting so the abbreviation never calls .substring on null (the
+                            // "null is not an object (evaluating 'd.substring')" crash).
+                            const days = grp.days.filter(Boolean).sort((a,b)=>{
                               const o=['Sunday','Monday','Tuesday','Wednesday','Thursday'];
                               return o.indexOf(a)-o.indexOf(b);
                             }).map(d=>d.substring(0,3)).join('/');
@@ -497,7 +506,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                                     gender entirely before this phase). */}
                                 <span className="sp-sec-code" style={{minWidth:28,fontSize:'.72rem',
                                   color:colors.text,fontWeight:700}}>{sectionLabel(grp)}</span>
-                                <span className="sp-sec-detail">{days} {grp.startTime}</span>
+                                <span className="sp-sec-detail">{(days || grp.startTime) ? `${days} ${grp.startTime}`.trim() : 'No fixed time'}</span>
                                 <button className="sp-del-btn"
                                   title={isArchived ? lockedTitle : `Remove entire section ${sectionLabel(grp)} (all meeting days)`}
                                   disabled={isArchived}
@@ -606,7 +615,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                     <span className="sp-filter-nameline">
                       <FilterName>{instr.name}</FilterName>
                       {/* NEW-FU-425 (Phase 104 item 2): clearly label placeholder instructors. */}
-                      {instr.is_dummy && <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real instructor to replace it">dummy</span>}
+                      {instr.is_dummy && <span className="sp-dummy-badge" title="Temporary placeholder added by Suggest — add a real instructor to replace it">temp</span>}
                     </span>
                     {/* NEW-FU-608 (Batch 30 item 1): triage flag — no classes / no office hours. */}
                     <StatusFlag type={instructorFlag(instr.id)} />
@@ -667,7 +676,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
           </div>
           {/* NEW-FU-287 (Phase 57): copy updated — the venue category list
               now includes Multipurpose alongside Lecture Hall and Laboratory. */}
-          <p className="sp-hint">Lecture halls, labs &amp; multipurpose rooms</p>
+          <p className="sp-hint">Lecture halls, laboratories, and multipurpose venues</p>
 
           {/* NEW-FU-281 (Phase 56): the + button now opens AddVenueModal
               instead of expanding an inline form. The modal enforces the
@@ -691,7 +700,7 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                   /* NEW-FU-288 (Phase 57): tooltip carries the full venue
                      name + type + capacity, so a wrapped name (`24-\n101-A`)
                      remains identifiable on hover. */
-                  title={`${v.name} · ${v.type} · cap.${v.capacity}`}
+                  title={`${v.name} · ${VENUE_TYPE_LABEL[v.type] ?? v.type} · Capacity ${v.capacity}`}
                   onClick={()=>selectFilter(v.id)}
                 >
                   {/* NEW-FU-287 (Phase 57): venue-type pill labels the
@@ -714,10 +723,10 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
                     <span className="sp-filter-nameline">
                       <FilterName>{v.name}</FilterName>
                       {/* NEW-FU-425 (Phase 104 item 2): clearly label placeholder venues. */}
-                      {v.is_dummy && <span className="sp-dummy-badge" title="Placeholder added by Suggest — add a real venue to replace it">dummy</span>}
+                      {v.is_dummy && <span className="sp-dummy-badge" title="Temporary placeholder added by Suggest — add a real venue to replace it">temp</span>}
                     </span>
                     <span className="sp-venue-metaline">
-                      {!v.is_dummy && <span className="sp-venue-cap">cap.{v.capacity}</span>}
+                      {!v.is_dummy && <span className="sp-venue-cap">Capacity {v.capacity}</span>}
                       {/* NEW-FU-608 (Batch 30 item 1): triage flag — venue with no classes. */}
                       <StatusFlag type={venueFlag(v.id)} />
                     </span>
@@ -823,10 +832,6 @@ export default function SidePanel({ showToast, onAddSection, onEditSection, onQu
 // hook instance + ref — React rules-of-hooks forbid calling hooks
 // inside a loop in the parent function.
 //
-// NEW-FU-298 (Phase 60): added `role` prop + useRenderStrategy. Each
-// row first picks its display string via the strategy ladder, then
-// useFitText sizes whatever was picked. `role` selects between the
-// instructor and venue pickers (different text structures).
 function FilterName({ children }) {
   // NEW-FU-633 (issue #4): one-line ellipsis (driven by .sp-filter-name CSS). The prior
   // useRenderStrategy + useFitText shrink-and-wrap (FU-298/305) produced multi-line,
@@ -836,11 +841,13 @@ function FilterName({ children }) {
 
 // ── DraggableCourse ──────────────────────────────────────────────────────────
 function DraggableCourse({ course, level, onRemove, showToast, isArchived = false, lockedTitle = '' }) {
+  const infoOnly = isInfoOnlyCourse(course);
+  const dragDisabled = isArchived || infoOnly;
   // NEW-FU-205: when isArchived, useDraggable's `disabled` prevents the
   // drag-handle from initiating any drag operation. Spreading listeners +
   // attributes is still safe; dnd-kit no-ops them under disabled.
   const { attributes, listeners, setNodeRef, transform, isDragging } =
-    useDraggable({ id: course.id, disabled: isArchived });
+    useDraggable({ id: course.id, disabled: dragDisabled });
   const { confirm } = useApp();   // NEW-FU-547 (Batch 15 Issue 5): themed confirm
   const colors = LEVEL_COLORS[level] ?? LEVEL_COLORS.Freshman;
   // NEW-FU-295 (Phase 59): auto-fit the course name. The 3-line clamp
@@ -854,16 +861,16 @@ function DraggableCourse({ course, level, onRemove, showToast, isArchived = fals
   useFitText(nameRef, { minPx: 3 });
   const style = {
     transform: transform ? `translate3d(${transform.x}px,${transform.y}px,0)` : undefined,
-    opacity: isDragging ? 0.4 : (isArchived ? 0.7 : 1),
-    cursor: isArchived ? 'default' : 'grab',
+    opacity: isDragging ? 0.4 : (dragDisabled ? 0.7 : 1),
+    cursor: dragDisabled ? 'default' : 'grab',
   };
   return (
     <div
       ref={setNodeRef}
       className="sp-course-card"
       style={{ ...style, borderColor: colors.border, background: colors.bg }}
-      {...listeners}
-      {...attributes}
+      {...(!dragDisabled ? listeners : {})}
+      {...(!dragDisabled ? attributes : {})}
       /* NEW-FU-288 (Phase 57): tooltip carries the full course name +
          code. The 2-line clamp on `.sp-course-name` can still ellipsis-
          truncate genuinely-long names (e.g. test fixtures like
@@ -871,6 +878,8 @@ function DraggableCourse({ course, level, onRemove, showToast, isArchived = fals
          readable-tail fallback. */
       title={isArchived
         ? lockedTitle
+        : infoOnly
+        ? `${course.course_code} — ${course.name}\nInformation-only activity. Edit instructor and section number from the side panel; it is not placed on the grid.`
         : `${course.course_code} — ${course.name}\nDrag onto the grid to add a section`}
     >
       <span className="sp-course-code" style={{ color: colors.text }}>

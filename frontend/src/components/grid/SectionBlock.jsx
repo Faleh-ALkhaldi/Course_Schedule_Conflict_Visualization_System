@@ -3,7 +3,7 @@ import React, { useRef, useCallback, useEffect, useState } from 'react';
 import Ico from '../shared/Icons.jsx';
 import { createPortal } from 'react-dom';
 import { useDraggable } from '@dnd-kit/core';
-import { LEVEL_COLORS, HARD_CONFLICT_BG, SOFT_CONFLICT_BG, useApp, sectionLabel } from '../../context/AppContext.jsx';
+import { LEVEL_COLORS, HARD_CONFLICT_BG, SOFT_CONFLICT_BG, useApp, sectionLabel, effectiveSectionType } from '../../context/AppContext.jsx';
 // NEW-FU-309 (Phase 66): card-level TWO-DIMENSIONAL auto-fit. Replaces
 // the Phase 59-64 per-element useFitText + Phase 60 useRenderStrategy
 // wrap-injection in the grid. A single hook shrinks every in-flow token
@@ -11,7 +11,7 @@ import { LEVEL_COLORS, HARD_CONFLICT_BG, SOFT_CONFLICT_BG, useApp, sectionLabel 
 // the vertical clipping (venue "59-1003" → "59") that width-only fitting
 // caused. CSS now handles wrapping naturally (white-space: normal), so
 // shrinking collapses 2-line wraps back to one line when they fit.
-// (useFitText / useRenderStrategy remain in use by the sidebar.)
+// Sidebar course cards still use useFitText for name fitting.
 import { useFitCard } from '../../hooks/useFitCard.js';
 import './SectionBlock.css';
 
@@ -200,7 +200,7 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
   const level      = section.academicLevel  ?? section.academic_level  ?? 'Freshman';
   const startTime  = (section.startTime ?? section.start_time ?? '').substring(0,5);
   const endTime    = (section.endTime   ?? section.end_time   ?? '').substring(0,5);
-  const secType    = section.sectionType ?? section.section_type ?? 'Lec';
+  const secType    = effectiveSectionType(section, { season: schedule?.semester });   // NEW-FU-687/688: Lec→Prj/Ths/Sem derived; season drives ST/INT (info-only is grid-excluded, so this is defensive)
 
   // NEW-FU-200 (Phase 79): publish the meeting DURATION in minutes so useFitCard
   // can split "large near-square" cards into GREEN (long classes — SWE 412 is
@@ -255,6 +255,20 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
   // NEW-FU-137: badge text is uppercase "LEC" / "LAB" consistently across
   // Course / Teacher / Venue views.
   const badgeText = String(secType).toUpperCase();
+  // NEW-FU-498/688: per-type badge colors. Lec=blue, Lab=amber, Prj=violet, Ths/Res=green,
+  // Sem=cyan, St/Int (off-campus training)=slate. In practice the grid only ever shows
+  // Lec/Lab/Prj/Sem (the info-only Ths/Res/St/Int are filtered out of the grid), but the
+  // full map keeps any reused popover/legend rendering consistent.
+  const TYPE_BADGE = {
+    Lab: { bg: '#fde68a', fg: '#78350f' },
+    Prj: { bg: '#ddd6fe', fg: '#5b21b6' },
+    Ths: { bg: '#d1fae5', fg: '#065f46' },
+    Res: { bg: '#d1fae5', fg: '#065f46' },
+    Sem: { bg: '#cffafe', fg: '#155e75' },
+    St:  { bg: '#e2e8f0', fg: '#334155' },
+    Int: { bg: '#e2e8f0', fg: '#334155' },
+  };
+  const badgeStyle = TYPE_BADGE[secType] ?? { bg: '#dbeafe', fg: '#1e3a8a' };   // Lec default (blue)
 
   // NEW-FU-309 (Phase 66): instructor/venue render as raw full strings.
   // No abbreviation (removed Phase 62), no JS wrap-injection (removed
@@ -340,11 +354,11 @@ export default function SectionBlock({ section, conflicts, onClick, onDelete, is
           transform:scale() applied to .sblock-fit never distorts them. They are
           absolutely positioned in the corners (CSS) and sized from --sb-code-px /
           --sb-chrome-px published by useFitCard. */}
-      {/* NEW-FU-498 (Phase 122): per-type badge colors — Lec=blue, Lab=amber,
-          Prj=violet, Ths=green. badgeText is the uppercased type (LEC/LAB/PRJ/THS). */}
+      {/* NEW-FU-498/688 (Phase 122/126): per-type badge colors from TYPE_BADGE
+          (Lec=blue, Lab=amber, Prj=violet, Ths/Res=green, Sem=cyan, St/Int=slate). */}
       <span className="sblock-type-badge" style={{
-        background: secType === 'Lab' ? '#fde68a' : secType === 'Prj' ? '#ddd6fe' : secType === 'Ths' ? '#d1fae5' : '#dbeafe',
-        color:      secType === 'Lab' ? '#78350f' : secType === 'Prj' ? '#5b21b6' : secType === 'Ths' ? '#065f46' : '#1e3a8a',
+        background: badgeStyle.bg,
+        color:      badgeStyle.fg,
       }}>{badgeText}</span>
       {/* NEW-FU-609 (Batch 30 item 2) + NEW-FU-629 (audit): the grid-block ✕ deletes the
           WHOLE section (all meeting days), not a single day. A section has one identity

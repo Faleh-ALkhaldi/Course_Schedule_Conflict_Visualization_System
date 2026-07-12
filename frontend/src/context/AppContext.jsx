@@ -118,6 +118,33 @@ export function sectionLabel(section, { withSection = true } = {}) {
   return gender === 'F' ? `${prefix}F-${num}` : `${prefix}${num}`;
 }
 
+// NEW-FU-687/688: frontend mirror of backend domain/exportLabels.effectiveSectionType — the EFFECTIVE
+// (display) section type. A section stored as 'Lec' on a Project(capstone)/Thesis/Research/External course
+// displays as Prj/Ths/Res/St/Int WITHOUT rewriting the stored row (matches the exports + conflict
+// descriptions); a stored Lab/Prj/Ths/Sem is honoured as-is. `season` is the active term code's last digit
+// ('3' = Summer) and only affects EXTERNAL: a summer external is Summer Training (St), otherwise Internship
+// (Int). Keep in lockstep with the backend deriver.
+export function effectiveSectionType(section, { season } = {}) {
+  const stored = section?.sectionType ?? section?.section_type ?? 'Lec';
+  if (['Lab', 'Prj', 'Ths', 'Sem', 'St', 'Int', 'Res'].includes(stored)) return stored;
+  if ((section?.isThesis   ?? section?.is_thesis)   === true) return 'Ths';
+  if ((section?.isResearch ?? section?.is_research) === true) return 'Res';
+  if ((section?.isSeminar  ?? section?.is_seminar)  === true) return 'Sem';
+  if ((section?.isCapstone ?? section?.is_capstone) === true) return 'Prj';
+  if ((section?.isExternal ?? section?.is_external) === true) return (String(season ?? '').slice(-1) === '3') ? 'St' : 'Int';
+  return 'Lec';
+}
+
+// NEW-FU-688: frontend mirror of backend domain/exportLabels.isInfoOnlyCourse. The info-only family —
+// External (Summer Training / Internship), Thesis, Research — is information-only: it is NEVER drawn in
+// the grid (even if it carries a placeholder time) and never raises a conflict. A Project is NOT here: it
+// is conflict-exempt too but DOES appear in the grid when it has a time.
+export function isInfoOnlyCourse(section) {
+  return (section?.isExternal ?? section?.is_external) === true
+      || (section?.isThesis   ?? section?.is_thesis)   === true
+      || (section?.isResearch ?? section?.is_research) === true;
+}
+
 // Level colors are now CSS variables (defined in index.css :root + the dark block)
 // so cards flip with the theme. Light values are unchanged from before; the
 // FU-156 Junior-contrast tuning now lives on --lvl-ju-* in index.css.

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useDroppable } from '@dnd-kit/core';
 import {
   useApp, DAYS, LEVEL_COLORS, SOFT_CONFLICT_BG, HARD_CONFLICT_BG,
-  toMinutes, fromMinutes, SLOT_STEP,
+  toMinutes, fromMinutes, SLOT_STEP, isInfoOnlyCourse,
 } from '../../context/AppContext.jsx';
 import SectionBlock from './SectionBlock.jsx';
 import OfficeHourBlock from './OfficeHourBlock.jsx';
@@ -238,7 +238,10 @@ export default function ScheduleGrid({ onBlockClick, onOHClick, onOHDelete, onSe
 
   const sectionsByDay = useMemo(() => {
     const m = {};
-    for (const day of DAYS) m[day] = sections.filter(s => s.day === day);
+    // NEW-FU-688: the info-only family (external → Summer Training/Internship, thesis, research) is
+    // NEVER drawn in the grid even if it carries a placeholder time — it is information-only and lives
+    // in the course/instructor sidebar. A timed Project is NOT info-only, so it still draws here.
+    for (const day of DAYS) m[day] = sections.filter(s => s.day === day && !isInfoOnlyCourse(s));
     return m;
   }, [sections]);
 

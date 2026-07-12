@@ -11,10 +11,10 @@ import './SectionModal.css';
 // format only requires adding one entry.
 // NEW-FU-574 (Batch 21): dropped the emoji glyphs for a clean, formal look.
 const EXPORT_FORMATS = [
-  { id: 'xlsx', label: 'Excel',  ext: '.xlsx', desc: 'Round-trips with import. Best for editing.' },
+  { id: 'xlsx', label: 'Excel',  ext: '.xlsx', desc: 'Can be imported back. Best for editing.' },
   { id: 'pdf',  label: 'PDF',    ext: '.pdf',  desc: 'Printable, fixed layout.' },
   { id: 'docx', label: 'Word',   ext: '.docx', desc: 'Editable document with tables.' },
-  { id: 'png',  label: 'Image',  ext: '.png',  desc: 'Snapshot of the current view (rendered in browser).' },
+  { id: 'png',  label: 'Image',  ext: '.png',  desc: 'Scoped image generated from the selected schedule view.' },
 ];
 
 // NEW-FU-666: end-user venue-type labels for the picker (never the code-base "LectureHall").
@@ -133,7 +133,7 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
     // NEW-FU-667: PNG is now generated SERVER-SIDE — the same scoped, theme-independent grid the
     // PDF renders, rasterized to an image — so it flows through the SAME backend endpoint as
     // xlsx/docx/pdf. (It used to capture the live DOM via html2canvas, which gave the wrong scope
-    // and leaked the current theme/view.) A venue/instructor image now shows exactly that entity.
+    // and leaked the current theme/view.) A venue/instructor image now shows the same focused scope.
     onExport(view, fid, format);
     onClose();
   }
@@ -180,21 +180,38 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
       }
       setDecision(null);
       setImportResult(result);
-      // Reload all reference data (courses, instructors, venues may have changed)
-      await loadReference();
+      // Reload all reference data (courses, instructors, venues may have changed).
+      // NEW-FU-683: pass the TERM explicitly. A bare loadReference() sends getInstructors/getVenues
+      // with no `?term=`, so the sidebar falls back to whatever (if any) `?term=` happens to be in the
+      // URL — and when it isn't there, the backend returns the WHOLE-CATALOG (every term's owned copy),
+      // which painted the post-import sidebar with ~9 duplicate "AHMED AL-NAZER" + duplicate venues (the
+      // cross-term leak FU-681 closed for every other call site). Scoping it to this schedule's term —
+      // exactly like boot / term-switch / save / quick-fix already do — keeps the post-import sidebar to
+      // this term's entities only. (This is why the duplicates vanished after a later Quick Fix: that
+      // path reloads via loadReference(schedule.semester).)
+      await loadReference(schedule.semester);
       dispatch({ type:'SET_CONFLICTS', conflicts: result.conflicts?.conflicts ?? [] });
       await loadView(schedule.id, view, filterId);
       clearHistory?.();   // NEW-FU-549 (Batch 16): import changed the schedule → reset undo history
       // NEW-FU-660: tailor the toast to merge (scoped) vs replace (whole-term).
+      // NEW-FU-683: the AUTHORITATIVE post-import conflict count (what the panel will show). The toast
+      // must reflect it so an import never reads as clean while conflicts remain.
+      const remainingTotal = result.conflicts?.conflicts?.length || 0;
       let summary;
+      let leftover = 0;   // conflicts that REMAIN after an import that changed sections (drives the warning)
       if (result.scope === 'instructor' || result.scope === 'venue') {
         if (result.mode === 'entity-only') summary = result.message || `Added ${result.entity}.`;
         else {
+          leftover = remainingTotal;
           const movedMsg  = result.moved ? ` · ${result.moved} moved to free slots` : '';
-          const confMsg   = result.newConflicts ? ` · ${result.newConflicts} conflict(s)` : '';
+          // NEW-FU-683: surface the ACTUAL remaining conflicts (not only newly-introduced ones), so a
+          // "conflict-free" merge that still leaves a soft conflict (e.g. an out-of-date file) doesn't
+          // read as fully resolved while the conflict panel shows them.
+          const confMsg   = leftover ? ` · ${leftover} conflict(s) remain` : '';
           summary = `Merged ${result.entity}: ${result.created} section(s) added${movedMsg}${confMsg}.`;
         }
       } else {
+        leftover = remainingTotal;
         const skippedMsg = result.skipped ? ` (${result.skipped} duplicate row(s) skipped)` : '';
         const errMsg = result.errors?.length ? ` · ${result.errors.length} row(s) had errors` : '';
         // NEW-FU-668: "Fix and import" reports what the resolver changed (and anything it
@@ -211,8 +228,9 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
         }
         summary = `Imported ${result.created} section(s) from ${inferred.toUpperCase()}${skippedMsg}${fixMsg}${errMsg}.`;
       }
-      const wholeTermLeftover = result.scope === undefined && (result.conflicts?.conflicts?.length || 0) > 0;
-      const toastKind = (result.errors?.length || result.newConflicts || wholeTermLeftover) ? 'warning' : 'success';
+      // NEW-FU-683: warn whenever ANY conflict remains after a section-changing import (scoped merge OR
+      // whole-term replace), not only the whole-term path — never imply a clean result while conflicts remain.
+      const toastKind = (result.errors?.length || leftover) ? 'warning' : 'success';
       showToast && showToast('✓ ' + summary, toastKind);
       setStagedFile(null);
       if (fileRef.current) fileRef.current.value = '';
@@ -231,13 +249,13 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
       { mode:'with-conflicts', title:'Import and keep the conflicts', desc:'Replace the term with this file exactly as it is — conflicts included.' },
       { mode:'conflict-free',  title:'Import and fix the conflicts',  desc:'Replace the term, then automatically resolve the conflicts and show what changed.' },
     ] : decision.scope === 'venue' ? [
-    { mode:'entity-only',    title:'Add the venue only',            desc:'Just its capacity & type — no courses assigned.' },
-    { mode:'with-conflicts', title:'Add everything, keep conflicts', desc:'Add the venue, its courses & instructors, and proceed even with the conflicts.' },
-    { mode:'conflict-free',  title:'Add everything, conflict-free',  desc:'Add it all, but move conflicting classes to free times — nothing is dropped.' },
+    { mode:'entity-only',    title:'Add the venue only',            desc:'Just its capacity and type — no courses assigned.' },
+    { mode:'with-conflicts', title:'Add everything, keep conflicts', desc:'Add the venue-focused schedule, including required complementary data, and proceed even with the conflicts.' },
+    { mode:'conflict-free',  title:'Add everything and resolve conflicts', desc:'Add it all, but move conflicting classes to available times — nothing is dropped.' },
   ] : [
     { mode:'entity-only',    title:'Add the instructor only',        desc:'With their office hours — no courses assigned.' },
-    { mode:'with-conflicts', title:'Add everything, keep conflicts', desc:'Add the instructor, their courses & venues, and proceed even with the conflicts.' },
-    { mode:'conflict-free',  title:'Add everything, conflict-free',  desc:'Add it all, but move conflicting classes to free times — nothing is dropped.' },
+    { mode:'with-conflicts', title:'Add everything, keep conflicts', desc:'Add the instructor-focused schedule, including required complementary data, and proceed even with the conflicts.' },
+    { mode:'conflict-free',  title:'Add everything and resolve conflicts', desc:'Add it all, but move conflicting classes to available times — nothing is dropped.' },
   ]);
 
   // Pre-compute the inferred format of the staged file so we can render a
@@ -268,7 +286,7 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
                       checked={choice==='full'} onChange={()=>setChoice('full')} />
                     <div className="exp-label">
                       <span className="exp-title"><Ico name="clipboard" /> Whole-Term Schedule</span>
-                      <span className="exp-desc">The full term: week grid + every section + all instructors, venues & office hours. Re-importing replaces a term.</span>
+                      <span className="exp-desc">Full term schedule: week grid, every section, all instructors, venues, and office hours. Re-importing replaces a term.</span>
                     </div>
                   </label>
 
@@ -277,7 +295,7 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
                       checked={choice==='teacher'} onChange={()=>setChoice('teacher')} />
                     <div className="exp-label">
                       <span className="exp-title"><Ico name="user" /> Instructor View</span>
-                      <span className="exp-desc">Only this instructor — their week, their sections, their office hours & rooms. Nothing else from the term.</span>
+                      <span className="exp-desc">Focused instructor file: this instructor's schedule and office hours, plus required complementary sections and resources for safe re-import.</span>
                     </div>
                   </label>
                   {choice==='teacher' && (
@@ -322,7 +340,7 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
                       checked={choice==='venue'} onChange={()=>setChoice('venue')} />
                     <div className="exp-label">
                       <span className="exp-title"><Ico name="pin" /> Venue View</span>
-                      <span className="exp-desc">Only this venue — its week, its sections, its capacity & the instructors who use it. Nothing else from the term.</span>
+                      <span className="exp-desc">Focused venue file: this venue's schedule and capacity, plus required complementary sections, instructors, and resources for safe re-import.</span>
                     </div>
                   </label>
                   {choice==='venue' && (
@@ -399,7 +417,7 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
                     marginTop:8, fontSize:'.75rem', color:'var(--slate-600)',
                     background:'rgba(13,148,136,.06)', borderRadius:6, padding:'6px 10px',
                   }}>
-                    Image export captures the live schedule view rendered in your browser.
+                    Image export is generated from the selected export view and matches the same schedule scope.
                   </div>
                 )}
               </div>
@@ -423,15 +441,15 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
                 color:'var(--text-secondary)', lineHeight:1.6, marginBottom:12
               }}>
                 <strong>Supported formats:</strong>{' '}
-                {IMPORT_FORMATS.map(f => `${f.label} (${f.accept})`).join(' · ')} — Excel, Word & PDF all round-trip losslessly.
+                {IMPORT_FORMATS.map(f => `${f.label} (${f.accept})`).join(' · ')} — Excel, Word, and PDF files exported from CSCVS can be imported back into the system.
                 <br/><br/>
                 The importer matches each file to how it was exported:
                 <ul style={{margin:'4px 0 0', paddingLeft:18}}>
                   <li><strong>Whole-term file</strong> → <strong>replaces</strong> this term entirely (this term keeps its own name).</li>
-                  <li><strong>Instructor file</strong> → <strong>merges</strong> that instructor — its classes, rooms & office hours — into this term, keeping everything already here.</li>
-                  <li><strong>Venue file</strong> → <strong>merges</strong> that venue — its classes, capacity & the instructors who use it — into this term.</li>
+                  <li><strong>Instructor file</strong> → <strong>merges</strong> the instructor-focused schedule, including office hours and any complementary sections or resources needed for schedule integrity.</li>
+                  <li><strong>Venue file</strong> → <strong>merges</strong> the venue-focused schedule, including capacity and any complementary sections, instructors, or resources needed for schedule integrity.</li>
                 </ul>
-                If a merge would clash with what's already scheduled, you'll be asked how to proceed (add anyway, find conflict-free times, or add the instructor/venue only).<br/>
+                If a merge would clash with what is already scheduled, you will be asked how to proceed: add anyway, let the system resolve conflicts, or add the instructor/venue only.<br/>
                 Images cannot be imported.
               </div>
 
@@ -480,32 +498,42 @@ export default function ExportModal({ onExport, onClose, showToast, initialTab =
                 </div>
               )}
 
-              {importResult && (
+              {importResult && (() => {
+                // NEW-FU-685: the inline result must reflect the ACTUAL post-import conflict state. Before
+                // this it showed a green check + "N section(s) imported" even when the import (incl. an
+                // "Import and fix the conflicts" run) left conflicts behind — reading as fully resolved
+                // while the conflict panel still showed them. Now: errors → danger; leftover conflicts →
+                // warn + an explicit "· N conflict(s) remain"; only a genuinely clean import stays green.
+                const leftover = importResult.conflicts?.conflicts?.length || 0;
+                const bad = importResult.errors?.length;
+                return (
                 <div style={{
                   /* NEW-FU-631 (audit): theme tokens so the result box matches dark mode
                      (was hardcoded light #fee2e2/#dcfce7 — a light panel inside a dark modal). */
-                  background: importResult.errors?.length ? 'var(--danger-bg)' : 'var(--success-bg)',
-                  border: `1px solid ${importResult.errors?.length ? 'var(--danger-fg)' : 'var(--success-fg)'}`,
+                  background: bad ? 'var(--danger-bg)' : leftover ? 'var(--warn-bg)' : 'var(--success-bg)',
+                  border: `1px solid ${bad ? 'var(--danger-fg)' : leftover ? 'var(--warn-fg)' : 'var(--success-fg)'}`,
                   borderRadius:8, padding:'10px 12px', fontSize:'.8rem',
                 }}>
                   {/* NEW-FU-661: the icon + header reflect the OUTCOME — a pure rejection
                       (nothing imported, ≥1 error) shows an alert icon and "Import canceled",
                       not a misleading check + "0 section(s) imported". Partial/clean imports
-                      keep the count summary. */}
+                      keep the count summary. NEW-FU-685: leftover conflicts also show the alert. */}
                   <div style={{fontWeight:600, marginBottom:4,
-                    color: importResult.errors?.length ? 'var(--danger-fg)' : 'inherit'}}>
-                    <Ico name={importResult.errors?.length ? 'alert' : 'check'} />{' '}
-                    {importResult.created === 0 && importResult.errors?.length
+                    color: bad ? 'var(--danger-fg)' : leftover ? 'var(--warn-fg)' : 'inherit'}}>
+                    <Ico name={bad || leftover ? 'alert' : 'check'} />{' '}
+                    {importResult.created === 0 && bad
                       ? "Couldn't import this file"
                       : <>{importResult.created} section(s) imported
                           {importResult.skipped ? ` · ${importResult.skipped} duplicate(s) skipped` : ''}
-                          {importResult.errors?.length ? ` · ${importResult.errors.length} error(s)` : ''}</>}
+                          {leftover ? ` · ${leftover} conflict(s) remain — see the conflict panel` : ''}
+                          {bad ? ` · ${importResult.errors.length} error(s)` : ''}</>}
                   </div>
                   {importResult.errors?.map((e,i) => (
                     <div key={i} style={{color:'var(--danger-fg)',fontSize:'.75rem'}}>{e}</div>
                   ))}
                 </div>
-              )}
+                );
+              })()}
 
               {/* NEW-FU-660: scoped-merge conflict dialog. Merging this instructor/venue
                   would clash with what's already scheduled — let the user choose how. */}

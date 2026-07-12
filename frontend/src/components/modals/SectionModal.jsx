@@ -36,9 +36,10 @@ const DAY_TEMPLATES = {
 // is dictated by credits; 3-credit-with-lab is a 2-day lecture (3-day Sun/Tue/Thu is the
 // no-lab 3-credit pattern); 4-credit is a 3-day lecture (+ lab); 0-credit (capstone
 // SWE 413) is a single 50-min meeting.
-function legalDayTemplatesForCourse({ credits, hasLab, duration }) {
+function legalDayTemplatesForCourse({ credits, hasLab, duration, isSeminar }) {
   const c = Number(credits);
   const d = Number(duration);
+  if (isSeminar) return d === 75 ? ['single'] : [];
   if (d === 75) return (c === 3 || c === 4) ? ['MW', 'ST', 'TT'] : [];
   if (c === 0) return ['single'];
   if (c === 1) return ['single'];
@@ -50,7 +51,8 @@ function legalDayTemplatesForCourse({ credits, hasLab, duration }) {
 
 // NEW-FU-532 (Batch 11): MIRROR of backend legalDurationsForCourse. 75 min is reserved
 // for 3- and 4-credit courses; 0/1/2-credit are 50 min only.
-function legalDurationsForCourse({ credits, hasLab }) {
+function legalDurationsForCourse({ credits, hasLab, isSeminar }) {
+  if (isSeminar) return [75];
   const c = Number(credits);
   if (c === 0 || c === 1 || c === 2) return [50];
   if (c === 3 || c === 4) return [50, 75];
@@ -76,10 +78,10 @@ function patternFromDays(days) {
 // disable the ones illegal for the current duration (with a reason) rather than
 // hiding them. 3–4 cr → 2-day + 3-day; 2 cr → 2-day (+ 1-day at 75 min); 1/0 cr →
 // single day only. A 2-credit course never sees a 3-day pattern.
-function creditPatterns({ credits, hasLab }) {
+function creditPatterns({ credits, hasLab, isSeminar }) {
   const set = new Set([
-    ...legalDayTemplatesForCourse({ credits, hasLab, duration: 50 }),
-    ...legalDayTemplatesForCourse({ credits, hasLab, duration: 75 }),
+    ...legalDayTemplatesForCourse({ credits, hasLab, duration: 50, isSeminar }),
+    ...legalDayTemplatesForCourse({ credits, hasLab, duration: 75, isSeminar }),
   ]);
   // stable display order
   return ['STT', 'MW', 'ST', 'TT', 'single'].filter(p => set.has(p));
@@ -105,15 +107,33 @@ const GROUP_DAYS = {
 const DURATION_DEFAULTS_BY_TYPE = {
   Lec: [50, 75],
   Lab: [50, 75, 160],
-  // NEW-FU-498 (Phase 122): Project/Thesis meet in long single blocks.
-  Prj: [75, 100, 160],
+  // Projects can be untimed; when timed, registrar patterns use one discrete weekly block.
+  Prj: [50, 75, 100, 160],
   Ths: [75, 100, 160],
+  // NEW-FU-688/689: a Seminar is a single weekly block of EXACTLY 75 min (Graduate-only; never 50).
+  Sem: [75],
 };
 const DURATION_LIMITS_BY_TYPE = {
   Lec: { min: 50, max: 75  },
   Lab: { min: 50, max: 160 },
-  Prj: { min: 50, max: 180 },
+  Prj: { min: 50, max: 160 },
   Ths: { min: 50, max: 180 },
+  Sem: { min: 75, max: 75  },   // NEW-FU-689: exactly 75
+};
+
+function sectionTypeName(sectionType, { infoOnly = false } = {}) {
+  if (infoOnly) return 'Activity';
+  if (sectionType === 'Lab') return 'Lab';
+  if (sectionType === 'Prj') return 'Project';
+  if (sectionType === 'Ths') return 'Thesis';
+  if (sectionType === 'Sem') return 'Seminar';
+  return 'Lecture';
+}
+
+const VENUE_TYPE_LABEL = {
+  LectureHall: 'Lecture Hall',
+  Laboratory: 'Laboratory',
+  Multipurpose: 'Multipurpose',
 };
 
 // NEW-FU-505 (Phase 123): display-only formatter for the computed end time.
@@ -189,13 +209,17 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   const [subModal, setSubModal] = useState(null);
 
   const existing = initial?.section;
+  const existingStartRaw = existing?.startTime ?? existing?.start_time ?? '';
+  const existingEndRaw   = existing?.endTime   ?? existing?.end_time   ?? '';
+  const existingHasMeetingTime = Boolean(existing?.day && existingStartRaw && existingEndRaw);
+  const initialHasMeetingTime = Boolean(initial?.day || initial?.startTime);
 
   // ── Determine existing group ──────────────────────────────────────────────
   // NEW-FU-530 (Batch 10 Issue 1): derive the pattern from the section group's REAL
   // day-set (all linked rows), not the single anchor day — DAY_GROUPS[day] was
   // ambiguous (Sunday → Sun/Tue/Thu even for a Sun/Tue group), which mis-labelled
   // the selector, the validation message, and the restructure.
-  const existingGroup = existing
+  const existingGroup = existing && existingHasMeetingTime
     ? patternFromDays(
         sections
           .filter(s => (s.courseId ?? s.course_id) === (existing.courseId ?? existing.course_id)
@@ -232,9 +256,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     sectionNumber: existing?.sectionNumber ?? existing?.section_number ?? '',
     dayMode:       initialDayMode,
     day:           existing?.day ?? initial?.day ?? 'Sunday',
-    startTime:     (existing?.startTime ?? existing?.start_time ?? initial?.startTime ?? '08:00').substring(0,5),
-    duration: existing
-      ? String(toMinutes(existing.endTime ?? existing.end_time) - toMinutes(existing.startTime ?? existing.start_time))
+    startTime:     String(existingStartRaw || initial?.startTime || '08:00').substring(0,5),
+    duration: existing && existingHasMeetingTime
+      ? String(toMinutes(existingEndRaw) - toMinutes(existingStartRaw))
       : String(initial?.duration ?? 50),
     // NEW-FU-104: section_type is 'Lec' by default for new sections.
     // The selector below only renders when the course has has_lab=true.
@@ -247,6 +271,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
 
   const [busy,  setBusy]  = useState(false);
   const [error, setError] = useState('');
+  const [projectHasTime, setProjectHasTime] = useState(existing ? existingHasMeetingTime : initialHasMeetingTime);
   // NEW-FU-533 (Batch 10 Issue 2): explicit acknowledgement to save a change that
   // creates a conflict — ONLY offered when no conflict-free slot exists ("schedule is
   // tight"). When a conflict-free alternative exists, the save stays blocked instead.
@@ -266,7 +291,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // and tells the user the exact valid range for the section's type/gender.
   const sectionNumError = (() => {
     const num  = String(form.sectionNumber ?? '').trim();
-    const type = form.sectionType === 'Lab' ? 'Lab' : 'Lecture';
+    const type = sectionTypeName(form.sectionType);
     if (!num) return null; // emptiness is handled by the "required" submit guard
     // NEW-FU-510 (Batch 1): normalize a single digit ("2" → "02") before the
     // range check, so 1–9 is accepted; the shared util keeps this in lockstep
@@ -340,8 +365,13 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
           // that fits and isn't one of the Lec defaults.
           next.duration = '160';
         }
+      } else if (f.sectionType === 'Sem') {
+        // NEW-FU-688/689: a Seminar is a SINGLE weekly block of EXACTLY 75 minutes (Graduate-only).
+        // Force a single-day pattern and snap any non-75 duration to 75.
+        if (f.dayMode !== 'single') next.dayMode = 'single';
+        if (curDur !== 75) next.duration = '75';
       } else {
-        // Lec: clamp duration into 50..75 if it's out of range.
+        // Lec (and Prj/Ths): clamp duration into the type's range if it's out of range.
         if (!Number.isInteger(curDur) || curDur < limits.min || curDur > limits.max) {
           next.duration = '50';
         }
@@ -413,17 +443,13 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     e.preventDefault();
     // NEW-FU-411 (Phase 102 item 4): enforce the type-scoped section-number range
     // client-side (the backend also rejects, but a clear inline message beats a
-    // round-trip "constraint violation"). External courses have no section row.
-    if (!(mode === 'add' && courseIsExternal)) {
-      // NEW-FU-510 (Batch 1): a single digit ("2") normalizes to "02" and is
-      // accepted; only a genuinely out-of-range value is rejected here.
-      if (form.sectionNumber && !isValidSectionNumber(form.sectionNumber, form.sectionType)) {
-        const lo = form.sectionType === 'Lab' ? '50' : '01';
-        const hi = form.sectionType === 'Lab' ? '99' : '49';
-        const pfx = form.gender === 'F' ? 'F-' : '';
-        setError(`Section number must be ${pfx}${lo}–${pfx}${hi} for a ${form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} section.`);
-        return;
-      }
+    // round-trip "constraint violation").
+    if (form.sectionNumber && !isValidSectionNumber(form.sectionNumber, effectiveFormSectionType)) {
+      const lo = effectiveFormSectionType === 'Lab' ? '50' : '01';
+      const hi = effectiveFormSectionType === 'Lab' ? '99' : '49';
+      const pfx = form.gender === 'F' ? 'F-' : '';
+      setError(`Section number must be ${pfx}${lo}–${pfx}${hi} for a ${sectionTypeName(effectiveFormSectionType)} section.`);
+      return;
     }
     // NEW-FU-453 (Phase 108): hard block submit on an out-of-range duration or an
     // out-of-window time, even if the button guard were bypassed (defense in depth).
@@ -440,55 +466,48 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     // NEW-FU-510 (Batch 1): UI-level venue-type gate (defense in depth — the
     // Save button is already disabled while mismatched). Applies to add + edit-info.
     if (venueTypeMismatch) {
-      setError(`A ${form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} section needs a ${form.sectionType === 'Lab' ? 'Laboratory' : 'Lecture Hall'} (or Multipurpose) venue.`);
+      setError(`A ${sectionTypeName(effectiveFormSectionType)} section needs a ${effectiveFormSectionType === 'Lab' ? 'Laboratory' : 'Lecture Hall'} (or Multipurpose) venue.`);
       return;
     }
     setBusy(true); setError('');
     try {
       if (mode === 'add') {
-        // NEW-FU-277 (Phase 53 #5): external courses (SWE 399) don't need
-        // a section row — the seed-time placeholder already covers it.
-        // Submitting from external mode is a no-op (just close).
-        if (courseIsExternal) {
-          showToast(`✓ ${selectedCourse.course_code} noted — no section row needed.`, 'success');
-          onClose();
-          return;
-        }
-        const days = getAffectedDays();
+        const days = sectionHasMeetingTime ? getAffectedDays() : [];
         await addSection(schedule.id, {
           courseId:      form.courseId,
           instructorId:  form.instructorId  || undefined,
-          venueId:       form.venueId       || undefined,
+          venueId:       showVenueField ? (form.venueId || undefined) : undefined,
           // NEW-FU-510 (Batch 1): submit the canonical two-digit value ("2" → "02")
           // so the stored value — and the UNIQUE (schedule, course, number, day)
           // duplicate check — operate on the padded form.
           sectionNumber: padSectionNumber(form.sectionNumber),
           // NEW-FU-104: forward sectionType. Backend validates that 'Lab'
           // is only legal on a course with has_lab=true.
-          sectionType:   form.sectionType,
+          sectionType:   courseIsInfoOnly ? undefined : effectiveFormSectionType,
           // NEW-FU-277 (Phase 53 #2): forward gender so the M/F pool
           // distinction makes it to the DB row instead of always defaulting
           // to 'M'. Controller validates 'M'|'F'.
           gender:        form.gender,
           days,
-          day:           days[0],
+          day:           sectionHasMeetingTime ? days[0] : null,
           // NEW-FU-573 (Batch 20): opts.startTime/endTime override the form for the
           // one-click "move this section to a conflict-free slot" action (applyMoveSelf).
-          startTime:     opts.startTime ?? form.startTime,
-          endTime:       opts.endTime   ?? computeEnd(),
+          startTime:     sectionHasMeetingTime ? (opts.startTime ?? form.startTime) : null,
+          endTime:       sectionHasMeetingTime ? (opts.endTime   ?? computeEnd()) : null,
         });
-        showToast(`✓ Section added (${days.length} day${days.length>1?'s':''}).`, 'success');
+        showToast(courseIsInfoOnly
+          ? `✓ ${selectedCourse.course_code} activity saved.`
+          : courseIsProject && !sectionHasMeetingTime
+            ? '✓ Project saved without a meeting time.'
+            : `✓ Section added (${days.length} day${days.length>1?'s':''}).`, 'success');
       } else {
         // Edit info only — propagates to all siblings
         await api.updateSection(existing.id, {
           infoOnly:      true,
           instructorId:  form.instructorId  || null,
-          venueId:       form.venueId       || null,
+          venueId:       showVenueField ? (form.venueId || null) : null,
           // NEW-FU-510 (Batch 1): canonical two-digit value on edit too.
           sectionNumber: padSectionNumber(form.sectionNumber),
-          // NEW-FU-104: forward sectionType on edit too (propagates to all
-          // sibling rows via the service's updateSectionInfo path).
-          sectionType:   form.sectionType,
         });
         showToast('✓ Section info updated for all linked days.', 'success');
         if (schedule) loadView(schedule.id, view, filterId);
@@ -503,11 +522,28 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     e.preventDefault();
     if (!existing) return;
     if (scheduleLocked) { setError(lockedMsg); return; }
+    if (courseIsInfoOnly) { setError('Information-only activities do not have meeting times.'); return; }
     // NEW-FU-478 (Phase 115): block an out-of-window / out-of-range time on EDIT too
     // (this guard used to run only on the Add form). Show the clear window/duration
     // note instead of letting a bad time through to a confusing backend message.
     if (timeError || durationError) { setError(timeError || durationError); return; }
     setBusy(true); setError('');
+    if (courseIsProject && !projectHasTime) {
+      try {
+        await api.updateSection(existing.id, {
+          clearTime: true,
+          instructorId: form.instructorId || undefined,
+          sectionNumber: padSectionNumber(form.sectionNumber),
+          venueId: null,
+        });
+        loadView(schedule.id, view, filterId);
+        showToast('✓ Project meeting time removed.', 'success');
+        onClose();
+      } catch (err) {
+        setError(err.response?.data?.error || 'Failed to remove project meeting time.');
+      } finally { setBusy(false); }
+      return;
+    }
     // NEW-FU-4 + NEW-FU-8: coerce a cross-day edit into a time-only move
     // ONLY when a sibling already occupies the target day. Single-day
     // sections that happen to live on an STT/MW day stay freely movable.
@@ -536,7 +572,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     // create-first safety (no data loss on failure), we snapshot the old group and
     // restore it if the new create fails.
     const targetGroup = form.dayMode;
-    const patternChanged = targetGroup && targetGroup !== existingGroup
+    const patternChanged = !courseIsProject && targetGroup && targetGroup !== existingGroup
       && !(targetGroup === 'single' && existingGroup === 'single');
     if (patternChanged) {
       const targetDays = (targetGroup !== 'single') ? DAY_TEMPLATES[targetGroup].days : [form.day];
@@ -595,7 +631,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     try {
       await moveSection(existing.id, {
         instructorId: form.instructorId || null,
-        venueId:      form.venueId      || existing.venueId      || existing.venue_id,
+        venueId:      showVenueField ? (form.venueId || null) : null,
         day:          effectiveDay,
         // NEW-FU-573 (Batch 20): opts override for the one-click self-move (applyMoveSelf).
         startTime:    opts.startTime ?? form.startTime,
@@ -636,6 +672,38 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // NEW-FU-498 (Phase 122): only 'Lab' requires has_lab; Lec/Prj/Ths are always
   // allowed (Prj/Ths offered on capstone courses), so don't reset those.
   const courseHasLab = !!(selectedCourse && selectedCourse.has_lab);
+  // Capstone projects can be timed or untimed. External/training, thesis, and research
+  // activities are information-only rows: instructor + section number, no grid meeting.
+  // Seminar is a course flag, so its section type is derived from the course and never
+  // chosen as an alternate type inside a lecture course.
+  const courseIsCapstone = !!(selectedCourse && selectedCourse.is_capstone);
+  const courseIsExternal = !!(selectedCourse && selectedCourse.is_external);
+  const courseIsThesis   = !!(selectedCourse && selectedCourse.is_thesis);
+  const courseIsResearch = !!(selectedCourse && selectedCourse.is_research);
+  const courseIsSeminar  = !!(selectedCourse && selectedCourse.is_seminar);
+  const courseIsInfoOnly = courseIsExternal || courseIsThesis || courseIsResearch;
+  const effectiveFormSectionType = courseIsInfoOnly
+    ? 'Lec'
+    : courseIsCapstone
+      ? 'Prj'
+      : courseIsSeminar
+        ? 'Sem'
+        : form.sectionType;
+  const courseIsProject = effectiveFormSectionType === 'Prj';
+  const sectionHasMeetingTime = !courseIsInfoOnly && (!courseIsProject || projectHasTime);
+  const showVenueField = !courseIsInfoOnly && (!courseIsProject || sectionHasMeetingTime);
+  const venueRequired = showVenueField && !courseIsProject;
+  const sectionTypeDisplay = effectiveFormSectionType === 'Lab'
+    ? 'Lab'
+    : effectiveFormSectionType === 'Prj'
+      ? 'Project'
+      : effectiveFormSectionType === 'Ths'
+        ? 'Thesis'
+        : effectiveFormSectionType === 'Sem'
+          ? 'Seminar'
+          : courseIsInfoOnly
+            ? 'Activity'
+            : 'Lecture';
   useEffect(() => {
     if (!courseHasLab && form.sectionType === 'Lab') {
       setForm(f => ({ ...f, sectionType: 'Lec' }));
@@ -656,18 +724,18 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   useEffect(() => {
     if (mode !== 'add') return;
     if (!selectedCourse) return;
-    if (form.sectionType !== 'Lec') return;
+    if (!['Lec', 'Sem'].includes(effectiveFormSectionType)) return;
     if (prevCourseIdRef.current === form.courseId) return;  // only on a real course change / first open
     prevCourseIdRef.current = form.courseId;
     const credits = Number(selectedCourse.credits);
     const hasLab  = !!selectedCourse.has_lab;
     setForm(f => {
       const next = { ...f };
-      const legalDurs = legalDurationsForCourse({ credits, hasLab });
+      const legalDurs = legalDurationsForCourse({ credits, hasLab, isSeminar: courseIsSeminar });
       let dur = parseInt(f.duration, 10);
       if (!legalDurs.includes(dur)) { dur = legalDurs[0] ?? 50; next.duration = String(dur); }
       // map the domain's ONE_DAY template onto the form's 'single' dayMode vocabulary
-      const legalModes = legalDayTemplatesForCourse({ credits, hasLab, duration: dur })
+      const legalModes = legalDayTemplatesForCourse({ credits, hasLab, duration: dur, isSeminar: courseIsSeminar })
         .map(p => (p === 'ONE_DAY' ? 'single' : p));
       if (legalModes.length && !legalModes.includes(f.dayMode)) {
         next.dayMode = legalModes[0];
@@ -677,33 +745,23 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       return next;
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.courseId, selectedCourse, mode, form.sectionType]);
-
-  // NEW-FU-275 (Phase 52 #6): capstone- and external-awareness.
-  // Capstone courses (SWE 411/412/413/414) don't have venues by design —
-  // hide the venue selector and don't suggest one. External courses
-  // (SWE 399 off-campus internship) have NO scheduling at all — short
-  // out the entire form and tell the user the section is auto-managed.
-  const courseIsCapstone = !!(selectedCourse && selectedCourse.is_capstone);
-  const courseIsExternal = !!(selectedCourse && selectedCourse.is_external);
-  // NEW-FU-475 (Phase 114): instructor AND venue are now REQUIRED for a real section
-  // (previously a soft R-09/R-10 warning the user could save past). External courses
-  // have no section row; capstone courses meet wherever convenient (no venue) — both
-  // stay exempt. These gate Save + show an inline flag until both are chosen.
-  const instructorMissing = !courseIsExternal && !form.instructorId;
-  const venueMissing      = !courseIsExternal && !courseIsCapstone && !form.venueId;
+  }, [form.courseId, selectedCourse, mode, effectiveFormSectionType, courseIsSeminar]);
+  const instructorMissing = !form.instructorId;
+  const venueMissing = venueRequired && !form.venueId;
   // NEW-FU-510 (Batch 1): venue-TYPE gate. A Lecture belongs in a LectureHall
   // (or the wildcard Multipurpose); a Lab in a Laboratory (or Multipurpose).
   // This is a UI-level gate only — it does NOT change the backend R-11/R-12
   // severity. `allowedVenueTypes` also drives the dropdown filter below; the
   // currently-selected venue is always kept selectable there so an existing
   // mismatched assignment can still be seen and corrected.
-  const allowedVenueTypes = form.sectionType === 'Lab'
+  const allowedVenueTypes = courseIsProject
+    ? ['LectureHall', 'Multipurpose', 'Laboratory']
+    : effectiveFormSectionType === 'Lab'
     ? ['Laboratory', 'Multipurpose']
     : ['LectureHall', 'Multipurpose'];
   const selectedVenue = venues.find(v => v.id === form.venueId);
   const venueTypeMismatch = !!(
-    selectedVenue && !courseIsCapstone && !courseIsExternal &&
+    selectedVenue && showVenueField && !courseIsProject &&
     !allowedVenueTypes.includes(selectedVenue.type)
   );
   // NEW-FU-481 (Phase 116): a section needs a COURSE and a SECTION NUMBER too — gate Save
@@ -715,7 +773,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // surfacing only as a post-Save backend 400. Normal edit flow is unaffected because the
   // field is always pre-filled from the DB; the gate only triggers on deliberate clearing.
   const courseMissing        = mode === 'add' && !form.courseId;
-  const sectionNumberMissing = !courseIsExternal && !String(form.sectionNumber || '').trim();
+  const sectionNumberMissing = !String(form.sectionNumber || '').trim();
   // NEW-FU-581 (Batch 24): RUNTIME duplicate-section-number guard. The DB enforces
   // UNIQUE (schedule_id, course_id, section_number, day, gender); a collision used to be
   // surfaced ONLY as a post-Save 409 ("That section number is already used…"), letting the
@@ -724,12 +782,14 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // days, and disable Save. Excludes this section's OWN logical group in edit mode (it is
   // renumbered as a unit). Same wording as the backend so the message is consistent.
   const sectionDupError = (() => {
-    if (courseIsExternal || !form.courseId) return null;
+    if (!form.courseId) return null;
     const num = String(form.sectionNumber ?? '').trim();
     if (!num || sectionNumError) return null;          // empty / out-of-range handled elsewhere
     const padded = padSectionNumber(num);
     const gender = form.gender || 'M';
-    const days = DAY_TEMPLATES[form.dayMode]?.days ?? [form.day];
+    const days = sectionHasMeetingTime
+      ? (DAY_TEMPLATES[form.dayMode]?.days ?? [form.day])
+      : [null];
     let pool = sections;
     if (mode === 'edit' && existing) {
       const cid  = existing.courseId ?? existing.course_id;
@@ -742,20 +802,21 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       ));
     }
     // NEW-FU-587 (Batch 25): name the ACTUAL colliding section + day(s) so the flag reads
-    // as a verifiable fact, not a phantom. The detection itself was already correct (it
-    // mirrors the DB UNIQUE exactly — verified live: it never fires for a genuinely-free
-    // number); the old generic "on one of these days" wording made a real collision look
-    // like a hallucination because it never said WHICH day was taken.
-    const clashes = pool.filter(s =>
-      (s.courseId ?? s.course_id) === form.courseId &&
-      padSectionNumber(s.sectionNumber ?? s.section_number) === padded &&
-      (s.gender ?? 'M') === gender &&
-      days.includes(s.day)
-    );
+  // as a verifiable fact, not a phantom. The detection itself was already correct (it
+  // mirrors the DB UNIQUE exactly — verified live: it never fires for a genuinely-free
+  // number); the old generic "on one of these days" wording made a real collision look
+  // like a hallucination because it never said WHICH day was taken.
+  const clashes = pool.filter(s =>
+    (s.courseId ?? s.course_id) === form.courseId &&
+    padSectionNumber(s.sectionNumber ?? s.section_number) === padded &&
+    (s.gender ?? 'M') === gender &&
+      days.includes(s.day ?? null)
+  );
     if (!clashes.length) return null;
     const label = `${gender === 'F' ? 'F-' : ''}${padded}`;
-    const clashDays = [...new Set(clashes.map(s => s.day))];
-    return `§${label} already exists for this course on ${clashDays.join(' & ')}. Pick a different number.`;
+    const clashDays = [...new Set(clashes.map(s => s.day).filter(Boolean))];
+    const where = clashDays.length ? ` on ${clashDays.join(' & ')}` : '';
+    return `§${label} already exists for this course${where}. Pick a different number.`;
   })();
   // NEW-FU-482 (Phase 116): a finalized (or archived) term is read-only. The add/edit entry
   // points are disabled up front; this is the Save-level backstop with a plain message.
@@ -769,11 +830,15 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // add-only) — editing a section's time to e.g. 11:30 PM used to slip past every guard
   // and surface a confusing "duration got 29" from the clamped end. form.courseId /
   // sectionType are populated in edit mode, so the same rules apply cleanly there.
-  const durLimits = DURATION_LIMITS_BY_TYPE[form.sectionType];
+  const durLimits = DURATION_LIMITS_BY_TYPE[effectiveFormSectionType] ?? DURATION_LIMITS_BY_TYPE.Lec;
   const durNum    = parseInt(form.duration, 10);
-  const durationError = (form.courseId && !courseIsExternal && form.duration !== '' &&
-    (Number.isNaN(durNum) || durNum < durLimits.min || durNum > durLimits.max))
-    ? `Duration must be ${durLimits.min}–${durLimits.max} minutes for a ${form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} (got ${Number.isNaN(durNum) ? '—' : durNum}).`
+  const projectDurationInvalid = effectiveFormSectionType === 'Prj'
+    && !DURATION_DEFAULTS_BY_TYPE.Prj.includes(durNum);
+  const durationError = (form.courseId && sectionHasMeetingTime && form.duration !== '' &&
+    (Number.isNaN(durNum) || durNum < durLimits.min || durNum > durLimits.max || projectDurationInvalid))
+    ? (effectiveFormSectionType === 'Prj'
+      ? `Project duration must be ${DURATION_DEFAULTS_BY_TYPE.Prj.join(', ')} minutes.`
+      : `Duration must be ${durLimits.min}–${durLimits.max} minutes for a ${sectionTypeName(effectiveFormSectionType)} (got ${Number.isNaN(durNum) ? '—' : durNum}).`)
     : null;
   // NEW-FU-495 (Phase 120): R-06 window. UG 07:00–17:10, GR 17:20–22:00.
   // Capstone is venue-exempt but NOT time-exempt → bound to the UG window
@@ -783,14 +848,15 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // (Tue 17:20–20:00) — the one capstone exempt from the R-06 window (timeWindow
   // null → no banner / no Save-block). Mirrors backend R06_TIME_EXEMPT_COURSES.
   const courseIsR06Exempt = selectedCourse?.course_code === 'SWE 412';
-  const timeWindow = (courseIsExternal || courseIsR06Exempt)
+  // NEW-FU-688: the conflict-exempt set (info-only + Project) is fully window-exempt — a Project never
+  // raises a conflict, so a timed Project is informational placement, not a window-gated class.
+  const timeWindow = (courseIsInfoOnly || courseIsR06Exempt || courseIsCapstone)
     ? null
-    : (selectedCourse?.category === 'GR' && !courseIsCapstone) ? TIME_WINDOWS.GR : TIME_WINDOWS.UG;
-  const winLabel = courseIsCapstone ? 'Capstone'
-    : (selectedCourse?.category === 'GR' ? 'Graduate' : 'Undergraduate');
+    : (selectedCourse?.category === 'GR') ? TIME_WINDOWS.GR : TIME_WINDOWS.UG;
+  const winLabel = (selectedCourse?.category === 'GR') ? 'Graduate' : 'Undergraduate';
   const startMinNow = toMinutes(form.startTime);
   const endMinNow   = startMinNow + (Number.isNaN(durNum) ? 0 : durNum);
-  const timeError = (form.courseId && !courseIsExternal && timeWindow && form.startTime &&
+  const timeError = (form.courseId && sectionHasMeetingTime && timeWindow && form.startTime &&
     (startMinNow < timeWindow.start || endMinNow > timeWindow.end))
     ? `${winLabel} sections must run within ${fromMinutes(timeWindow.start)}–${fromMinutes(timeWindow.end)} (this is ${form.startTime}–${computeEnd()}).`
     : null;
@@ -803,18 +869,27 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // exempt — labs default to once-weekly per spec.
   const singleDayBlocked = !!(
     selectedCourse &&
-    form.sectionType === 'Lec' &&
+    sectionHasMeetingTime &&
+    effectiveFormSectionType === 'Lec' &&
     Number(selectedCourse.credits) >= 3 &&
-    !courseIsExternal
+    !courseIsInfoOnly
   );
 
   useEffect(() => {
-    // When the user picks a capstone course, blank out venueId so a
-    // previously-typed venue doesn't sneak through on submit.
-    if (courseIsCapstone && form.venueId) {
+    // Information-only rows never carry a venue. Untimed projects also cannot carry
+    // a venue; when the meeting is removed, the venue is removed with it.
+    if ((courseIsInfoOnly || (courseIsProject && !sectionHasMeetingTime)) && form.venueId) {
       setForm(f => ({ ...f, venueId: '' }));
     }
-  }, [courseIsCapstone, form.venueId]);
+  }, [courseIsInfoOnly, courseIsProject, sectionHasMeetingTime, form.venueId]);
+
+  useEffect(() => {
+    if (mode === 'edit' && courseIsInfoOnly && tab === 'time') setTab('info');
+  }, [mode, courseIsInfoOnly, tab]);
+
+  useEffect(() => {
+    if (courseIsInfoOnly && projectHasTime) setProjectHasTime(false);
+  }, [courseIsInfoOnly, projectHasTime]);
 
   // NEW-FU-622 (audit #5): a capstone meets as a single PROJECT block, not a lecture.
   // The form's default sectionType is 'Lec', but the capstone branch below offers ONLY a
@@ -825,14 +900,12 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // for a project. On selecting a capstone course in ADD mode we snap the section to 'Prj'
   // (Project): pattern-flexible (any single day, 50–180 min), venue-exempt, and the correct
   // activity type. The Lec option is dropped from the capstone type picker below, so the
-  // user stays on Prj/Ths. Edit mode keeps the section's stored type untouched.
+  // user stays on Prj. Edit mode keeps the section's stored type untouched.
   useEffect(() => {
     if (mode !== 'add') return;
-    if (courseIsCapstone && !['Prj', 'Ths'].includes(form.sectionType)) {
+    if (courseIsCapstone && form.sectionType !== 'Prj') {
       setForm(f => {
         const next = { ...f, sectionType: 'Prj', dayMode: 'single' };
-        // 50 is within the Prj 50–180 bound but isn't one of the Project presets, so snap
-        // onto a preset (75/100/160) — otherwise no duration pill would render active.
         if (!DURATION_DEFAULTS_BY_TYPE.Prj.includes(parseInt(f.duration, 10))) {
           next.duration = String(DURATION_DEFAULTS_BY_TYPE.Prj[0]);
         }
@@ -841,6 +914,17 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       });
     }
   }, [courseIsCapstone, form.sectionType, mode]);
+
+  useEffect(() => {
+    if (mode !== 'add') return;
+    if (courseIsInfoOnly && form.sectionType !== 'Lec') {
+      setForm(f => ({ ...f, sectionType: 'Lec', dayMode: 'single' }));
+    } else if (courseIsSeminar && form.sectionType !== 'Sem') {
+      setForm(f => ({ ...f, sectionType: 'Sem', dayMode: 'single', duration: '75' }));
+    } else if (!courseIsCapstone && !courseIsInfoOnly && !courseIsSeminar && ['Prj', 'Ths', 'Sem'].includes(form.sectionType)) {
+      setForm(f => ({ ...f, sectionType: 'Lec', dayMode: initialDayMode }));
+    }
+  }, [mode, courseIsCapstone, courseIsInfoOnly, courseIsSeminar, form.sectionType, initialDayMode]);
 
   // NEW-FU-275 (Phase 52 #6): auto-flip dayMode off 'single' when the user picks a course
   // that makes a single-day pattern infeasible (3+ credit Lec).
@@ -877,7 +961,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     // banner reflects what the user is editing — replacing the stale, post-save
     // backend snapshot the edit banner used to show.
     if (!form.courseId) return null;
-    if (courseIsExternal) return null;
+    if (!sectionHasMeetingTime || courseIsProject) return null;
     // NEW-FU-510 (Batch 1): in edit mode, exclude THIS section's own group
     // (every day-row sharing the section's course + number) so it never reports
     // a conflict against itself. Add mode has no own group → checks all sections.
@@ -928,8 +1012,8 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
         });
       }
     }
-    // R-05: venue overlap (skip for capstone — venue rules don't apply)
-    if (form.venueId && !courseIsCapstone) {
+    // R-05: venue overlap.
+    if (form.venueId && showVenueField) {
       const conflictsVen = pool.filter(s =>
         s.venueId === form.venueId &&
         days.includes(s.day) &&
@@ -948,17 +1032,17 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     // R-11/R-12: type mismatch
     const selVenue = venues.find(v => v.id === form.venueId);
     if (selVenue && selVenue.type !== 'Multipurpose') {
-      if (form.sectionType === 'Lab' && selVenue.type !== 'Laboratory') {
+      if (effectiveFormSectionType === 'Lab' && selVenue.type !== 'Laboratory') {
         findings.push({ rule: 'R-11', severity: 'Soft',
           msg: `Lab section in non-Lab venue (${selVenue.type})` });
       }
-      if (form.sectionType === 'Lec' && selVenue.type === 'Laboratory') {
+      if (['Lec', 'Sem'].includes(effectiveFormSectionType) && selVenue.type === 'Laboratory') {
         findings.push({ rule: 'R-12', severity: 'Soft',
-          msg: 'Lecture section in Laboratory venue' });
+          msg: `${sectionTypeName(effectiveFormSectionType)} section in Laboratory venue` });
       }
     }
     return findings;
-  }, [mode, form, sections, venues, courseIsExternal, courseIsCapstone, existing]);
+  }, [mode, form, sections, venues, sectionHasMeetingTime, courseIsProject, showVenueField, existing, effectiveFormSectionType]);
 
   // NEW-FU-521 (Batch 7 Issue 1): a HARD conflict in the live preview must BLOCK
   // Save — the modal used to only warn ("Submitting would create 2 conflicts")
@@ -972,7 +1056,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // reports whether ANY conflict-free start exists for the pattern → steer vs. override.
   const [serverPreview, setServerPreview] = useState({ conflicts: [], conflictFreeStartExists: true, conflictFreeStart: null, conflictFreeEnd: null, loaded: false, stale: false });
   useEffect(() => {
-    if (!schedule?.id || !form.courseId || courseIsExternal) {
+    if (!schedule?.id || !form.courseId || !sectionHasMeetingTime || courseIsProject) {
       setServerPreview({ conflicts: [], conflictFreeStartExists: true, conflictFreeStart: null, conflictFreeEnd: null, loaded: true, stale: false });
       return;
     }
@@ -996,7 +1080,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       instructorId: form.instructorId || null,
       venueId: form.venueId || null,
       sectionNumber: form.sectionNumber || '01',
-      sectionType: form.sectionType || 'Lec',
+      sectionType: effectiveFormSectionType,
       gender: form.gender || 'M',   // NEW-FU-555 (Batch 18): real gender → no false different-gender clashes
       days, startTime: form.startTime, endTime: computeEnd(),
     };
@@ -1007,7 +1091,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
     }, 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schedule?.id, form.courseId, form.instructorId, form.venueId, form.sectionNumber, form.sectionType, form.dayMode, form.day, form.startTime, form.duration, courseIsExternal, durationError, timeError, previewNonce]);
+  }, [schedule?.id, form.courseId, form.instructorId, form.venueId, form.sectionNumber, effectiveFormSectionType, form.dayMode, form.day, form.startTime, form.duration, sectionHasMeetingTime, courseIsProject, durationError, timeError, previewNonce]);
 
   // Authoritative conflicts: the server's full-engine result once loaded, else the instant
   // client preview. Drives the conflict banner AND the Save block.
@@ -1041,7 +1125,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // edit DETAILS tab, where retiming isn't the relevant fix.
   const quickFixUI = mode === 'add' || quickFixTab;
   const conflictBlocksSave =
-    (serverPreview.stale && !!form.courseId && !courseIsExternal)
+    (serverPreview.stale && !!form.courseId && sectionHasMeetingTime && !courseIsProject)
     || (hasAnyConflict && (quickFixUI ? (cleanFixActionable || !overrideConflict) : !overrideConflict));
 
   // NEW-FU-541 (Batch 13 Issue 2): constrained, move-only Quick Fix handlers.
@@ -1049,7 +1133,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // plan that reschedules OTHER groups (never drops sections, never assigns dummies),
   // and — only on explicit confirmation — applies just those time moves.
   function buildChange() {
-    if (!schedule?.id || !form.courseId || courseIsExternal) return null;
+    if (!schedule?.id || !form.courseId || !sectionHasMeetingTime || courseIsProject) return null;
     const tmpl = DAY_TEMPLATES[form.dayMode];
     const days = tmpl?.days ? tmpl.days : (form.day ? [form.day] : []);
     if (!days.length || !form.startTime || durationError || timeError) return null;
@@ -1059,7 +1143,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       instructorId: form.instructorId || null,
       venueId: form.venueId || null,
       sectionNumber: form.sectionNumber || '01',
-      sectionType: form.sectionType || 'Lec',
+      sectionType: effectiveFormSectionType,
       gender: form.gender || 'M',   // NEW-FU-555 (Batch 18)
       days, startTime: form.startTime, endTime: computeEnd(),
     };
@@ -1140,14 +1224,14 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // As soon as the full-engine preview reports a conflict, request the plan once — so
   // the panel only ever offers a fix that truly exists (no bait-and-block dead end).
   useEffect(() => {
-    if (!schedule?.id || courseIsExternal) return;
+    if (!schedule?.id || !sectionHasMeetingTime || courseIsProject) return;
     if (!quickFixUI) return;   // NEW-FU-606 (Batch 29): plan in the ADD form + edit Time tab (not edit Details)
     if (!serverPreview.loaded || serverPreview.stale) return;
     if (!hasAnyConflict) return;
     if (autoFix.status !== 'idle') return;
     requestAutoFix();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schedule?.id, courseIsExternal, quickFixUI, serverPreview.loaded, serverPreview.stale, hasAnyConflict, autoFix.status]);
+  }, [schedule?.id, sectionHasMeetingTime, courseIsProject, quickFixUI, serverPreview.loaded, serverPreview.stale, hasAnyConflict, autoFix.status]);
 
   // Shared, self-contained conflict-resolution affordance for both conflict boxes.
   // Drives ALL of: the proactive "checking…" state, the move-only Quick-Fix offer (only
@@ -1240,9 +1324,14 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // offers them as pills, and the effect below keeps the chosen pattern legal when
   // the duration changes. Lec only (Lab/Prj/Ths keep their single-meeting rule).
   const legalPatternsNow = React.useMemo(() => {
-    if (!selectedCourse || form.sectionType !== 'Lec') return [];
-    return legalDayTemplatesForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab, duration: form.duration });
-  }, [selectedCourse, courseHasLab, form.duration, form.sectionType]);
+    if (!selectedCourse || !['Lec', 'Sem'].includes(effectiveFormSectionType)) return [];
+    return legalDayTemplatesForCourse({
+      credits: selectedCourse.credits,
+      hasLab: courseHasLab,
+      duration: form.duration,
+      isSeminar: courseIsSeminar,
+    });
+  }, [selectedCourse, courseHasLab, form.duration, effectiveFormSectionType, courseIsSeminar]);
 
   // EDIT mode: when the user changes the duration so the current pattern is no longer
   // legal (e.g. 50→75 leaves a 3-day Sun/Tue/Thu group that must become 2-day),
@@ -1251,7 +1340,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // effects above are gated to add mode, so this never double-fires.
   const durAutoRef = React.useRef(null);
   useEffect(() => {
-    if (mode !== 'edit' || form.sectionType !== 'Lec') { durAutoRef.current = form.duration; return; }
+    if (mode !== 'edit' || !['Lec', 'Sem'].includes(effectiveFormSectionType)) { durAutoRef.current = form.duration; return; }
     // NEW-FU-530 (Batch 10 Issue 1): react ONLY to a real duration change — never on
     // open. The previous version snapped an "illegal" section to a different pattern on
     // mount, which made the selector show the WRONG (auto-changed) pattern instead of
@@ -1294,6 +1383,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
   // is excluded from its own busy set so it never blocks itself.
   const busyResources = React.useMemo(() => {
     const empty = { instructors: new Set(), venues: new Set() };
+    if (!sectionHasMeetingTime || courseIsProject) return empty;
     if (!form.startTime || !form.duration) return empty;
     const days = (() => {
       const tmpl = DAY_TEMPLATES[form.dayMode];
@@ -1325,7 +1415,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
       }
     }
     return { instructors, venues };
-  }, [mode, form, sections, existing]);
+  }, [mode, form, sections, existing, sectionHasMeetingTime, courseIsProject]);
 
   // NEW-FU-280/281 (Phase 56): replaced the two window.prompt-based
   // quick-creators with launchers for AddInstructorModal / AddVenueModal.
@@ -1395,9 +1485,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
 
         {mode==='edit' && (
           <div className="sm-tabs" role="tablist">
-            <button role="tab" aria-selected={tab==='time'} className={tab==='time'?'active':''} onClick={()=>setTab('time')}>
-              <Ico name="clock" /> Time &amp; Day
-            </button>
+            {!courseIsInfoOnly && (
+              <button role="tab" aria-selected={tab==='time'} className={tab==='time'?'active':''} onClick={()=>setTab('time')}>
+                <Ico name="clock" /> Time &amp; Day
+              </button>
+            )}
             <button role="tab" aria-selected={tab==='info'} className={tab==='info'?'active':''} onClick={()=>setTab('info')}>
               <Ico name="edit" /> Details
             </button>
@@ -1422,8 +1514,10 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                       return (
                         <optgroup key={level} label={level}>
                           {cs.map(c=>{
-                            const tag = c.is_external ? '  · external'
-                                      : c.is_capstone ? '  · capstone'
+                            const tag = c.is_external ? '  · External'
+                                      : c.is_capstone ? '  · Project'
+                                      : c.is_thesis   ? '  · Thesis'      // NEW-FU-687
+                                      : c.is_research ? '  · Research'    // NEW-FU-688
                                       : '';
                             return <option key={c.id} value={c.id}>{c.course_code} — {c.name}{tag}</option>;
                           })}
@@ -1435,15 +1529,19 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   {/* NEW-FU-604 (Batch 29 item 1): show the selected course's credits (read-only) —
                       the schedule-pattern + duration options below are derived from it. */}
                   {selectedCourse?.credits != null && (
-                    <p className="sm-hint"><Ico name="info" /> {selectedCourse.credits} credit{Number(selectedCourse.credits)===1?'':'s'} — sets the legal meeting pattern &amp; duration below.</p>
+                    <p className="sm-hint"><Ico name="info" /> {selectedCourse.credits} credit{Number(selectedCourse.credits)===1?'':'s'}{courseIsInfoOnly ? ' — information-only activity.' : ' — sets the legal meeting pattern &amp; duration below.'}</p>
                   )}
                   {courseIsCapstone && (
-                    <p className="sm-hint"><Ico name="info" /> Capstone course — the venue field is hidden; it meets online or anywhere on campus.</p>
+                    <p className="sm-hint"><Ico name="info" /> Project course — its venue and time are optional, and it never raises a conflict.</p>
                   )}
-                  {courseIsExternal && (
+                  {courseIsInfoOnly && (
                     <div className="sm-info-box sm-info-accent">
                       <Ico name="info" />
-                      <span><strong>{selectedCourse.course_code}</strong> is an off-campus internship — no instructor, venue, schedule, or section row is needed. It already appears in the term sidebar.</span>
+                      <span><strong>{selectedCourse.course_code}</strong> is {
+                        courseIsExternal ? 'off-campus training (Summer Training in summer terms, Internship otherwise)'
+                        : courseIsThesis ? 'a thesis'
+                        : 'a research course'
+                      } activity. Assign an instructor and section number.</span>
                     </div>
                   )}
                 </div>
@@ -1451,19 +1549,21 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                 {/* NEW-FU-277 (Phase 53 #2): Gender — KFUPM keeps M and F
                     sections as disjoint pools; the label rebuilds "F11" from
                     gender='F' + number='11'. */}
-                <div className="sm-field">
-                  <label>Gender</label>
-                  <div className="sm-pill-group">
-                    {[['M','Male'], ['F','Female']].map(([g, lbl]) => (
-                      <button key={g} type="button"
-                        className={`sm-pill ${form.gender===g?'active':''}`}
-                        aria-pressed={form.gender===g}
-                        onClick={()=>setForm(f=>({...f, gender: g}))}>
-                        {lbl}
-                      </button>
-                    ))}
+                {!courseIsInfoOnly && (
+                  <div className="sm-field">
+                    <label>Gender</label>
+                    <div className="sm-pill-group">
+                      {[['M','Male'], ['F','Female']].map(([g, lbl]) => (
+                        <button key={g} type="button"
+                          className={`sm-pill ${form.gender===g?'active':''}`}
+                          aria-pressed={form.gender===g}
+                          onClick={()=>setForm(f=>({...f, gender: g}))}>
+                          {lbl}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {/* NEW-FU-411 (Phase 102 item 4): gender + type aware. Female
                     sections show the F- prefix; the digits are range-scoped to the
@@ -1473,7 +1573,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                   <div className={`sm-secnum-wrap${(sectionNumError || sectionDupError) ? ' sm-secnum-wrap-invalid' : ''}`}>
                     {form.gender === 'F' && <span className="sm-secnum-prefix">F-</span>}
                     <input id="sm-secnum" className="sm-secnum-digits"
-                      placeholder={form.sectionType === 'Lab' ? '50' : '01'}
+                      placeholder={effectiveFormSectionType === 'Lab' ? '50' : '01'}
                       value={form.sectionNumber} inputMode="numeric" maxLength={2}
                       aria-invalid={!!sectionNumError || !!sectionDupError}
                       aria-describedby={(sectionNumError || sectionDupError) ? 'sm-secnum-err' : 'sm-secnum-hint'}
@@ -1488,34 +1588,20 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     : sectionDupError
                     ? <p className="sm-inline-error" id="sm-secnum-err" role="alert"><Ico name="alert" /> <span>{sectionDupError}</span></p>
                     : <p className="sm-hint" id="sm-secnum-hint">
-                        {form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} range <strong>{form.sectionType === 'Lab' ? (form.gender==='F'?'F-50–F-99':'50–99') : (form.gender==='F'?'F-01–F-49':'01–49')}</strong>
+                        {sectionTypeDisplay} range <strong>{effectiveFormSectionType === 'Lab' ? (form.gender==='F'?'F-50–F-99':'50–99') : (form.gender==='F'?'F-01–F-49':'01–49')}</strong>
                         {' · shows as '}
                         <strong>{sectionLabel({ gender: form.gender, sectionNumber: form.sectionNumber || '__' })}</strong>
                       </p>}
                 </div>
 
-                {/* NEW-FU-104 / NEW-FU-498 (Phase 122): section-type selector.
-                    Lec always; Lab for has_lab courses; Prj (Project) and Ths
-                    (Thesis) for capstone courses. Shown only when >1 type applies. */}
-                {(() => {
+                {/* Section type is derived from the course flag. The only selectable case is a
+                    course that explicitly has both lecture and lab sections. */}
+                {courseHasLab && !courseIsInfoOnly && !courseIsProject && !courseIsSeminar && (() => {
                   const TYPE_META = {
                     Lec: { icon: 'book',   label: 'Lecture' },
                     Lab: { icon: 'flask',  label: 'Lab' },
-                    Prj: { icon: 'layers', label: 'Project' },
-                    Ths: { icon: 'edit',   label: 'Thesis' },
                   };
-                  // NEW-FU-622 (audit #5): a capstone is a Project/Thesis activity, never a
-                  // plain lecture — drop 'Lec' (and 'Lab') so the single-day capstone branch
-                  // can't submit a pattern-illegal single-day Lec. Never hide the CURRENT
-                  // type, though, so a legacy capstone section stored as 'Lec' still shows
-                  // its active pill in edit mode.
-                  const opts = [
-                    ...(courseIsCapstone ? [] : ['Lec']),
-                    ...(courseHasLab ? ['Lab'] : []),
-                    ...(courseIsCapstone ? ['Prj', 'Ths'] : []),
-                  ];
-                  if (!opts.includes(form.sectionType)) opts.unshift(form.sectionType);
-                  if (opts.length < 2) return null;
+                  const opts = ['Lec', 'Lab'];
                   return (
                     <div className="sm-field">
                       <label>Section type</label>
@@ -1529,12 +1615,27 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                           </button>
                         ))}
                       </div>
-                      <p className="sm-hint">{courseIsCapstone
-                        ? 'Projects/thesis meet in long blocks and can use any venue.'
-                        : 'Labs go in Laboratory venues; lectures in Lecture Halls.'}</p>
+                      <p className="sm-hint">Choose whether to add a lecture section or a lab section for this course.</p>
                     </div>
                   );
                 })()}
+
+                {courseIsProject && (
+                  <label className="sm-override-check">
+                    <input
+                      type="checkbox"
+                      checked={projectHasTime}
+                      onChange={e => {
+                        const checked = e.target.checked;
+                        setProjectHasTime(checked);
+                        setForm(f => checked
+                          ? { ...f, sectionType: 'Prj', dayMode: 'single' }
+                          : { ...f, sectionType: 'Prj', dayMode: 'single', venueId: '' });
+                      }}
+                    />
+                    <span><strong>Meeting time</strong> {projectHasTime ? 'Project appears on the grid for one day.' : 'Project stays in the side panel without day, time, duration, or venue.'}</span>
+                  </label>
+                )}
 
                 {/* NEW-FU-277 (Phase 53 #1): full day-template pill grid.
                     Walks every key in DAY_TEMPLATES and renders one button
@@ -1545,7 +1646,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     (is_capstone) collapse to a single "Capstone — flexible
                     meeting time" hint and disable the pattern picker
                     entirely (they meet wherever convenient). */}
-                {!courseIsCapstone ? (
+                {sectionHasMeetingTime && !courseIsProject ? (
                   <div className="sm-field">
                     <label>Schedule pattern</label>
                     <div className="sm-daymode-group">
@@ -1560,17 +1661,18 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                           edit panel, the validator, and the course-change reset. */}
                       {Object.entries(DAY_TEMPLATES)
                         .filter(([key]) => !selectedCourse
-                          || creditPatterns({ credits: selectedCourse.credits, hasLab: courseHasLab }).includes(key))
+                          || creditPatterns({ credits: selectedCourse.credits, hasLab: courseHasLab, isSeminar: courseIsSeminar }).includes(key))
                         .map(([key, tmpl]) => {
                         const legal = selectedCourse
                           ? legalDayTemplatesForCourse({
                               credits: selectedCourse.credits,
                               hasLab: courseHasLab,
                               duration: parseInt(form.duration, 10),
+                              isSeminar: courseIsSeminar,
                             }).includes(key)
                           : true; // no course selected yet — leave all enabled
                         const okDur = selectedCourse && [50, 75].find(d =>
-                          legalDayTemplatesForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab, duration: d }).includes(key));
+                          legalDayTemplatesForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab, duration: d, isSeminar: courseIsSeminar }).includes(key));
                         const disabled = !legal || (key === 'single' && singleDayBlocked);
                         const tip = !legal
                           ? `${tmpl.label} needs ${okDur ?? '50'} min for a ${selectedCourse?.credits ?? '?'}-credit course (you have ${form.duration} min)`
@@ -1595,11 +1697,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                       </select>
                     )}
                   </div>
-                ) : (
+                ) : sectionHasMeetingTime && courseIsProject ? (
                   <>
                     <div className="sm-info-box sm-info-accent">
                       <Ico name="info" />
-                      <span><strong>Capstone</strong> — a Project/Thesis block that meets once a week (50–180 min). Pick the day, start time and duration; the venue is exempt but an instructor is still required.</span>
+                      <span><strong>Project</strong> — one optional weekly meeting. Pick one day, start time and duration; venue may stay empty.</span>
                     </div>
                     {/* NEW-FU-605 (Batch 29 item 1): a 0/1-credit capstone meets once a week on a
                         single day — give it the same Day selector single-day lectures have. */}
@@ -1611,8 +1713,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                       </select>
                     </div>
                   </>
-                )}
+                ) : null}
 
+                {sectionHasMeetingTime && (
                 <div className="sm-row">
                   <div className="sm-field">
                     <label htmlFor="sm-start">Start time</label>
@@ -1632,9 +1735,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                       {/* NEW-FU-603 (Batch 29 item 1): for a Lec, SHOW ONLY the durations legal for
                           the course's credits — 75 min simply doesn't exist for a 0/1/2-credit
                           course (hidden, not shown-disabled). Lab keeps its full 50/75/160 set. */}
-                      {DURATION_DEFAULTS_BY_TYPE[form.sectionType]
-                        .filter(d => form.sectionType !== 'Lec' || !selectedCourse
-                          || legalDurationsForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab }).includes(d))
+                      {DURATION_DEFAULTS_BY_TYPE[effectiveFormSectionType]
+                        .filter(d => effectiveFormSectionType !== 'Lec' || !selectedCourse
+                          || legalDurationsForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab, isSeminar: courseIsSeminar }).includes(d))
                         .map(d => (
                         <button key={d} type="button"
                           className={`sm-pill sm-pill-sm ${form.duration===String(d)?'active':''}`}
@@ -1656,6 +1759,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     <div className="sm-readonly">{fmtTimeForDisplay(computeEnd())}</div>
                   </div>
                 </div>
+                )}
               </>
             )}
 
@@ -1699,11 +1803,10 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
               {instructorMissing && <p className="sm-inline-error" role="alert"><span>An instructor is required for every section.</span></p>}
             </div>
 
-            {/* NEW-FU-275 (Phase 52 #6): venue hidden for capstone courses. */}
-            {!courseIsCapstone && (
+            {showVenueField && (
               <div className="sm-field">
                 <label htmlFor="sm-venue" className="sm-label-row">
-                  <span>Venue <span className="sm-optional">(required)</span></span>
+                  <span>Venue <span className="sm-optional">({venueRequired ? 'required' : 'optional'})</span></span>
                   <button type="button" className="sm-inline-add" onClick={quickCreateVenue}>
                     <Ico name="plus" /> New
                   </button>
@@ -1711,7 +1814,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                 {/* NEW-FU-277 (Phase 53 #3): grouped by type; busy venues flagged. */}
                 <select id="sm-venue" value={form.venueId} onChange={e=>setForm(f=>({...f,venueId:e.target.value}))}
                   aria-invalid={venueTypeMismatch}>
-                  <option value="">— No venue —</option>
+                  <option value="" disabled={venueRequired}>
+                    {courseIsProject ? '— No venue —' : '— Select venue —'}
+                  </option>
                   {/* NEW-FU-510 (Batch 1): show only venue types valid for the
                       section type (Lec → LectureHall/Multipurpose; Lab →
                       Laboratory/Multipurpose). The currently-selected venue is
@@ -1723,7 +1828,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                       (allowedVenueTypes.includes(typeGroup) || v.id === form.venueId));
                     if (!vs.length) return null;
                     return (
-                      <optgroup key={typeGroup} label={typeGroup}>
+                      <optgroup key={typeGroup} label={VENUE_TYPE_LABEL[typeGroup] ?? typeGroup}>
                         {vs.map(v => {
                           // NEW-FU-520 (Batch 6 Issue 3): disable busy venues (kept
                           // visible + flagged); the selected venue stays selectable.
@@ -1738,11 +1843,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     );
                   })}
                 </select>
-                {venueMissing && <p className="sm-inline-error" role="alert"><span>A venue is required for every section.</span></p>}
+                {venueMissing && <p className="sm-inline-error" role="alert"><span>A venue is required for this section.</span></p>}
                 {/* NEW-FU-510 (Batch 1): block-and-explain a venue-type mismatch. */}
                 {venueTypeMismatch && (
                   <p className="sm-inline-error" role="alert"><Ico name="alert" /> <span>
-                    {form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} sections need a {form.sectionType === 'Lab' ? 'Laboratory' : 'Lecture Hall'} (or Multipurpose) venue — “{selectedVenue?.name}” is a {selectedVenue?.type}. Pick a valid venue to save.
+                    {sectionTypeName(effectiveFormSectionType)} sections need a {effectiveFormSectionType === 'Lab' ? 'Laboratory' : 'Lecture Hall'} (or Multipurpose) venue — “{selectedVenue?.name}” is a {VENUE_TYPE_LABEL[selectedVenue?.type] ?? selectedVenue?.type}. Pick a valid venue to save.
                   </span></p>
                 )}
               </div>
@@ -1792,7 +1897,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     Female sections carry the F- prefix; the digits are range-scoped
                     to the section's (now immutable) type — Lec 01–49, Lab 50–99. */}
                 <div className="sm-field">
-                  <label htmlFor="sm-secnum-e">Section number <span className="sm-optional">(updates all days in group)</span></label>
+                  <label htmlFor="sm-secnum-e">Section number <span className="sm-optional">{sectionHasMeetingTime && existingGroup !== 'single' ? '(updates all days in group)' : '(activity row)'}</span></label>
                   <div className={`sm-secnum-wrap${(sectionNumError || sectionDupError) ? ' sm-secnum-wrap-invalid' : ''}`}>
                     {form.gender === 'F' && <span className="sm-secnum-prefix">F-</span>}
                     <input id="sm-secnum-e" className="sm-secnum-digits" value={form.sectionNumber}
@@ -1810,7 +1915,7 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     : sectionDupError
                     ? <p className="sm-inline-error" id="sm-secnum-e-err" role="alert"><Ico name="alert" /> <span>{sectionDupError}</span></p>
                     : <p className="sm-hint" id="sm-secnum-e-hint">
-                        {form.sectionType === 'Lab' ? 'Lab' : 'Lecture'} range <strong>{form.sectionType === 'Lab' ? (form.gender==='F'?'F-50–F-99':'50–99') : (form.gender==='F'?'F-01–F-49':'01–49')}</strong>
+                        {sectionTypeDisplay} range <strong>{effectiveFormSectionType === 'Lab' ? (form.gender==='F'?'F-50–F-99':'50–99') : (form.gender==='F'?'F-01–F-49':'01–49')}</strong>
                         {' · shows as '}
                         <strong>{sectionLabel({ gender: form.gender, sectionNumber: form.sectionNumber || '__' })}</strong>
                       </p>}
@@ -1821,12 +1926,12 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                     a read-only display; change the type only by re-creating. */}
                 {/* NEW-FU-498 (Phase 122): also display Prj/Ths for capstone sections
                     (still read-only — type is fixed at creation per FU-410). */}
-                {(courseHasLab || courseIsCapstone) && (
+                {!courseIsInfoOnly && (courseHasLab || courseIsCapstone || courseIsSeminar || effectiveFormSectionType !== 'Lec') && (
                   <div className="sm-field">
                     <label>Section type</label>
                     <div className="sm-readonly sm-type-readonly">
-                      <Ico name={form.sectionType==='Lab'?'flask':form.sectionType==='Prj'?'layers':form.sectionType==='Ths'?'edit':'book'} />
-                      <span>{form.sectionType==='Lab'?'Lab':form.sectionType==='Prj'?'Project':form.sectionType==='Ths'?'Thesis':'Lecture'}</span>
+                      <Ico name={effectiveFormSectionType==='Lab'?'flask':effectiveFormSectionType==='Prj'?'layers':effectiveFormSectionType==='Ths'?'edit':effectiveFormSectionType==='Sem'?'users':'book'} />
+                      <span>{sectionTypeDisplay}</span>
                       <span className="sm-optional sm-type-fixed">· fixed for this section</span>
                     </div>
                   </div>
@@ -1848,12 +1953,12 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                 </button>
               )}
               <button type="button" className="sm-btn-cancel" onClick={onClose}>Cancel</button>
-              {/* External courses (SWE 399) need no section row — submit just closes. */}
+              {/* Information-only activities save a side-panel row, not a grid meeting. */}
               <button type="submit" className="sm-btn-save"
                 disabled={busy || scheduleLocked || courseMissing || sectionNumberMissing || !!sectionNumError || !!sectionDupError || !!durationError || !!timeError || instructorMissing || venueMissing || venueTypeMismatch || conflictBlocksSave}
                 title={scheduleLocked ? lockedMsg : courseMissing ? 'Choose a course first' : sectionNumberMissing ? 'Enter a section number first' : durationError || timeError || (instructorMissing ? 'Choose an instructor first' : venueMissing ? 'Choose a venue first' : venueTypeMismatch ? 'Pick a venue that matches the section type first' : (sectionNumError || sectionDupError) ? 'Fix the section number first' : conflictBlocksSave ? (cleanFixActionable ? 'Resolve the conflict with the suggested fix above' : 'Schedule is tight — tick the box to save with a conflict') : undefined)}>
                 {busy ? 'Saving…' : mode==='add'
-                  ? (courseIsExternal ? 'OK, course noted' : 'Add section')
+                  ? (courseIsInfoOnly ? 'Save activity' : 'Add section')
                   : 'Save'}
               </button>
             </div>
@@ -1861,16 +1966,36 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
         )}
 
         {/* ── EDIT TIME tab ── */}
-        {mode==='edit' && tab==='time' && (
+        {mode==='edit' && tab==='time' && !courseIsInfoOnly && (
           <form className="sm-form" noValidate onSubmit={handleSubmitTime}>
             {/* NEW-FU-612 (Batch 30 item 5): "all days in this group" only applies to a
                 multi-day group; a single-day section gets a clearer, accurate note. */}
             <div className="sm-info-box sm-info-accent">
               <Ico name="info" />
-              {existingGroup === 'single'
+              {courseIsProject && !projectHasTime
+                ? <span>This project has no meeting time. Saving keeps it in the side panel and clears any venue.</span>
+                : courseIsProject
+                ? <span>Project meetings are optional and use one day only. Venue may stay empty.</span>
+                : existingGroup === 'single'
                 ? <span>This section meets once a week. Pick its day, start time and duration.</span>
                 : <span>Moving the time shifts <strong>all days</strong> in this group to the same start/end time.</span>}
             </div>
+            {courseIsProject && (
+              <label className="sm-override-check">
+                <input
+                  type="checkbox"
+                  checked={projectHasTime}
+                  onChange={e => {
+                    const checked = e.target.checked;
+                    setProjectHasTime(checked);
+                    setForm(f => checked
+                      ? { ...f, sectionType: 'Prj', dayMode: 'single' }
+                      : { ...f, sectionType: 'Prj', dayMode: 'single', venueId: '' });
+                  }}
+                />
+                <span><strong>Meeting time</strong> {projectHasTime ? 'Project appears on the grid for one day.' : 'Project stays in the side panel without day, time, duration, or venue.'}</span>
+              </label>
+            )}
             {/* NEW-FU-601 (Batch 28): the single "Day" dropdown was REMOVED. Moving one day of a
                 group to a different weekday produced an invalid partial pattern (e.g. Mon/Wed →
                 Wed/Thu, which no course uses) and contradicted the "shifts all days" rule. Day
@@ -1882,8 +2007,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                 lecture, or a lab) meets once a week on any Sun–Thu day, and changing that one day
                 can't desync siblings — so the Day selector is shown ONLY here, for single-day
                 sections. Multi-day day changes still go through the Meeting-days pattern below. */}
+            {sectionHasMeetingTime && (
             <div className="sm-row">
-              {existingGroup === 'single' && (
+              {(existingGroup === 'single' || courseIsProject) && (
                 <div className="sm-field">
                   <label htmlFor="sm-day-single">Day</label>
                   <select id="sm-day-single" value={form.day}
@@ -1908,9 +2034,9 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                 <div className="sm-pill-group sm-pill-group-sm">
                   {/* NEW-FU-603 (Batch 29 item 1): Lec shows ONLY the credit-legal durations
                       (75 min hidden for 0/1/2-credit); Lab keeps 50/75/160. Matches the Add panel. */}
-                  {DURATION_DEFAULTS_BY_TYPE[form.sectionType]
-                    .filter(d => form.sectionType !== 'Lec' || !selectedCourse
-                      || legalDurationsForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab }).includes(d))
+                  {DURATION_DEFAULTS_BY_TYPE[effectiveFormSectionType]
+                    .filter(d => effectiveFormSectionType !== 'Lec' || !selectedCourse
+                      || legalDurationsForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab, isSeminar: courseIsSeminar }).includes(d))
                     .map(d => (
                     <button key={d} type="button"
                       className={`sm-pill sm-pill-sm ${form.duration===String(d)?'active':''}`}
@@ -1922,21 +2048,22 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                 </div>
               </div>
             </div>
+            )}
             {/* NEW-FU-531 (Batch 10 Issue 4): the meeting-day pills are DYNAMIC per the
                 course's credits. Show every multi-day pattern that EXISTS for the credits
                 (a 2-credit course never sees a 3-day pattern); DISABLE the ones illegal for
                 the current duration, with a reason tooltip (e.g. 3-credit Sun/Tue/Thu needs
                 50 min). Picking an enabled pill restructures the group in place on Save. */}
-            {selectedCourse && form.sectionType === 'Lec'
-              && creditPatterns({ credits: selectedCourse.credits, hasLab: courseHasLab }).filter(p => p !== 'single').length > 0 && (
+            {sectionHasMeetingTime && selectedCourse && effectiveFormSectionType === 'Lec'
+              && creditPatterns({ credits: selectedCourse.credits, hasLab: courseHasLab, isSeminar: courseIsSeminar }).filter(p => p !== 'single').length > 0 && (
               <div className="sm-field">
                 <label>Meeting days <span className="sm-optional">(set by this course's {selectedCourse.credits} credit{Number(selectedCourse.credits)===1?'':'s'})</span></label>
                 <div className="sm-pill-group sm-pill-group-sm">
-                  {creditPatterns({ credits: selectedCourse.credits, hasLab: courseHasLab })
+                  {creditPatterns({ credits: selectedCourse.credits, hasLab: courseHasLab, isSeminar: courseIsSeminar })
                     .filter(p => p !== 'single')
                     .map(p => {
                       const legal  = legalPatternsNow.includes(p);
-                      const okDur  = [50, 75].find(d => legalDayTemplatesForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab, duration: d }).includes(p));
+                      const okDur  = [50, 75].find(d => legalDayTemplatesForCourse({ credits: selectedCourse.credits, hasLab: courseHasLab, duration: d, isSeminar: courseIsSeminar }).includes(p));
                       const reason = legal ? undefined
                         : `${DAY_TEMPLATES[p]?.label} requires ${okDur} min for a ${selectedCourse.credits}-credit course (you have ${form.duration} min)`;
                       return (
@@ -1951,9 +2078,11 @@ export default function SectionModal({ mode, initial, onClose, showToast }) {
                 </div>
               </div>
             )}
-            <div className="sm-field sm-end-preview">
-              End time: <strong>{fmtTimeForDisplay(computeEnd())}</strong>
-            </div>
+            {sectionHasMeetingTime && (
+              <div className="sm-field sm-end-preview">
+                End time: <strong>{fmtTimeForDisplay(computeEnd())}</strong>
+              </div>
+            )}
             {/* NEW-FU-478 (Phase 115): out-of-window / out-of-range time is flagged inline
                 and blocks Save (the edit tab was previously unguarded). */}
             {(timeError || durationError) && (

@@ -32,11 +32,14 @@ const OP_TYPE_LABEL = {
   'compound':            'Move + Reassign',
   'drop':                'Drop Section',
   // NEW-FU-426 (Phase 105): placeholder-resource ops (parity with Suggest).
-  'add-dummy-instructor':'Add Placeholder Instructor',
-  'add-dummy-venue':     'Add Placeholder Venue',
+  'add-dummy-instructor':'Add Temporary Instructor',
+  'add-dummy-venue':     'Add Temporary Venue',
   // NEW-FU-635 (issue #3): office-hour ops (move is the preferred R-04 OH↔class fix).
   'move-office-hour':    'Move Office Hour',
   'assign-office-hours': 'Add Office Hours',
+  // NEW-FU-682: complete an orphan Has-Laboratory course by ADDING its missing section (the preferred
+  // R-14 fix — better than dropping the orphan or removing the lab requirement).
+  'add-complement-section': 'Complete Course',
 };
 
 const OP_TYPE_COLOR = {
@@ -53,6 +56,8 @@ const OP_TYPE_COLOR = {
   // NEW-FU-635 (issue #3): teal — non-destructive OH adjustments, same family as reassign.
   'move-office-hour':    '#0f766e',
   'assign-office-hours': '#0f766e',
+  // NEW-FU-682: green — purely additive and the best possible outcome (a whole, correct offering).
+  'add-complement-section': '#15803d',
 };
 
 export default function QuickFixModal({ scheduleId, onClose, onApplied, showToast }) {
