@@ -5,10 +5,10 @@
 > Static architecture/rules live in `CLAUDE.md` (= `AGENTS.md`). This file is *only live state*.
 
 ## 🟢 Current status
-- **Active agent:** Claude  <!-- handing back from Codex to Claude for this audit turn -->
-- **Branch:** `codex/seminar-venue-rules` (unchanged; audit made no source edits)
-- **Last updated:** 2026-07-12 by Claude (independent full-stack regression audit — zero regressions found)
-- **Where we are (one line):** Ran an independent, evidence-based audit of Codex's entire 9-session chain (2026-06-28→06-30) — backend, frontend, live DB, live browser (3 terms, all 3 views, negative-path API tests, real export content) — to check whether Codex's own fixes actually hold. **Every claim verified true; zero regressions found; zero source changes made.** The registrar "Activity flag" arc **FU-688 → FU-690 plus all Codex follow-ups** remains **code-complete but largely UNCOMMITTED** on top of `3c5859b`; still awaiting B1.
+- **Active agent:** Claude
+- **Branch:** `codex/seminar-venue-rules`
+- **Last updated:** 2026-07-12 by Claude (B1 approved by owner — feature blob committed)
+- **Where we are (one line):** Ran an independent full-stack audit of Codex's 9-session chain (zero regressions found, see the audit entry below), then the owner **explicitly approved B1**. The entire FU-680→690 arc + all Codex follow-up fixes are now **committed** in two commits — `64e0095` (backend: migrations 024-028 + src + tests) and `fa0e491` (frontend) — on top of `ed37513`/`731242c`/…/`3c5859b`. **Working tree is clean.** Re-verified at the committed HEAD: `npm run test:unit` → 481/481 passed. **Not pushed** — pushing is a separate, not-yet-given authorization (see B3).
 
 ## ✅ Done (complete + verified this session)
 Claude independent full-stack audit (2026-07-12, branch `codex/seminar-venue-rules`, read-only — no source edits):
@@ -174,26 +174,18 @@ Feature work landed in the working tree (all on top of `3c5859b`; see `git diff`
 
 ## 🔜 Next up (priority order)
 > There is **no new feature request pending** — the human owner drives the next feature. The open work is:
-1. **Owner decision → commit the feature blob.** Once authorized, commit the uncommitted FU-680→690 working tree in coherent chunks (kept uncommitted on purpose — see 🚧 B1). Files = everything in `git diff --stat` + the untracked migrations/tests listed in ⚠️1.
-2. **Reconcile graded docs (owner decision).** SRS/SDD/Test Plan/User Manual predate this feature set (see 🚧 B2).
-3. **(If desired) add a migration/seed for the 251/252 UG-thesis data** so a fresh DB reproduces the new protected baselines (251=81, 252=97). Currently dev-DB-only (see ⚠️2).
+1. **Reconcile graded docs (owner decision).** SRS/SDD/Test Plan/User Manual predate this feature set (see 🚧 B2).
+2. **Push decision.** The two feature commits (`64e0095`, `fa0e491`) are local-only on `codex/seminar-venue-rules`. Push (and to where — this branch, or merge into `scheduler-modernization`/`main`?) needs explicit owner authorization (see 🚧 B3).
+3. **(If desired) add a migration/seed for the 251/252 UG-thesis data** so a fresh DB reproduces the new protected baselines (251=81, 252=97). Currently dev-DB-only (see ⚠️1 below — this is now the only remaining git/DB reproducibility gap).
 
 ## ⚠️ In progress / half-done — READ CAREFULLY before continuing
-**The code is done; the *git/DB state* is the loose end. This is the most important section.**
+**B1 is resolved — the FU-680→690 blob is committed (see Current status). One real gap remains:**
 
-1. **HUGE UNCOMMITTED WORKING TREE — do NOT discard it.** Last commit is `3c5859b` (FU-672→679). **Everything FU-680 → FU-690 is uncommitted:**
-   - **Many modified tracked files** (backend + frontend). The exact count changes as follow-up repairs land; use `git status --short` / `git diff --stat` before staging anything.
-   - **Untracked (new) files** (`git status`):
-     - `backend/src/db/migrations/024_phase125_thesis_flag.js`, `025_phase126_registrar_flags.js`, `026_phase127_seminar_course_flag.js`, `027_phase128_info_only_backfill.js`, `028_phase129_seminar_venue_rules.js`
-     - `backend/src/domain/complementPlanner.js`
-     - tests: `backend/tests/integration/fu679Export…fu688Registrar.test.js`, `fu690Roundtrip.test.js`; `backend/tests/unit/complementPlanner.test.js`, `fu679ExportLayout.test.js`, `fu680ExportLayout.test.js`, `fu688Registrar.test.js`
-     - docs: `CLAUDE.md`, `AGENTS.md` (symlink→CLAUDE.md), `HANDOFF.md` (these three are committed by this handoff)
-   - **DANGER:** do **NOT** `git stash`, `git reset --hard`, `git checkout -- .`, or `git clean` — you will lose ~2 weeks of FU-680→690 work that is in **no commit**. To start a Codex branch: `git switch -c codex/<task>` — the working-tree changes carry over.
-2. **DB has manual data NOT reproducible from git.** The FU-689 UG-thesis courses (SWE 494/496 in terms 251 & 252) were inserted by direct SQL, **not** by a migration or `seed.js`. A fresh DB from `npm run migrate && npm run seed` will **NOT** contain them, so the current dev DB baselines (**251 = 81, 252 = 97**, 282 = 72 after the info-only/Seminar collapse repairs) exist **only in the current dev DB**. Reset/reseed → that data vanishes and the 251/252 invariant reverts to 251=78/252=95. (No code depends on the exact counts.)
-3. **Migrations 024/025/026/027/028 are applied to the dev DB + private test DB flow but are untracked.** `026_phase127_seminar_course_flag.js` was applied to the live dev DB on 2026-06-29 to fix the `c.is_seminar` runtime regression. `027_phase128_info_only_backfill.js` and `028_phase129_seminar_venue_rules.js` were applied afterward to repair stale non-protected info-only and Seminar data. They auto-run via `npm run migrate` (discovered + sorted). A teammate pulling only committed code won't have them until the blob/source slice is committed.
+1. **DB has manual data NOT reproducible from git.** The FU-689 UG-thesis courses (SWE 494/496 in terms 251 & 252) were inserted by direct SQL, **not** by a migration or `seed.js` — this is still true even after B1, since committing *code* doesn't retroactively turn a manual data insert into a migration. A fresh DB from `npm run migrate && npm run seed` will **NOT** contain them, so the current dev DB baselines (**251 = 81, 252 = 97**, 282 = 72 after the info-only/Seminar collapse repairs) exist **only in the current dev DB**. Reset/reseed → that data vanishes and the 251/252 invariant reverts to 251=78/252=95. (No code depends on the exact counts.)
+2. **Migrations 024-028 are now committed** (as of `64e0095`) and were already applied to the dev DB + private test DB flow throughout Codex's sessions — `npm run migrate` on a fresh checkout now reproduces the schema correctly. The only remaining gap is the manual data insert in point 1 above, not the schema.
 
 ## 🚧 Blockers / open decisions (need the human)
-- **B1 — Authorize committing the feature blob.** Standing instruction all session was "do NOT commit/push until I tell you." This turn authorized committing only the **handoff docs**, so FU-680→690 plus the info-only/Project follow-up stays intentionally uncommitted. **Decision:** commit it (how to split?) and whether to push.
+- **B1 — RESOLVED 2026-07-12.** Owner said "Yes, commit the feature blob - B1 approved." Committed as `64e0095` (backend) + `fa0e491` (frontend) on `codex/seminar-venue-rules`. Not pushed (see B3).
 - **B2 — Graded-doc divergence.** `SWE412-SRS.docx`, `SWE412-SDD.docx/pdf`, `SWE412-Test_Plan.docx`, `SWE412-User_Manual.docx/pdf` in the parent `SWE_412/` folder are dated **May 23–24**; the entire June FU-559→690 arc (registrar Activity flags ST/INT/RES/PRJ/SEM, conflict-exemption, per-term isolation, …) **post-dates them and is not described in them.** `CLAUDE.md` says behavior must stay consistent with the graded artifacts. **Decision:** update the docs to match current behavior, or constrain behavior to the docs. *(UNVERIFIED whether the grader requires a match — the `.docx` are binary and were not opened; flagging the date gap as strong evidence of divergence.)*
 - **B3 — Push/author convention.** Prior commits are on `scheduler-modernization`; confirm author identity + remote before any push. *(UNVERIFIED from git config.)*
 - **B4 — Backend dependency advisory.** `npm audit --omit=dev` reports **2 moderate** production advisories through `exceljs -> uuid` (`GHSA-w5hq-g745-h8pq`). `npm audit fix` proposes `exceljs@3.4.0` (major downgrade from 4.4.0), which is risky for current workbook import/export behavior. Needs owner decision: accept risk, investigate an override/patch, or test a package change in a dedicated branch.
@@ -209,12 +201,12 @@ Feature work landed in the working tree (all on top of `3c5859b`; see `git diff`
 - **Excel export legend rows are FULL-WIDTH MERGED cells** → every column returns the same text; the importer skips them via `courseCode === sectionNumber`. Don't replace that with a course-code-shape check or you'll silently drop malformed rows the validator should report.
 - **Backend has NO hot reload for `npm start`** — restart after backend edits. Frontend is Vite (HMR auto-applies).
 
-## 🧪 How to run / test right now (verified 2026-06-28)
+## 🧪 How to run / test right now (verified 2026-07-12, at the committed HEAD)
 ```bash
 # ---- BACKEND (cwd: backend/) ----
 npm install                       # first time
-npm run test:unit                 # → "Tests: 453 passed, 33 total"  (NO DB needed) ✅ verified
-npm run migrate                   # apply migrations to the dev DB (incl 024/025)
+npm run test:unit                 # → "Tests: 481 passed, 34 total"  (NO DB needed) ✅ verified
+npm run migrate                   # apply migrations to the dev DB (now incl 024-028, all committed)
 npm run dev                       # dev server on :4000 (kills stale :4000 first); or: npm start
 DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated   # per-file isolated; needs Postgres + CREATEDB → "45 files passed, 0 failed" (this session)
 
@@ -235,9 +227,10 @@ node -e "const{query}=require('./src/config/db');query('SELECT 1 AS ok').then(r=
 ## 🟦 FOR CODEX — read this before writing any code
 1. **Read, in order:** (1) this `HANDOFF.md` top-to-bottom, (2) `CLAUDE.md` (= `AGENTS.md`) — the operating brief, (3) `README.md` and `PER_TERM_ISOLATION_PLAN.md` (authoritative architecture). Then `git status` + `git log --oneline -12`.
 2. **Do NOT touch / do NOT invent:**
-   - Do **NOT** `git stash`/`reset --hard`/`checkout -- .`/`clean` — the FU-680→690 working tree is uncommitted and would be lost (⚠️1).
-   - Do **NOT** mutate existing rows of terms **251/252** (protected); do **NOT** reseed the dev DB without owner say-so (you'd drop the 494/496 thesis data — ⚠️2).
+   - The FU-680→690 blob is now **committed** (`64e0095`/`fa0e491`) — general git hygiene still applies (never `reset --hard`/`checkout -- .`/`clean` without checking `git status` first per the standing safety protocol), but there is no longer a giant uncommitted blob at risk.
+   - Do **NOT** mutate existing rows of terms **251/252** (protected); do **NOT** reseed the dev DB without owner say-so (you'd drop the 494/496 thesis data — ⚠️1).
    - Do **NOT** invent behavior absent from the SRS/SDD — add an open question to 🚧 instead.
-   - Do **NOT** rewrite migrations `001…025` retroactively, the `effectiveSectionType` derivation contract, or the frontend↔backend API shape without recording it here.
-3. **Branch + commits:** `git switch -c codex/<short-task-name>` (working-tree changes carry over — do not stash). Commit small with clear messages. Record the branch name here before you stop.
-4. **Definition of done (immediate task = commit the blob, if owner authorizes):** `npm run test:unit` = 453 passed AND `DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` = 0 failed AND `cd frontend && npm run build` = ✓; FU-680→690 committed in coherent messages on a branch; this `HANDOFF.md` updated (statuses flipped, "Active agent: Codex", branch recorded) and committed. Then hand back.
+   - Do **NOT** rewrite migrations `001…028` retroactively, the `effectiveSectionType` derivation contract, or the frontend↔backend API shape without recording it here.
+   - Do **NOT** `git push` without explicit owner authorization (B3 is still open).
+3. **Branch + commits:** continue on `codex/seminar-venue-rules` or `git switch -c codex/<short-task-name>` for a new task. Commit small with clear messages. Record the branch name here before you stop.
+4. **Definition of done (for whatever task you're given):** `npm run test:unit` = 481 passed AND `DB_NAME_TEST=scheduler_db_modz npm run test:int:isolated` = 0 failed AND `cd frontend && npm run build` = ✓; this `HANDOFF.md` updated (statuses flipped, active agent + branch recorded) and committed. Then hand back.
