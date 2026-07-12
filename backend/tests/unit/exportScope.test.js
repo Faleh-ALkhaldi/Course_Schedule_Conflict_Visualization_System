@@ -21,4 +21,14 @@ describe('exportScope (FU-667)', () => {
     // plain end-user language — no code-base identifiers
     expect(n).not.toMatch(/LectureHall|owner_semester|scheduleId|undefined|null/);
   });
+
+  test('complement section copy describes schedule completeness without stale only-entity wording', () => {
+    expect(scope.COMPLEMENT_EXPORT_TITLE).toMatch(/complementary sections/i);
+    expect(scope.COMPLEMENT_EXPORT_TITLE).toMatch(/schedule completeness/i);
+    expect(scope.COMPLEMENT_EXPORT_TITLE).not.toMatch(/reference only|NOT part of this schedule/i);
+
+    expect(scope.COMPLEMENT_EXPORT_NOTE).toMatch(/matching part/i);
+    expect(scope.COMPLEMENT_EXPORT_NOTE).toMatch(/course complete/i);
+    expect(scope.COMPLEMENT_EXPORT_NOTE).not.toMatch(/NOT part of this schedule|Nothing else from the term|per-term data isolation|leaks/i);
+  });
 });

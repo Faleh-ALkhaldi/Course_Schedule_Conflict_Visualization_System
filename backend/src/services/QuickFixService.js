@@ -32,6 +32,7 @@ const Section = require('../domain/Section');
 const sectionPattern = require('../domain/sectionPattern');
 const { query, getClient } = require('../config/db');
 const { pickDummyOfficeHours, nextDummyVenueName } = require('../domain/dummyResources'); // NEW-FU-429/431 (Phase 106)
+const { planComplementSection } = require('../domain/complementPlanner'); // NEW-FU-682: complete an orphan lab course instead of dropping it
 const { teachingWindowFor, OFFICE_HOURS_WINDOW } = require('../config/constants'); // NEW-FU-621 (audit #2); OFFICE_HOURS_WINDOW NEW-FU-635 (issue #3)
 
 const engine = new ConflictEngine();
@@ -54,6 +55,10 @@ const SCORE = {
   OP_MOVE_OH:      -2,
   OP_REASSIGN:     -5,    // people-facing change
   OP_ADD_DAY:      -3,    // additive, mild
+  // NEW-FU-682: ADD the missing complementary section to COMPLETE an orphan Has-Laboratory course.
+  // Additive + the best possible outcome (a whole, correct offering), so it is the PREFERRED R-14
+  // resolution — cheaper than untag-has-lab (-10, mutates the course) and far ahead of the drop (-25).
+  OP_ADD_COMPLEMENT: -4,
   OP_DROP:         -25,   // last resort
   // NEW-FU-272 (Phase 50): metadata-flip ops. Slightly worse than a
   // section-level reassign because they mutate course / venue records
@@ -129,18 +134,39 @@ function acceptsOp(beforeConflicts, afterConflicts) {
 // the per-rule explanation row. Keep messages short and actionable.
 const UNRESOLVED_REASONS = {
   'R-01': 'No alternative instructor or venue is free at this slot, and no in-window move clears the overlap.',
-  'R-02': 'No move slot clears the overlap with the conflicting course AND keeps the instructor + venue free across the section\'s meeting days.',
+  'R-02': 'No move slot clears the overlap with the conflicting course while keeping the instructor and venue free across the section\'s meeting days.',
   'R-04': 'No alternative instructor is free at this slot (every other instructor either has another section here or an office hour overlap).',
   'R-05': 'No alternative venue of the required type is free at this slot.',
-  'R-06': 'No slot in the section\'s allowed time window (UG: 07:00–17:10, GR: 17:20–22:00) is free for the section\'s instructor and venue across all meeting days.',
+  'R-06': 'No slot in the section\'s allowed time window (undergraduate: 07:00-17:10, graduate: 17:20-22:00) is free for the section\'s instructor and venue across all meeting days.',
   'R-09': 'No instructor is free at this slot.',
   'R-10': 'No venue of the required type is free at this slot.',
   'R-11': 'No laboratory venue is free at this slot.',
   'R-12': 'No lecture hall is free at this slot.',
   'R-13': 'No alternative instructor with configured office hours is free at this slot.',
-  'R-14': 'Quick Fix cannot fabricate the missing Lec or Lab section without picking a time, instructor, and venue — please add it manually via the Add Section button.',
+  'R-14': 'No free slot with an available lecture hall and a free instructor was found to add the missing section automatically, and the course cannot be switched to lectures-only. Add the section manually via Add Section, or remove the remaining unmatched section.',
   'R-15': 'No further legal day-template extension is available for this section group.',
 };
+
+function venueTypeDisplay(type) {
+  if (type === 'LectureHall') return 'Lecture Hall';
+  if (type === 'Laboratory') return 'Laboratory';
+  if (type === 'Multipurpose') return 'Multipurpose';
+  return type || 'venue';
+}
+
+function sectionTypeDisplay(type) {
+  if (type === 'Lec') return 'Lecture';
+  if (type === 'Lab') return 'Lab';
+  if (type === 'Prj') return 'Project';
+  if (type === 'Sem') return 'Seminar';
+  return type || 'section';
+}
+
+function academicLevelDisplay(category) {
+  if (category === 'GR') return 'graduate';
+  if (category === 'UG') return 'undergraduate';
+  return 'this level';
+}
 
 // Helper: deep-clone the sections array as plain JS objects so we can
 // simulate mutations without touching the source array.
@@ -165,7 +191,9 @@ function evaluateInMemory(sections, ohMap) {
   const f09Seen = new Set();
   for (const sec of sections) {
     if (sec.instructorId) continue;
-    const key = `${sec.courseId}|${sec.sectionNumber}`;
+    // Info-only activities still require a supervising instructor. Keep this in
+    // lockstep with SectionRepository.validateOneInstructor / ScheduleService.
+    const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;
     if (f09Seen.has(key)) continue;
     f09Seen.add(key);
     conflicts.push({
@@ -181,7 +209,11 @@ function evaluateInMemory(sections, ohMap) {
   for (const sec of sections) {
     if (sec.venueId) continue;
     if (sec.isCapstone) continue;
-    const key = `${sec.courseId}|${sec.sectionNumber}`;
+    // NEW-FU-688: mirror sectionRepo.validateOneVenue — info-only (external/thesis/research) and the
+    // Prj/Ths section types are venue-exempt, so a venue-less one must not manufacture a phantom R-10.
+    if (sec.isExternal || sec.isThesis || sec.isResearch) continue;
+    if (sec.sectionType === 'Prj' || sec.sectionType === 'Ths') continue;
+    const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;
     if (f10Seen.has(key)) continue;
     f10Seen.add(key);
     conflicts.push({
@@ -200,7 +232,7 @@ function evaluateInMemory(sections, ohMap) {
     if (!sec.venueId || !sec.venueType) continue;
     if (sec.isCapstone) continue;
     if (sec.venueType === 'Multipurpose') continue;
-    const key = `${sec.courseId}|${sec.sectionNumber}`;
+    const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;
     if (sec.sectionType === 'Lab' && sec.venueType !== 'Laboratory') {
       if (!f11Seen.has(key)) {
         f11Seen.add(key);
@@ -211,24 +243,29 @@ function evaluateInMemory(sections, ohMap) {
         });
       }
     }
-    if (sec.sectionType === 'Lec' && sec.venueType === 'Laboratory') {
+    if (['Lec', 'Sem'].includes(sec.sectionType) && sec.venueType === 'Laboratory') {
       if (!f12Seen.has(key)) {
         f12Seen.add(key);
+        const sectionKind = sec.sectionType === 'Sem' ? 'Seminar' : 'Lecture';
         conflicts.push({
           ruleId: 'R-12', severity: 'Soft',
           sectionAId: sec.id, sectionBId: null,
-          description: `Lecture section in lab venue.`,
+          description: `${sectionKind} section in lab venue.`,
         });
       }
     }
   }
 
   // R-15: insufficient credit coverage (LECTURE groups only)
+  // NEW-FU-684: derive "has a lab" from the flag OR a real Lab section (mirror ScheduleService) so the
+  // in-memory planner agrees with the engine — a 100-min lecture of a course whose Lab is present must
+  // NOT be flagged as under-length even if the has_lab flag is stale/false.
+  const f15CourseHasLab = new Set(sections.filter(s => s.sectionType === 'Lab').map(s => s.courseId));
   const f15Groups = new Map();
   for (const sec of sections) {
     if (sec.sectionType !== 'Lec') continue;
     if (!sec.credits) continue;
-    if (sec.isExternal) continue;        // NEW-FU-651: match ScheduleService — external/capstone exempt
+    if (sec.isExternal || sec.isThesis || sec.isResearch || sec.isCapstone) continue;  // NEW-FU-651/687/688: external/thesis/research/project all conflict-exempt
     if (sec.isCapstone) continue;
     if (!sec.startTime || !sec.endTime) continue;
     // NEW-FU-651: GENDER is part of the section identity — a Male §01 and a Female §01 are SEPARATE
@@ -241,7 +278,7 @@ function evaluateInMemory(sections, ohMap) {
       group = {
         totalMinutes: 0,
         credits:  Number(sec.credits),
-        hasLab:   Boolean(sec.hasLab),
+        hasLab:   Boolean(sec.hasLab) || f15CourseHasLab.has(sec.courseId),   // NEW-FU-684: flag OR real Lab section
         anySec:   sec,
       };
       f15Groups.set(key, group);
@@ -269,6 +306,9 @@ function evaluateInMemory(sections, ohMap) {
   const f13Seen = new Set();
   for (const sec of sections) {
     if (!sec.instructorId) continue;
+    // NEW-FU-688: conflict-exempt activities (external/thesis/research/project) are R-13-exempt —
+    // mirrors ScheduleService._evaluateSchedule, so the simulator can't conjure a phantom R-13.
+    if (sec.isExternal || sec.isThesis || sec.isResearch || sec.isCapstone) continue;
     if (f13Seen.has(sec.instructorId)) continue;
     if (sec._ohAssigned) { f13Seen.add(sec.instructorId); continue; } // NEW-FU-460: OH assigned in this plan → no R-13
     const ohList = ohMap.get(sec.instructorId) ?? [];
@@ -288,6 +328,7 @@ function evaluateInMemory(sections, ohMap) {
   const f14CourseTypes = new Map(); // courseId → { hasLec, hasLab, anySec, courseCode, hasLabFlag }
   for (const sec of sections) {
     if (!sec.hasLab) continue;          // R-14 only applies to has_lab=true courses
+    if (sec.isExternal || sec.isThesis || sec.isResearch || sec.isCapstone) continue;  // NEW-FU-688: conflict-exempt → never R-14
     let entry = f14CourseTypes.get(sec.courseId);
     if (!entry) {
       entry = { hasLec: false, hasLab: false, anySec: sec,
@@ -298,13 +339,16 @@ function evaluateInMemory(sections, ohMap) {
     if (sec.sectionType === 'Lab') entry.hasLab = true;
   }
   for (const [courseId, e] of f14CourseTypes) {
-    if (e.hasLec && e.hasLab) continue;
-    const missing = !e.hasLec ? 'Lec' : 'Lab';
+    void courseId;
+    // NEW-FU-681: only an ORPHAN LAB (Lab w/o Lecture) is R-14; a lecture-only has_lab course is a
+    // legitimate scoped / in-progress state (the lab is managed separately). Mirrors ScheduleService.
+    if (e.hasLec) continue;        // lecture present → fine (the lab may live elsewhere / arrive later)
+    if (!e.hasLab) continue;       // neither type present → nothing to flag
     conflicts.push({
       ruleId: 'R-14', severity: 'Soft',
       sectionAId: e.anySec.id, sectionBId: null,
-      description: `Course ${e.courseCode} is set up to have both lectures and labs, but is missing its ${missing === 'Lec' ? 'lecture' : 'lab'} section(s).`,
-      missingType: missing,
+      description: `Course ${e.courseCode} has a Lab section but no Lecture section. Add the lecture section, or change the course so it no longer includes a lab.`,
+      missingType: 'Lec',
     });
   }
 
@@ -438,7 +482,7 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
     dummyName: 'NEW INSTRUCTOR',
     priority:  SCORE.OP_DUMMY,
     dummy:     true,
-    label:     `Add a NEW placeholder instructor for ${sec.courseCode} §${sec.sectionNumber} (no existing instructor is free — staff it later)`,
+    label:     `Add a temporary instructor placeholder for ${sec.courseCode} §${sec.sectionNumber} (no existing instructor is free — assign a real instructor later)`,
   });
   const dummyVenueOp = (sec, wantType) => ({
     type:      'add-dummy-venue',
@@ -448,7 +492,7 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
     venueType: wantType === 'Laboratory' ? 'Laboratory' : 'LectureHall',
     priority:  SCORE.OP_DUMMY,
     dummy:     true,
-    label:     `Add a NEW placeholder ${wantType === 'Laboratory' ? 'lab' : 'room'} for ${sec.courseCode} §${sec.sectionNumber} (no existing venue is free — assign it later)`,
+    label:     `Add a temporary ${wantType === 'Laboratory' ? 'laboratory' : 'venue'} placeholder for ${sec.courseCode} §${sec.sectionNumber} (no existing venue is free — assign a real venue later)`,
   });
   const ops = [];
   const sectionAId = conflict.sectionAId;
@@ -1301,6 +1345,36 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
   // — the user must explicitly opt in — while giving them a one-click
   // resolution path that didn't exist before.
   if (conflict.ruleId === 'R-14') {
+    // NEW-FU-682: PREFERRED resolution — COMPLETE the course by ADDING its missing complementary
+    // section (the Lecture for this orphan Lab) in a conflict-free slot: a free, type-appropriate venue
+    // + a free instructor who has previously taught the course (else any free instructor). The greedy
+    // simulates the op like any other, so it is only ACCEPTED when it clears R-14 and adds NO new
+    // conflict; if the planner finds no free slot/venue/instructor it returns null and we fall back to
+    // untag (3-credit) and finally the last-resort drop — exactly the "drop is the last resort" contract.
+    const placement = planComplementSection(sectionA, sections, instructors, venues, ohMap);
+    if (placement) {
+      const c = placement.rows[0];
+      ops.push({
+        type:      'add-complement-section',
+        courseId:  sectionA.courseId,
+        priority:  SCORE.OP_ADD_COMPLEMENT,
+        complement: {
+          courseId:      sectionA.courseId,      courseCode:  sectionA.courseCode,
+          academicLevel: sectionA.academicLevel, category:    sectionA.category,
+          credits:       sectionA.credits,       hasLab:      true,
+          isCapstone:    sectionA.isCapstone,    isExternal:  sectionA.isExternal,
+          numSections:   sectionA.numSections,
+          sectionType:   placement.sectionType,  gender:      placement.gender,
+          instructorId:  placement.instructorId, instructorName: placement.instructorName,
+          venueId:       placement.venueId,      venueName:   placement.venueName,
+          venueType:     placement.venueType,    priorInstructor: placement.priorInstructor,
+          rows:          placement.rows,
+        },
+        label: `Add the missing ${placement.sectionType === 'Lec' ? 'Lecture' : 'Lab'} for ${sectionA.courseCode} — `
+             + `${placement.rows.map(r => r.day.slice(0, 3)).join('/')} ${c.startTime}–${c.endTime}, `
+             + `${placement.instructorName} @ ${placement.venueName} (completes the course)`,
+      });
+    }
     // NEW-FU-272 (Phase 50 #3): untag-has-lab alternative. When the
     // course is configured has_lab=true but the registrar / user only
     // scheduled Lec sections (e.g., SWE 412 PRJ courses where the project
@@ -1353,7 +1427,7 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
       type:      'mark-venue-exempt',
       courseId:  sectionA.courseId,
       priority:  SCORE.OP_FLAG_FLIP,
-      label:     `Mark ${sectionA.courseCode} as not needing a fixed room (capstone/external — can meet anywhere)`,
+      label:     `Mark ${sectionA.courseCode} as not needing a fixed venue (project/external activity — can meet without a venue assignment)`,
     });
   }
   if (['R-11', 'R-12'].includes(conflict.ruleId) && sectionA.venueId && sectionA.venueType) {
@@ -1369,7 +1443,7 @@ function candidateOps(conflict, sections, instructors, venues, ohMap, opts = {})
         venueId:   sectionA.venueId,
         newType:   'Multipurpose',
         priority:  SCORE.OP_FLAG_FLIP,
-        label:     `Reclassify ${sectionA.venueName ?? sectionA.venueId} as Multipurpose (room is used for both Lec and Lab in this schedule)`,
+        label:     `Reclassify ${sectionA.venueName ?? sectionA.venueId} as Multipurpose (used for both Lecture and Lab sections in this schedule)`,
       });
     }
   }
@@ -1387,8 +1461,11 @@ function diagnoseUnresolved(conflict, sections, instructors, venues, ohMap) {
   const sec = conflict.sectionAId
     ? sections.find(s => s.id === conflict.sectionAId)
     : null;
+  const sectionTime = sec?.day && sec?.startTime && sec?.endTime
+    ? `${sec.day} ${(sec.startTime ?? '').substring(0,5)}–${(sec.endTime ?? '').substring(0,5)}`
+    : 'no fixed time';
   const label = sec
-    ? `${sec.courseCode} §${sec.sectionNumber} (${sec.day} ${(sec.startTime ?? '').substring(0,5)}–${(sec.endTime ?? '').substring(0,5)})`
+    ? `${sec.courseCode} §${sec.sectionNumber} (${sectionTime})`
     : 'this section';
 
   const startMin = sec ? Section.toMinutes(sec.startTime) : 0;
@@ -1446,53 +1523,54 @@ function diagnoseUnresolved(conflict, sections, instructors, venues, ohMap) {
   // emits one for every unresolved conflict. R-14 already has its own
   // two-path narrative and so opts out of this generic suffix.
   const dropSuffix = (sec && conflict.ruleId !== 'R-14')
-    ? ` Last resort: use the remove option below to take ${sec.courseCode} §${sec.sectionNumber} out entirely (it won't be offered on these days).`
+    ? ` Last resort: use the remove option below to take ${sec.courseCode} §${sec.sectionNumber} out of the schedule for this term.`
     : '';
 
   switch (conflict.ruleId) {
     case 'R-01': {
-      return `R-01 (hard, same-level): ${label} overlaps another same-level course's sections with no escape combination. Consider moving one section to a different time, reducing section count, or splitting the courses across non-overlapping day patterns.${dropSuffix}`;
+      return `Same-level overlap: ${label} overlaps another course for the same student level, and no available combination clears it automatically. Consider moving one section to a different time, reducing section count, or splitting the courses across non-overlapping day patterns.${dropSuffix}`;
     }
     case 'R-02': {
       const free = freeInstructorCount(i => i.id !== sec?.instructorId);
-      return `R-02 (soft, single-section adjacent-level overlap): ${label} cannot be moved to a non-overlapping slot — ${free} alternative instructor(s) are free in the section's window. Consider expanding the day pattern or accepting the soft overlap.${dropSuffix}`;
+      return `Adjacent-level overlap: ${label} cannot be moved automatically to a non-overlapping slot. ${free} alternative instructor(s) are free in the section's window. Consider expanding the day pattern or accepting the advisory overlap.${dropSuffix}`;
     }
     case 'R-04': {
       const free = freeInstructorCount(i => i.id !== sec?.instructorId);
       const total = allInstr - 1;
-      return `R-04 (hard, instructor double-book): ${label} — ${free} of ${total} alternative instructor(s) are free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}. ${free === 0 ? 'All instructors are busy or have office-hour collisions.' : 'But none cleared the strict-monotone gate during planning.'}${dropSuffix}`;
+      return `Instructor double-booking: ${label} — ${free} of ${total} alternative instructor(s) are free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}. ${free === 0 ? 'All instructors are busy or have office-hour overlaps.' : 'None of those alternatives can be applied without creating another conflict.'}${dropSuffix}`;
     }
     case 'R-05': {
       const desiredType = sec?.sectionType === 'Lab' ? 'Laboratory' : 'LectureHall';
       const free = freeVenueCount(v => v.type === desiredType && v.id !== sec?.venueId);
       const totalOfType = venues.filter(v => v.type === desiredType).length - 1;
-      return `R-05 (hard, venue double-book): ${label} — ${free} of ${totalOfType} alternative ${desiredType}(s) are free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}.${dropSuffix}`;
+      return `Venue double-booking: ${label} — ${free} of ${totalOfType} alternative ${venueTypeDisplay(desiredType)} venue(s) are free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}.${dropSuffix}`;
     }
     case 'R-06': {
       const cat = sec?.category;
       // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00.
       const window = cat === 'GR' ? '17:20–22:00' : '07:00–17:10';
-      return `R-06 (hard, time-window violation): ${label} is ${cat || '?'} but scheduled outside its allowed window (${window}). Move the section to within the window.${dropSuffix}`;
+      return `Allowed-hours issue: ${label} is a ${academicLevelDisplay(cat)} section but is scheduled outside its allowed window (${window}). Move the section to within that window.${dropSuffix}`;
     }
     case 'R-09': {
       const free = freeInstructorCount(() => true);
-      return `R-09 (soft, no instructor): ${label} has no instructor assigned — ${free} instructor(s) free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}. Pick one via the section editor or expand the candidate pool.${dropSuffix}`;
+      return `Missing instructor: ${label} has no instructor assigned. ${free} instructor(s) are free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}. Pick one in the section editor or expand the candidate pool.${dropSuffix}`;
     }
     case 'R-10': {
       const desiredType = sec?.sectionType === 'Lab' ? 'Laboratory' : 'LectureHall';
       const free = freeVenueCount(v => v.type === desiredType);
       const totalOfType = venues.filter(v => v.type === desiredType).length;
-      return `R-10 (soft, no venue): ${label} has no venue assigned — ${free} of ${totalOfType} ${desiredType}(s) free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}.${dropSuffix}`;
+      return `Missing venue: ${label} has no venue assigned. ${free} of ${totalOfType} ${venueTypeDisplay(desiredType)} venue(s) are free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}.${dropSuffix}`;
     }
     case 'R-11': {
       const free = freeVenueCount(v => v.type === 'Laboratory');
       const total = venues.filter(v => v.type === 'Laboratory').length;
-      return `R-11 (soft, lab in non-lab venue): ${label} is a Lab section in venue "${sec?.venueName || '?'}" (${sec?.venueType || '?'}). ${free} of ${total} Laboratory venue(s) are free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}.${dropSuffix}`;
+      return `Venue type mismatch: ${label} is a Lab section in venue "${sec?.venueName || '?'}" (${venueTypeDisplay(sec?.venueType)}). ${free} of ${total} Laboratory venue(s) are free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}.${dropSuffix}`;
     }
     case 'R-12': {
       const free = freeVenueCount(v => v.type === 'LectureHall');
       const total = venues.filter(v => v.type === 'LectureHall').length;
-      return `R-12 (soft, lec in lab venue): ${label} is a Lec section in venue "${sec?.venueName || '?'}" (${sec?.venueType || '?'}). ${free} of ${total} LectureHall venue(s) are free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}.${dropSuffix}`;
+      const sectionKind = sec?.sectionType === 'Sem' ? 'Seminar' : 'Lecture';
+      return `Venue type mismatch: ${label} is a ${sectionKind} section in venue "${sec?.venueName || '?'}" (${venueTypeDisplay(sec?.venueType)}). ${free} of ${total} Lecture Hall venue(s) are free across ${days} at ${(sec?.startTime ?? '').substring(0,5)}.${dropSuffix}`;
     }
     case 'R-13': {
       const withOH = instructors.filter(i => (ohMap.get(i.id) ?? []).length > 0).length;
@@ -1501,13 +1579,13 @@ function diagnoseUnresolved(conflict, sections, instructors, venues, ohMap) {
     case 'R-14': {
       const missing = conflict.missingType
         || (sec?.sectionType === 'Lec' ? 'Lab' : 'Lec');
-      return `Course "${sec?.courseCode || '?'}" is set up to have both lectures and labs, but has no ${missing === 'Lec' ? 'lecture' : 'lab'} section in this schedule. Two ways to fix it: (1) add the missing section with "+ Add Section" (recommended — you choose the time, instructor, and room), or (2) remove the leftover ${sec?.sectionType === 'Lec' ? 'lecture' : 'lab'} section (this takes the course out of the schedule).`;
+      return `Course "${sec?.courseCode || '?'}" is set up to have both lectures and labs, but has no ${missing === 'Lec' ? 'lecture' : 'lab'} section in this schedule. Two ways to fix it: (1) add the missing section with "+ Add Section" (recommended — you choose the time, instructor, and venue), or (2) remove the leftover ${sectionTypeDisplay(sec?.sectionType).toLowerCase()} section (this takes the course out of the schedule).`;
     }
     case 'R-15': {
-      return `R-15 (soft, insufficient credit coverage): ${label}'s surviving meeting days × duration don't cover the credit hours. Consider extending the day pattern (add a day) or moving to a longer-duration slot.${dropSuffix}`;
+      return `Insufficient credit coverage: ${label}'s weekly meeting time does not cover the credit hours. Consider extending the day pattern or moving to a longer-duration slot.${dropSuffix}`;
     }
     default:
-      return `${conflict.ruleId}: no auto-fix available at the current schedule state. ${conflict.description ?? ''}${dropSuffix}`.trim();
+      return `No automatic fix is available at the current schedule state. ${conflict.description ?? ''}${dropSuffix}`.trim();
   }
 }
 
@@ -1641,6 +1719,40 @@ function applyOpInMemory(sections, op) {
     }));
     return [...sections, ...newRows];
   }
+  if (op.type === 'add-complement-section') {
+    // NEW-FU-682: simulate completing the orphan course by appending the missing section's meeting
+    // rows. The fields mirror plan()'s section shape so the in-memory engine evaluates the completed
+    // course exactly as the DB-applied result will — the greedy thus only accepts this op when it
+    // clears R-14 and introduces no new conflict. Synthetic ids keep later ops referenceable.
+    const cx = op.complement || {};
+    let i = 0;
+    const newRows = (cx.rows || []).map(r => ({
+      id:            `synthetic-complement-${cx.courseId}-${r.day}-${i++}`,
+      scheduleId:    null,
+      courseId:      cx.courseId,
+      instructorId:  cx.instructorId ?? null,
+      venueId:       cx.venueId ?? null,
+      sectionNumber: '__complement__',          // sim-only; the real number is minted at apply time
+      day:           r.day,
+      startTime:     r.startTime,
+      endTime:       r.endTime,
+      sectionType:   cx.sectionType,
+      gender:        cx.gender ?? 'M',
+      courseCode:    cx.courseCode,
+      courseName:    cx.courseName,
+      academicLevel: cx.academicLevel,
+      category:      cx.category,
+      numSections:   cx.numSections,
+      hasLab:        cx.hasLab,
+      credits:       cx.credits,
+      isCapstone:    cx.isCapstone,
+      isExternal:    cx.isExternal,
+      instructorName: cx.instructorName,
+      venueName:     cx.venueName,
+      venueType:     cx.venueType,
+    }));
+    return [...sections, ...newRows];
+  }
   if (op.type === 'move') {
     // NEW-FU-333 (Phase 31): shift the section group's startTime/endTime.
     // Like reassign, the move updates the WHOLE section group (all rows
@@ -1736,7 +1848,7 @@ class QuickFixService {
         s.section_number, s.day, s.start_time::text, s.end_time::text,
         s.section_type, s.gender,
         c.course_code, c.name AS course_name, c.academic_level, c.category,
-        c.num_sections, c.has_lab, c.credits, c.is_capstone, c.is_external,
+        c.num_sections, c.has_lab, c.credits, c.is_capstone, c.is_external, c.is_thesis, c.is_research,
         i.name AS instructor_name, i.is_dummy AS instructor_is_dummy,
         v.name AS venue_name, v.type AS venue_type
       FROM sections s
@@ -1767,6 +1879,8 @@ class QuickFixService {
       credits:        row.credits,
       isCapstone:    row.is_capstone,
       isExternal:    row.is_external,
+      isThesis:      row.is_thesis,
+      isResearch:    row.is_research,     // NEW-FU-688: research = thesis sibling
       instructorName: row.instructor_name,
       instructorIsDummy: row.instructor_is_dummy === true,
       venueName:      row.venue_name,
@@ -1789,8 +1903,19 @@ class QuickFixService {
     // resolution and the greedy never accepts a fix.
     setVenueCache(venues);
 
-    // OH map for the engine
-    const instrIds = [...new Set(sections.map(s => s.instructorId).filter(Boolean))];
+    // OH map for the engine.
+    // NEW-FU-686: include the OFFICE HOURS of every ASSIGNABLE instructor, not only those already
+    // teaching. A fix op can put a section on an instructor who teaches nothing yet — add-complement-
+    // section (completing an orphan Has-Lab course with a free instructor) and reassign both do this.
+    // If that instructor's OH aren't in the map, the in-memory engine sees "teaches but has no office
+    // hours" and fires a PHANTOM R-13; the greedy then scores the op as creating a soft conflict and
+    // falls back to untag-has-lab / drop even though the real apply is CLEAN (the ScheduleService
+    // evaluator loads ALL office hours). Sourcing the assignable pool's OH up front restores
+    // simulator/runtime parity so the PREFERRED orphan-completion actually wins.
+    const instrIds = [...new Set([
+      ...sections.map(s => s.instructorId).filter(Boolean),
+      ...instructors.map(i => i.id),
+    ])];
     // NEW-FU-635 (issue #3): `let` (reassigned when a move-office-hour op is committed) and
     // SELECT id so a move-OH op can identify the exact row to relocate.
     let ohMap = new Map();
@@ -2026,6 +2151,8 @@ class QuickFixService {
         'add-dummy-instructor', 'add-dummy-venue',
         // NEW-FU-460 (Phase 109): give a real OH-less instructor office hours
         'assign-office-hours',
+        // NEW-FU-682: complete an orphan Has-Laboratory course by adding its missing section
+        'add-complement-section',
       ],
     };
   }
@@ -2199,6 +2326,50 @@ class QuickFixService {
         );
         return r.rowCount > 0;
       }
+      // NEW-FU-682: COMPLETE an orphan Has-Laboratory course by inserting its missing section (the
+      // Lecture for an orphan Lab) at the conflict-free slot the planner chose. The post-apply re-eval
+      // under the lock (below, like every other op) verifies it actually cleared R-14 and added no new
+      // conflict, so a stale plan can never make the schedule worse. A fresh type-scoped section number
+      // (Lec 01–49 / Lab 50–99) is minted per course+gender; ON CONFLICT DO NOTHING is a belt-and-braces
+      // guard against a concurrent identical insert (the planner already picked a free slot).
+      if (op.type === 'add-complement-section') {
+        const cx = op.complement || {};
+        const gender = cx.gender ?? 'M';
+        // NEW-FU-682 (term-isolation guard): the resolver always picks this term's OWN course / instructor
+        // / venue (plan() sources from the term-scoped assignable pools), but a hand-crafted apply payload
+        // could name another term's resource — which would mint a CROSS-TERM section. Refuse unless the
+        // course is owned by this term and any named instructor/venue is owned-or-assignable here. (FK +
+        // the post-apply re-eval already guard most of it; this closes the per-term-residency hole.)
+        const owns = await client.query(
+          `SELECT
+             (SELECT 1 FROM courses     WHERE id = $1 AND owner_semester = $2) AS course_ok,
+             ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM instructors WHERE id = $3 AND owner_semester = $2)) AS instr_ok,
+             ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM venues      WHERE id = $4 AND owner_semester = $2)) AS venue_ok`,
+          [cx.courseId, ownerSemester, cx.instructorId ?? null, cx.venueId ?? null]);
+        const g = owns.rows[0] || {};
+        if (!g.course_ok || !g.instr_ok || !g.venue_ok) {
+          const err = new Error('Cannot complete the course: the chosen course, instructor, or venue is not part of this term.');
+          err.status = 409; throw err;
+        }
+        const range = cx.sectionType === 'Lab' ? { min: 50, max: 99 } : { min: 1, max: 49 };
+        const taken = new Set((await client.query(
+          `SELECT section_number FROM sections WHERE schedule_id = $1 AND course_id = $2 AND gender = $3`,
+          [scheduleId, cx.courseId, gender])).rows.map(r => r.section_number));
+        let num = null;
+        for (let n = range.min; n <= range.max; n++) { const cand = String(n).padStart(2, '0'); if (!taken.has(cand)) { num = cand; break; } }
+        if (!num) return false;   // type range exhausted (pathological) — leave the orphan for untag/drop
+        let any = false;
+        for (const r of (cx.rows || [])) {
+          const res = await client.query(
+            `INSERT INTO sections
+               (schedule_id, course_id, instructor_id, venue_id, section_number, day, start_time, end_time, section_type, gender)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             ON CONFLICT DO NOTHING`,
+            [scheduleId, cx.courseId, cx.instructorId ?? null, cx.venueId ?? null, num, r.day, r.startTime, r.endTime, cx.sectionType, gender]);
+          if (res.rowCount > 0) any = true;
+        }
+        return any;
+      }
       // NEW-FU-460 (Phase 109): give a real OH-less instructor office hours — the
       // preferred R-13 fix (keeps them teaching instead of swapping in a placeholder).
       if (op.type === 'assign-office-hours') {
@@ -2358,3 +2529,4 @@ module.exports._applyOpInMemory = applyOpInMemory;
 // "count branch must never RAISE weighted cost" invariant is unit-testable.
 module.exports._acceptsOp = acceptsOp;
 module.exports._weightedCost = weightedCost;
+module.exports._evaluateInMemory = evaluateInMemory;

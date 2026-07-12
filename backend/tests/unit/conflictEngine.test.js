@@ -651,8 +651,11 @@ function r14CourseStatus(sections) {
   }
   return status;
 }
+// NEW-FU-681: only an ORPHAN LAB (a Lab with no Lecture) is flagged. A lecture-only has_lab course
+// is a legitimate scoped / in-progress state (its Lab is taught by another instructor, in another
+// venue, or arrives in a later import), so it is NOT a conflict. Mirrors ScheduleService's R-14.
 function isR14Missing(status) {
-  return [...status.values()].filter(s => !(s.hasLec && s.hasLab));
+  return [...status.values()].filter(s => s.hasLab && !s.hasLec);
 }
 
 describe('R14 — has_lab course missing Lec or Lab (NEW-FU-107)', () => {
@@ -663,15 +666,12 @@ describe('R14 — has_lab course missing Lec or Lab (NEW-FU-107)', () => {
     ];
     expect(isR14Missing(r14CourseStatus(ss)).length).toBe(0);
   });
-  test('TC-35b: has_lab course with only Lec → R-14 fires (missing Lab)', () => {
+  test('TC-35b: has_lab course with only Lec → NO R-14 (NEW-FU-681: the lab is managed separately)', () => {
     const ss = [
       sec({ courseId:'C1', sectionType:'Lec', hasLab:true }),
       sec({ courseId:'C1', sectionType:'Lec', hasLab:true, sectionNumber:'02' }),
     ];
-    const missing = isR14Missing(r14CourseStatus(ss));
-    expect(missing.length).toBe(1);
-    expect(missing[0].hasLec).toBe(true);
-    expect(missing[0].hasLab).toBe(false);
+    expect(isR14Missing(r14CourseStatus(ss)).length).toBe(0);
   });
   test('TC-35c: has_lab course with only Lab → R-14 fires (missing Lec)', () => {
     const ss = [
@@ -688,11 +688,11 @@ describe('R14 — has_lab course missing Lec or Lab (NEW-FU-107)', () => {
     ];
     expect(r14CourseStatus(ss).size).toBe(0);
   });
-  test('TC-35e: two has_lab courses, one complete + one missing Lab → 1 R-14', () => {
+  test('TC-35e: two has_lab courses, one complete + one ORPHAN LAB → 1 R-14 (NEW-FU-681)', () => {
     const ss = [
       sec({ courseId:'C1', sectionType:'Lec', hasLab:true }),
       sec({ courseId:'C1', sectionType:'Lab', hasLab:true }),
-      sec({ courseId:'C2', sectionType:'Lec', hasLab:true }),
+      sec({ courseId:'C2', sectionType:'Lab', hasLab:true, sectionNumber:'50' }),   // orphan lab (no Lec) → fires
     ];
     const missing = isR14Missing(r14CourseStatus(ss));
     expect(missing.length).toBe(1);

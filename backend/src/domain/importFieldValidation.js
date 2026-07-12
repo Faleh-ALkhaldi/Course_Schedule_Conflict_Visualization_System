@@ -12,7 +12,7 @@
 //
 // Pure (no DB / no I/O) → unit-testable. Validators are the shared domain single-source-of-
 // truth (courseFormat / importValidation / instructorFormat / constants), never re-implemented.
-const { courseCodeError, courseFlagError } = require('./courseFormat');
+const { courseCodeError, courseFlagError, seminarFlagError } = require('./courseFormat');
 const { RANGE_BY_TYPE } = require('./importValidation');
 const { emailError, instructorNameError } = require('./instructorFormat');
 const { TIME_WINDOWS, OFFICE_HOURS_WINDOW } = require('../config/constants');
@@ -20,7 +20,12 @@ const labels = require('./exportLabels');   // NEW-FU-666: accept end-user label
 
 const VALID_DAYS         = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
 const VALID_DAY_SET      = new Set(VALID_DAYS);
-const VALID_SECTION_TYPES = new Set(['Lec', 'Lab', 'Prj', 'Ths']);
+// NEW-FU-688: the RECOGNIZED section-type labels an import file may carry. Lec/Lab/Prj/Ths/Sem
+// are stored as-is; the off-campus activity labels St (Summer Training) / Int (Internship) and
+// Res (Research) round-trip from the export but are STORED as 'Lec' (their meaning lives on the
+// course's external/research flag — see ImportParserService) — they are accepted here only so a
+// legitimate exported file is not rejected as garbage.
+const VALID_SECTION_TYPES = new Set(['Lec', 'Lab', 'Prj', 'Ths', 'Sem', 'St', 'Int', 'Res']);
 const VALID_VENUE_TYPES   = new Set(['Laboratory', 'LectureHall', 'Multipurpose']);
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const DAY_MIN = TIME_WINDOWS.UG.start;   // 07:00 — first schedulable minute
@@ -99,9 +104,27 @@ function validateImportFields({ rows = [], instructors = [], venues = [], office
     else if (![0, 1, 2, 3, 4].includes(Number(r.credits)))
       push(`${ref(r, n)}, Credits ${r.credits} for ${code}: must be 0, 1, 2, 3, or 4.`);
 
-    // Course type — at most ONE of Has-lab / Capstone / External.
-    const fe = courseFlagError({ isCapstone: r.isCapstone, isExternal: r.isExternal });
+    const normalizedSectionTypeForFlags = labels.sectionTypeCode(String(raw.sectionType ?? '').trim());
+    const rowIsSeminar = Boolean(r.isSeminar || r.sectionType === 'Sem' || normalizedSectionTypeForFlags === 'Sem');
+
+    // Course type — at most ONE of Has-lab / Project / External / Thesis / Research / Seminar.
+    const fe = courseFlagError({
+      hasLab: r.hasLab || r.courseTypeHasLab,
+      isCapstone: r.isCapstone,
+      isExternal: r.isExternal,
+      isThesis: r.isThesis,
+      isResearch: r.isResearch,
+      isSeminar: rowIsSeminar,
+    });
     if (fe) push(`${ref(r, n)}, Course Type for ${code}: ${fe}`);
+    const sfe = seminarFlagError({
+      courseCode: code,
+      academicLevel: r.academicLevel,
+      category: r.category,
+      credits: r.credits,
+      isSeminar: rowIsSeminar,
+    });
+    if (sfe) push(`${ref(r, n)}, Course Type for ${code}: ${sfe}`);
 
     // Gender — Male/Female (or the M/F codes). Empty defaults to M (back-compat with
     // pre-gender files); a STATED value that isn't either is rejected, not silently coerced.
@@ -110,23 +133,39 @@ function validateImportFields({ rows = [], instructors = [], venues = [], office
     if (g !== '' && gCode !== 'M' && gCode !== 'F')
       push(`${ref(r, n)}, Gender "${g}" for ${code}: must be Male or Female.`);
 
-    // Section type — Lecture/Laboratory/Project/Thesis (or the Lec/Lab/Prj/Ths codes). Empty
-    // defaults to Lecture; a stated unknown is rejected.
+    // Section type — Lecture/Laboratory/Project/Thesis/Seminar (or their codes), plus the
+    // off-campus activity labels. Empty defaults to Lecture; a stated unknown is rejected.
     const stRaw = (raw.sectionType ?? '').trim();
-    if (stRaw !== '' && !VALID_SECTION_TYPES.has(labels.sectionTypeCode(stRaw)))
-      push(`${ref(r, n)}, Section Type "${stRaw}" for ${code}: must be Lecture, Laboratory, Project, or Thesis.`);
+    const stCode = labels.sectionTypeCode(stRaw);
+    if (stRaw !== '' && !VALID_SECTION_TYPES.has(stCode))
+      push(`${ref(r, n)}, Section Type "${stRaw}" for ${code}: must be Lecture, Laboratory, Project, Thesis, Seminar, Summer Training, Internship, or Research.`);
 
     // Section number — range scoped to the (normalized) type.
-    const type = r.sectionType ?? 'Lec';
+    const type = rowIsSeminar ? 'Sem' : (r.sectionType ?? 'Lec');
     const rangeRe = RANGE_BY_TYPE[type];
     if (rangeRe && !rangeRe.test(String(r.sectionNumber ?? '')))
       push(`${ref(r, n)}, Section # "${r.sectionNumber}" for ${code}: must be ${type === 'Lab' ? '50–99' : '01–49'} for a ${type} section.`);
 
+    // Days/time semantics. Info-only activities never carry a schedule or venue.
+    // Projects may be untimed; when timed, they are one-day blocks and venue is optional.
+    const infoOnly = !!(r.isExternal || r.isThesis || r.isResearch);
+    const project = !!(r.isCapstone || type === 'Prj');
+    const days = Array.isArray(r.days) ? r.days : [];
+    const s = String(r.startTime ?? '').slice(0, 5), e = String(r.endTime ?? '').slice(0, 5);
+    const hasStart = String(r.startTime ?? '').trim() !== '';
+    const hasEnd = String(r.endTime ?? '').trim() !== '';
+    const hasAnyTime = hasStart || hasEnd;
+    const hasTime = hasStart && hasEnd;
+    const rawVenueName = String(r.venueName ?? raw.venueName ?? '').trim();
+
+    if ((infoOnly || project) && !String(r.instructorName ?? '').trim()) {
+      push(`${ref(r, n)}, Instructor for ${code}: an instructor is required for ${infoOnly ? 'information-only activities' : 'Project sections'}.`);
+    }
+
     // Days — a non-empty subset of Sun–Thu, no duplicates (the app week is Sun–Thu; the DB
     // column tolerates Fri/Sat but they aren't schedulable here).
-    const days = Array.isArray(r.days) ? r.days : [];
     if (!days.length) {
-      push(`${ref(r, n)}, Days for ${code}: at least one day is required.`);
+      if (!infoOnly && (!project || hasTime)) push(`${ref(r, n)}, Days for ${code}: at least one day is required.`);
     } else {
       const bad = days.filter(d => !VALID_DAY_SET.has(d));
       if (bad.length) push(`${ref(r, n)}, Days "${bad.join(', ')}" for ${code}: only Sunday–Thursday are allowed.`);
@@ -134,18 +173,36 @@ function validateImportFields({ rows = [], instructors = [], venues = [], office
     }
 
     // Times — valid HH:MM, end strictly after start, inside the 07:00–22:00 schedulable day.
-    const s = String(r.startTime ?? '').slice(0, 5), e = String(r.endTime ?? '').slice(0, 5);
-    if (!TIME_RE.test(s) || !TIME_RE.test(e)) {
+    if (infoOnly) {
+      if (days.length) push(`${ref(r, n)}, Days for ${code}: information-only activities must not have meeting days.`);
+      if (hasAnyTime) push(`${ref(r, n)}, Time for ${code}: information-only activities must not have a start or end time.`);
+      if (rawVenueName) push(`${ref(r, n)}, Venue for ${code}: information-only activities must not have a venue.`);
+    } else if (!hasTime) {
+      if (hasAnyTime) push(`${ref(r, n)}, Time for ${code}: start and end time must be provided together.`);
+      else if (!project) push(`${ref(r, n)}, Time for ${code}: a start and end time are required.`);
+      if (project && rawVenueName) push(`${ref(r, n)}, Venue for ${code}: a Project venue requires a meeting time.`);
+    } else if (!TIME_RE.test(s) || !TIME_RE.test(e)) {
       push(`${ref(r, n)}, Time "${s}–${e}" for ${code}: times must be HH:MM (00:00–23:59).`);
     } else {
       if (hm(e) <= hm(s)) push(`${ref(r, n)}, Time for ${code}: end (${e}) must be after start (${s}).`);
       if (hm(s) < DAY_MIN || hm(e) > DAY_MAX) push(`${ref(r, n)}, Time "${s}–${e}" for ${code}: must be within 07:00–22:00.`);
+      if (project) {
+        const duration = hm(e) - hm(s);
+        if (days.length !== 1) push(`${ref(r, n)}, Days for ${code}: timed Project sections must have exactly one day.`);
+        if (![50, 75, 100, 160].includes(duration))
+          push(`${ref(r, n)}, Time for ${code}: Project duration must be 50, 75, 100, or 160 minutes.`);
+      } else if (rowIsSeminar) {
+        const duration = hm(e) - hm(s);
+        if (days.length !== 1) push(`${ref(r, n)}, Days for ${code}: Seminar sections must have exactly one day.`);
+        if (duration !== 75)
+          push(`${ref(r, n)}, Time for ${code}: Seminar duration must be 75 minutes.`);
+      }
     }
 
     // Venue type, when stated — one of the three.
     const vt = (r.venueType ?? '').trim();
     if (vt !== '' && !VALID_VENUE_TYPES.has(vt))
-      push(`${ref(r, n)}, Venue Type "${vt}" for ${code}: must be Laboratory, LectureHall, or Multipurpose.`);
+      push(`${ref(r, n)}, Venue Type "${vt}" for ${code}: must be Laboratory, Lecture Hall, or Multipurpose.`);
 
     // NEW-FU-662: length caps aligned with the DB columns (oversize/ReDoS guard — an over-long
     // value would otherwise abort the insert transaction mid-loop).
@@ -184,7 +241,7 @@ function validateImportFields({ rows = [], instructors = [], venues = [], office
     if (vne) push(`Venue "${String(v.name).slice(0, 40)}": ${vne}.`);
     const vt = (v.type ?? '').trim();
     if (vt !== '' && !VALID_VENUE_TYPES.has(vt))
-      push(`Venue "${v.name}" type "${vt}": must be Laboratory, LectureHall, or Multipurpose.`);
+      push(`Venue "${v.name}" type "${vt}": must be Laboratory, Lecture Hall, or Multipurpose.`);
     if (v.capacity != null) {
       const c = Number(v.capacity);
       if (!Number.isInteger(c) || c <= 0 || c > 100000)

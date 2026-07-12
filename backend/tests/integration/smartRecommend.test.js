@@ -25,6 +25,44 @@ const ADMIN = { username: 'admin1', password: 'password123' };
 let adminTok;
 const createdCodes = new Set();
 
+function normalizeCourseRow(c) {
+  return { ...c, credits: Number(c.credits) };
+}
+
+function isSchedulableCourse(c) {
+  return c.category === 'UG'
+    && c.is_external !== true
+    && c.is_thesis !== true
+    && c.is_research !== true
+    && c.is_capstone !== true;
+}
+
+function threeCreditNoLabCourse(c) {
+  return isSchedulableCourse(c) && Number(c.credits) === 3 && !c.has_lab;
+}
+
+function threeCreditLabCourse(c) {
+  return isSchedulableCourse(c) && Number(c.credits) === 3 && c.has_lab;
+}
+
+async function ensureOneDaySchedulableCourse(code, candidates = null) {
+  const pool = candidates ?? await termValidUgCourses(code);
+  const existing = pool.find(c => isSchedulableCourse(c) && Number(c.credits) === 1 && !c.has_lab);
+  if (existing) return existing;
+
+  const inserted = await query(
+    `INSERT INTO courses
+       (course_code, name, credits, academic_level, category, num_sections, has_lab,
+        is_capstone, is_external, is_thesis, is_research, owner_semester)
+     VALUES ($1, 'One-Day Pattern Fixture', 1, 'Senior', 'UG', 1, false,
+             false, false, false, false, $2)
+     RETURNING id, credits, has_lab, category, course_code,
+               is_capstone, is_external, is_thesis, is_research`,
+    [`SWE 9${code}`, code]
+  );
+  return normalizeCourseRow(inserted.rows[0]);
+}
+
 beforeAll(async () => {
   const r = await request(app).post('/api/v1/auth/login').send(ADMIN);
   expect(r.status).toBe(200);
@@ -84,9 +122,11 @@ async function freshTermSchedule(code, seedMode) {
   // broke later copy-creates (uq_venues_name_per_term dup). UG-only keeps the R-06 graduate
   // window from interfering.
   const courses = (await query(
-    `SELECT id, credits, has_lab, category, course_code FROM courses
+    `SELECT id, credits, has_lab, category, course_code,
+            is_capstone, is_external, is_thesis, is_research
+       FROM courses
       WHERE owner_semester = $1 AND category = 'UG'`, [code])).rows
-    .map(c => ({ ...c, credits: Number(c.credits) }));
+    .map(normalizeCourseRow);
   // instructors/venues: owner = code OR NULL template (both are assignable for section-create,
   // exactly the r04r05QuickFix selection) — never another term's private copy (409 belongs-to).
   const instructors = (await query(
@@ -104,10 +144,12 @@ async function freshTermSchedule(code, seedMode) {
 // drops SWE 399 (Summer-only off-campus) which a non-Summer term would reject.
 async function termValidUgCourses(code) {
   return (await query(
-    `SELECT id, credits, has_lab, category, course_code FROM courses
+    `SELECT id, credits, has_lab, category, course_code,
+            is_capstone, is_external, is_thesis, is_research
+       FROM courses
       WHERE (owner_semester = $1 OR owner_semester IS NULL)
         AND category = 'UG' AND is_external = false`, [code])).rows
-    .map(c => ({ ...c, credits: Number(c.credits) }));
+    .map(normalizeCourseRow);
 }
 
 // NEW-FU-673: seed a section group with a DIRECT POST /sections call rather than via
@@ -175,9 +217,7 @@ describe('FU-285: saturation-aware recommend (Phase 24)', () => {
     // on some unrelated courses. This saturates those days so the scorer should
     // prefer MW/ST/TT for new courses.
     // Pick 3 different 3-credit non-lab courses to seed STT sections.
-    const seeds = courses
-      .filter(c => Number(c.credits) === 3 && !c.has_lab)
-      .slice(0, 3);
+    const seeds = courses.filter(threeCreditNoLabCourse).slice(0, 3);
     expect(seeds.length).toBe(3);
     const lecHalls = venues.filter(v => v.type === 'LectureHall');
     // Distinct instructor + venue per seed so no R-04/R-05 noise; all on STT.
@@ -201,7 +241,7 @@ describe('FU-285: saturation-aware recommend (Phase 24)', () => {
 
     // Find recommendations for any 3-credit non-lab course NOT in the seed set.
     const unseededIds = new Set(courses
-      .filter(c => Number(c.credits) === 3 && !c.has_lab)
+      .filter(threeCreditNoLabCourse)
       .map(c => c.id)
       .filter(id => !seeds.some(s => s.id === id))
     );
@@ -212,7 +252,7 @@ describe('FU-285: saturation-aware recommend (Phase 24)', () => {
     // Note: 3-cr non-lab only has STT in legalDayTemplatesForCourse
     // (no lab), so the scorer can't switch to MW for those. But for
     // 3-cr WITH lab, ST/MW/TT are legal — those should now win.
-    const threeCrLabCourses = courses.filter(c => Number(c.credits) === 3 && c.has_lab);
+    const threeCrLabCourses = courses.filter(threeCreditLabCourse);
     if (threeCrLabCourses.length > 0) {
       const labRec = r.body.recommendations.find(rec =>
         threeCrLabCourses.some(c => c.id === rec.courseId)
@@ -236,8 +276,8 @@ describe('FU-285: saturation-aware recommend (Phase 24)', () => {
     // the seeds + the 1-credit course is what makes them appear in recommend's output.
     const { scheduleId } = await freshTermSchedule('271', 'blank');
     const tmpl = await termValidUgCourses('271');   // owner = code OR NULL templates
-    const seeds = tmpl.filter(c => Number(c.credits) === 3 && !c.has_lab).slice(0, 3);
-    const oneCredit = tmpl.find(c => Number(c.credits) === 1);
+    const seeds = tmpl.filter(threeCreditNoLabCourse).slice(0, 3);
+    const oneCredit = await ensureOneDaySchedulableCourse('271', tmpl);
     expect(seeds.length).toBe(3);
     expect(oneCredit).toBeTruthy();
 
@@ -296,7 +336,7 @@ describe('FU-322: incremental saturation + hash tiebreaker (Phase 30)', () => {
     // course recommendations. With >=2 such courses, the smart picker
     // should produce diversity.
     const threeCreditIds = new Set(
-      courses.filter(c => Number(c.credits) === 3).map(c => c.id)
+      courses.filter(c => isSchedulableCourse(c) && Number(c.credits) === 3).map(c => c.id)
     );
     const combos = new Set();
     for (const rec of r.body.recommendations) {
@@ -359,7 +399,7 @@ describe('FU-322: incremental saturation + hash tiebreaker (Phase 30)', () => {
 
     // Pull the first 4 recommendations for 3cr courses.
     const threeCreditIds = new Set(
-      courses.filter(c => Number(c.credits) === 3).map(c => c.id)
+      courses.filter(c => isSchedulableCourse(c) && Number(c.credits) === 3).map(c => c.id)
     );
     const firstFour = r.body.recommendations
       .filter(rec => threeCreditIds.has(rec.courseId))
@@ -406,7 +446,7 @@ describe('FU-288: deletedIds returned on DELETE /sections/:id (Phase 24)', () =>
     const { scheduleId, instructors, venues } = await freshTermSchedule('311', 'blank');
     const courses = await termValidUgCourses('311');
 
-    const c = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
+    const c = courses.find(threeCreditNoLabCourse);
     await seedSection(scheduleId, {
       courseId: c.id, instructorId: instructors[0].id,
       venueId: venues.find(v => v.type === 'LectureHall').id,
@@ -437,7 +477,7 @@ describe('FU-288: deletedIds returned on DELETE /sections/:id (Phase 24)', () =>
     // single-id contract this test asserts.)
     const { scheduleId, instructors, venues } = await freshTermSchedule('321', 'blank');
     const courses = await termValidUgCourses('321');   // NEW-FU-673: template-inclusive (1cr always present)
-    const c = courses.find(c => Number(c.credits) === 1);
+    const c = await ensureOneDaySchedulableCourse('321', courses);
     expect(c).toBeTruthy();
     const lec = venues.find(v => v.type === 'LectureHall');
 
@@ -476,8 +516,8 @@ describe('FU-288: deletedIds returned on DELETE /sections/:id (Phase 24)', () =>
     const { scheduleId, instructors, venues } = await freshTermSchedule('331', 'blank');
     const courses = await termValidUgCourses('331');
 
-    const cA = courses.find(c => Number(c.credits) === 3 && !c.has_lab);
-    const cB = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.id !== cA.id);
+    const cA = courses.find(threeCreditNoLabCourse);
+    const cB = courses.find(c => threeCreditNoLabCourse(c) && c.id !== cA.id);
     const lecHalls = venues.filter(v => v.type === 'LectureHall');
 
     await seedSection(scheduleId, {

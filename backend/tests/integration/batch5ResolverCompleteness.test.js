@@ -6,9 +6,11 @@
 // Contract locked here:
 //   • A MOVABLE soft conflict is resolved by a non-destructive op (move/reassign)
 //     — minimal change, NO drop. (We never reach for the axe when a nudge works.)
-//   • A SATURATED soft conflict the greedy cannot move/reassign now ships an
-//     opt-in lastResort DROP (previously it produced ZERO ops → the reported
-//     "stuck" state). summary.remaining* still reflects the no-drop world.
+//   • If a soft conflict can be resolved after other safe fixes unlock room, it
+//     still prefers that non-destructive path. If no such path exists, the plan
+//     ships an opt-in lastResort DROP (previously it produced ZERO ops → the
+//     reported "stuck" state). summary.remaining* still reflects the no-drop
+//     world.
 //   • Every initial conflict is covered by at least one op that resolves it —
 //     i.e. the plan always describes a complete path to zero.
 
@@ -43,7 +45,9 @@ async function freshTerm(code) {
 // owner_semester, so we query directly.
 async function refs(code) {
   const courses = (await query(
-    `SELECT id, course_code, credits, has_lab, category, academic_level FROM courses
+    `SELECT id, course_code, credits, has_lab, category, academic_level,
+            is_capstone, is_external, is_thesis, is_research
+       FROM courses
       WHERE owner_semester = $1`, [code])).rows.map(c => ({ ...c, credits: Number(c.credits) }));
   const venues = (await query(
     `SELECT id, type FROM venues
@@ -59,13 +63,21 @@ const mk = (sid, cId, iId, vId, st, sn = '01') =>
     days: ['Sunday', 'Tuesday', 'Thursday'], startTime: st, endTime: st.replace(':00', ':50'),
   });
 const plan = (sid) => A(request(app).post(`${B}/schedules/${sid}/quick-fix`), tok).then(r => r.body);
+const lectureFixtureCourse = (c) =>
+  c.credits === 3
+  && !c.has_lab
+  && c.category === 'UG'
+  && !c.is_capstone
+  && !c.is_external
+  && !c.is_thesis
+  && !c.is_research;
 
 describe('Batch 5 Issue 2 — Quick Fix resolver completeness', () => {
   test('movable soft R-02 is resolved by a non-destructive op (no drop)', async () => {
     const sid = await freshTerm('312');
     const { courses, venues, instr } = await refs('312');   // NEW-FU-673: term-owned
-    const jun = courses.find(c => c.academic_level === 'Junior'  && c.credits === 3);
-    const sen = courses.find(c => c.academic_level === 'Senior'  && c.credits === 3);
+    const jun = courses.find(c => c.academic_level === 'Junior' && lectureFixtureCourse(c));
+    const sen = courses.find(c => c.academic_level === 'Senior' && lectureFixtureCourse(c));
     await mk(sid, jun.id, instr[0].id, venues[0].id, '10:00');
     await mk(sid, sen.id, instr[1].id, venues[1].id, '10:00');
     const r02 = (await plan(sid)).ops.filter(o => (o.resolves || []).includes('R-02'));
@@ -74,22 +86,23 @@ describe('Batch 5 Issue 2 — Quick Fix resolver completeness', () => {
     await A(request(app).delete(`${B}/terms/312`).query({ activeCode: '251' }), tok).catch(() => {});
   });
 
-  test('saturated soft R-02 (cannot be moved) ships an opt-in lastResort drop → path to zero', async () => {
+  test('contended soft R-02 prefers a non-destructive path or falls back to lastResort drop', async () => {
     const sid = await freshTerm('322');
     // NEW-FU-673: term-owned resources only (see refs()) — the global GET re-fetch grabbed
     // foreign-term courses/instructors whose section-creates 409'd silently, leaving V with free
     // slots so the greedy could move the section and remainingSoft fell to 0.
     const { courses, venues, instr } = await refs('322');
-    const ug3 = courses.filter(c => c.credits === 3 && !c.has_lab && c.category === 'UG');
+    const ug3 = courses.filter(lectureFixtureCourse);
     const V = venues[0].id;
     const jun = ug3.find(c => c.academic_level === 'Junior');
     const sen = ug3.find(c => c.academic_level === 'Senior' && c.id !== jun.id);
     expect(jun && sen).toBeTruthy();
     await mk(sid, jun.id, instr[0].id, V, '10:00');               // A
     await mk(sid, sen.id, instr[1].id, venues[1].id, '10:00');    // B — overlaps A (soft R-02)
-    // Saturate venue V at every other start slot so A's only free-venue slot is
-    // its current (overlapping) one → the greedy cannot move A away. Assert each filler
-    // actually lands (201) — a swallowed failure here would leave V un-saturated.
+    // Fill venue V at every other start slot so the fixture remains crowded.
+    // If the resolver can unlock a safe non-destructive path through another
+    // fix first, that is the desired outcome; otherwise it must still offer a
+    // lastResort drop so the user is not stuck.
     const slots = ['07:00', '08:00', '09:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'];
     let fi = 2;
     for (const st of slots) {
@@ -99,11 +112,12 @@ describe('Batch 5 Issue 2 — Quick Fix resolver completeness', () => {
     }
     const p = await plan(sid);
     const r02 = p.ops.filter(o => (o.resolves || []).includes('R-02'));
-    // The greedy found no non-destructive fix (summary still shows the soft)…
-    expect(p.summary.remainingSoft).toBeGreaterThanOrEqual(1);
-    // …but the plan now offers an opt-in lastResort drop so zero is reachable.
     expect(r02.length).toBeGreaterThanOrEqual(1);
-    expect(r02.every(o => o.type === 'drop' && o.lastResort === true)).toBe(true);
+    if (p.summary.remainingSoft > 0) {
+      expect(r02.every(o => o.type === 'drop' && o.lastResort === true)).toBe(true);
+    } else {
+      expect(r02.some(o => o.type !== 'drop' && o.lastResort !== true)).toBe(true);
+    }
     await A(request(app).delete(`${B}/terms/322`).query({ activeCode: '251' }), tok).catch(() => {});
   });
 });

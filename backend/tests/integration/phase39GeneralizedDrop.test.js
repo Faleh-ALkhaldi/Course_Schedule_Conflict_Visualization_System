@@ -116,27 +116,23 @@ describe('FU-399: Phase 39 generalized lastResort drop', () => {
 
   // ── G-Q01..G-Q05: every unresolved conflict ships with a
   // lastResort drop the user can opt into ─────────────────────────
-  test('G-Q01: R-14 still emits a tailored lastResort drop (regression vs Phase 38)', async () => {
+  test('G-Q01: R-14 (orphan Lab — a Lab with no Lecture) is RESOLVED by untag-has-lab (NEW-FU-681)', async () => {
     const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
     const { courses, instructors, venues } = await getRefs(code);
+    // NEW-FU-681: R-14 now fires for an ORPHAN LAB (a Lab with no Lecture); a lecture-only has_lab
+    // course no longer flags (its lab is managed separately — e.g. a scoped instructor/venue import).
+    // A 3-credit orphan-lab R-14 is RESOLVED non-destructively (untag-has-lab), so it no longer needs
+    // a lastResort drop — confirm the resolver addresses it with a real op (not left dangling).
     const labCourse = courses.find(c => c.has_lab);
     const hall = venues.find(v => v.type === 'LectureHall');
     const hassan = instructors.find(i => i.name === 'Dr. Hassan') ?? instructors[1];
-    // NEW-FU-673: a 3-credit WITH-lab course's Lec is a 2-day pattern (ST/MW/TT) — STT (3 days)
-    // is rejected at create. ST (Sun/Tue) 50min is legal; with no Lab section, R-14 fires.
     await createSection(sched, { courseId: labCourse.id, instructorId: hassan.id,
-      venueId: hall.id, sectionNumber: '01', sectionType: 'Lec',
-      days: ['Sunday','Tuesday'], startTime: '14:30', endTime: '15:20' });
+      venueId: (venues.find(v => v.type === 'Laboratory') || hall).id, sectionNumber: '50', sectionType: 'Lab',
+      days: ['Monday'], startTime: '14:30', endTime: '15:20' });
     const planRes = await plan(sched);
-    const dropOps = (planRes.ops ?? []).filter(o => o.type === 'drop');
-    expect(dropOps.length).toBeGreaterThanOrEqual(1);
-    for (const op of dropOps) {
-      expect(op.lastResort).toBe(true);
-      expect(Array.isArray(op.resolves)).toBe(true);
-    }
-    // R-14's tailored label uses "orphan" language; the generalized
-    // suffix uses "(last resort — no non-destructive fix found...)".
-    // Either is acceptable; just confirm at least one lastResort drop exists.
+    const r14ops = (planRes.ops ?? []).filter(o => (o.resolves || []).includes('R-14'));
+    expect(r14ops.length).toBeGreaterThanOrEqual(1);
+    expect(r14ops.every(o => Array.isArray(o.resolves))).toBe(true);
   });
 
   test('G-Q02: R-10 with no free venue gets a lastResort drop', async () => {
@@ -203,31 +199,28 @@ describe('FU-399: Phase 39 generalized lastResort drop', () => {
     }
   });
 
-  test('G-Q05: applying lastResort drop removes the section + clears its conflict', async () => {
+  test('G-Q05: applying the orphan-lab R-14 resolution clears the conflict (NEW-FU-681)', async () => {
     const { scheduleId: sched, code } = await freshTermSchedule();   // NEW-FU-673
     const { courses, instructors, venues } = await getRefs(code);
     const labCourse = courses.find(c => c.has_lab);
     const hall = venues.find(v => v.type === 'LectureHall');
     const hassan = instructors.find(i => i.name === 'Dr. Hassan') ?? instructors[1];
-    // NEW-FU-673: ST (Sun/Tue) — legal Lec pattern for a 3-credit WITH-lab course (STT is not);
-    // with no Lab section R-14 fires and the resolver emits a lastResort drop.
+    // NEW-FU-681: an orphan-lab R-14 (Lab with no Lecture) is resolved by untag-has-lab; applying
+    // the resolving op clears the R-14 conflict.
     await createSection(sched, { courseId: labCourse.id, instructorId: hassan.id,
-      venueId: hall.id, sectionNumber: '01', sectionType: 'Lec',
-      days: ['Sunday','Tuesday'], startTime: '14:30', endTime: '15:20' });
+      venueId: (venues.find(v => v.type === 'Laboratory') || hall).id, sectionNumber: '50', sectionType: 'Lab',
+      days: ['Monday'], startTime: '14:30', endTime: '15:20' });
     const planRes = await plan(sched);
-    const dropOp = (planRes.ops ?? []).find(o => o.type === 'drop' && o.lastResort);
-    expect(dropOp).toBeTruthy();
-    // Apply ONLY the drop op
+    const op = (planRes.ops ?? []).find(o => (o.resolves || []).includes('R-14'));
+    expect(op).toBeTruthy();
     const apply = await request(app)
       .post(`/api/v1/schedules/${sched}/quick-fix/apply`)
       .set('Authorization', `Bearer ${adminTok}`)
-      .send({ ops: [dropOp] });
+      .send({ ops: [op] });
     expect(apply.status).toBe(200);
     const post = (await request(app)
       .get(`/api/v1/schedules/${sched}/conflicts`)
       .set('Authorization', `Bearer ${adminTok}`)).body.conflicts ?? [];
-    // The R-14 conflict the drop resolves should be gone (and the
-    // section itself removed).
     expect(post.filter(c => c.ruleId === 'R-14').length).toBe(0);
   });
 

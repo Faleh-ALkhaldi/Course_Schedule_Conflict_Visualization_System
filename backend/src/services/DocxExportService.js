@@ -5,12 +5,13 @@
  *
  * NEW-FU-657: the public export is the COMBINED document —
  *   buildCombinedDocxBuffer(scheduleId, filter, semester)
- *     → Half A: visual schedule as a per-day section list (scope = filter)
+ *     → Half A: visual schedule as a per-day section list (focused scope = filter)
  *     → page break →
- *     → Half B: full-semester section table (every section, 13-col schema)
- * Half B is always the whole term, so the file round-trips into a complete
- * schedule via importBuffer('docx'). buildTableDocxBuffer / buildGridDocxBuffer
- * remain as single-half builders (back-compat + internal reuse).
+ *     → Half B: scoped section table plus required reference tables
+ * Whole-term files carry every section. Instructor/venue files carry the selected
+ * entity plus required complementary Lec/Lab rows and references so scoped files
+ * can be re-imported safely. buildTableDocxBuffer / buildGridDocxBuffer remain as
+ * single-half builders (back-compat + internal reuse).
  *
  * NEW-FU-658: Half A is now a real day×time VISUAL GRID (a docx table with 5-min
  * slot rows and vertical-merged section cells) — identical in structure, colors,
@@ -38,9 +39,8 @@ const instrRepo   = new InstructorRepository();
 // NEW-FU-660: the scoped section set (instructor / venue / whole-term) so Half B's
 // table covers the same sections as Half A's grid.
 async function fetchScopedSections(scheduleId, filter = { type: 'full' }) {
-  if (filter && filter.type === 'instructor' && filter.id) return sectionRepo.findByInstructor(scheduleId, filter.id);
-  if (filter && filter.type === 'venue'      && filter.id) return sectionRepo.findByVenue(scheduleId, filter.id);
-  return sectionRepo.findBySchedule(scheduleId);
+  // NEW-FU-682: also carry the complementary half of each has_lab course (flagged isComplement).
+  return sectionRepo.findScopedWithComplement(scheduleId, filter);
 }
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday'];
@@ -67,6 +67,9 @@ const G_TOTAL_SLOTS = ((G_END_H - G_START_H) * 60) / G_SLOT_MIN; // 180
 // sections into the last lane rather than grow columns unbounded. Bounds the cell count to ≤ 5×12×180.
 const MAX_GRID_LANES = 12;
 const SOFT_FILL = 'FFE08A';
+// NEW-FU-682: rose fill for a CARRIED COMPLEMENT section (a lab course's other half) — same hue used by
+// the PDF/Excel exports, distinct from every level fill and the amber soft fill.
+const COMPLEMENT_FILL = 'F3CCDD';
 const TIME_FILL = 'E8EEF7';
 const EMPTY_FILL_A = 'FAFAFA', EMPTY_FILL_B = 'F0F4FA';
 function gTimeToSlot(t) {
@@ -140,17 +143,24 @@ const TABLE_HEADERS = [
 ];
 
 // NEW-FU-660: `title` carries the scope-tagged heading the Word importer detects.
-function tableChildren(scheduleId, semester, groups, title) {
+function tableChildren(scheduleId, semester, groups, title, { complementOnly = false } = {}) {
+  // NEW-FU-687 (Part B): `complementOnly` splits the rows — the ASSIGNED table (false) shows the entity's
+  // own sections; a separate CARRIED table (true) shows the reference-only complementary halves with a red
+  // note. The carried table no longer needs a tag COLUMN (the whole table IS the carried set), so headers
+  // stay the standard set on both — keeping the Word importer's header→cell zip lossless for round-trip.
   const headerRow = new TableRow({ children: TABLE_HEADERS.map(headerCell), tableHeader: true });
 
   const dataRows = [];
   for (const [, { sec, days }] of groups) {
+    if (Boolean(sec.isComplement) !== complementOnly) continue;   // assigned-only OR carried-only
     const startT = (sec.startTime ?? '').substring(0, 5);
     const endT   = (sec.endTime   ?? '').substring(0, 5);
     const [h1, m1] = startT.split(':').map(Number);
     const [h2, m2] = endT.split(':').map(Number);
-    const duration = (h2 * 60 + m2) - (h1 * 60 + m1);
-    const fill = LEVEL_FILL[sec.academicLevel];
+    // NEW-FU-688: an untimed conflict-exempt activity (Project / info-only) has blank times — render a
+    // blank duration instead of "NaN min".
+    const durationText = (startT && endT) ? `${(h2 * 60 + m2) - (h1 * 60 + m1)} min` : '';
+    const fill = complementOnly ? COMPLEMENT_FILL : LEVEL_FILL[sec.academicLevel];
 
     dataRows.push(new TableRow({
       children: [
@@ -159,14 +169,14 @@ function tableChildren(scheduleId, semester, groups, title) {
         bodyCell(sec.academicLevel,     fill),
         bodyCell(labels.categoryDisplay(sec.category),          fill),   // NEW-FU-666: end-user labels
         bodyCell(sec.credits ?? '',     fill),
-        bodyCell(labels.courseTypeLabel(sec), fill),
+        bodyCell(labels.courseTypeLabel(sec), fill),                     // NEW-FU-687: Project/Thesis
         bodyCell(sec.sectionNumber,     fill),
-        bodyCell(labels.sectionTypeDisplay(sec.sectionType ?? 'Lec'), fill),
+        bodyCell(labels.sectionTypeDisplay(labels.effectiveSectionType(sec, { season: semester })), fill),  // NEW-FU-687/688: Lec→Prj/Ths + ST/INT by season
         bodyCell(labels.genderDisplay(sec.gender === 'F' ? 'F' : 'M'), fill),
         bodyCell(days.sort().join(', '), fill),
         bodyCell(startT, fill),
         bodyCell(endT,   fill),
-        bodyCell(`${duration} min`, fill),
+        bodyCell(durationText, fill),
         bodyCell(sec.instructorName ?? '', fill),
         bodyCell(sec.venueName      ?? '', fill),
         bodyCell(labels.venueTypeDisplay(sec.venueType), fill),
@@ -176,9 +186,15 @@ function tableChildren(scheduleId, semester, groups, title) {
 
   return [
     new Paragraph({
-      heading: HeadingLevel.HEADING_1,
-      children: [new TextRun({ text: title || `${semester || 'Schedule'} — Full Semester (all sections)`, bold: true })],
+      heading: complementOnly ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_1,
+      children: [new TextRun({ text: title || `${semester || 'Schedule'} — Full Semester (all sections)`, bold: true,
+        ...(complementOnly ? { color: 'C2185B' } : {}) })],
     }),
+    // NEW-FU-687 (Part B): the red carried-table note, immediately under the carried heading (this Word
+    // table can't repeat a per-page banner, but a docx table header row repeats across page breaks, and the
+    // note sits with the table it describes — satisfying "the carried table is always clearly marked").
+    ...(complementOnly ? [new Paragraph({ children: [new TextRun({
+      text: scope.COMPLEMENT_EXPORT_NOTE, italics: true, color: 'C2185B', size: 16 })] })] : []),
     new Table({
       rows: [headerRow, ...dataRows],
       width: { size: 100, type: WidthType.PERCENTAGE },
@@ -200,16 +216,17 @@ async function buildTableDocxBuffer(scheduleId, semester) {
 
 // ── GRID (Half A — per-day list) ─────────────────────────────────────────────
 async function fetchGridSections(scheduleId, filter) {
+  // NEW-FU-682: the grid carries the complementary half of each has_lab course too (flagged isComplement).
   if (filter.type === 'instructor' && filter.id) {
     const [instr, secs] = await Promise.all([
       instrRepo.findById(filter.id),
-      sectionRepo.findByInstructor(scheduleId, filter.id),
+      sectionRepo.findScopedWithComplement(scheduleId, filter),
     ]);
     return { sections: secs, subtitle: instr?.name || 'Instructor' };
   }
   if (filter.type === 'venue' && filter.id) {
     const venue = await new VenueRepository().findById(filter.id);
-    const secs  = await sectionRepo.findByVenue(scheduleId, filter.id);
+    const secs  = await sectionRepo.findScopedWithComplement(scheduleId, filter);
     return { sections: secs, subtitle: venue?.name || 'Venue' };
   }
   // NEW-FU-657: whole-term schedule — every section, grouped per day.
@@ -224,6 +241,8 @@ function gridChildren(sections, subtitle, semester, softIds = new Set()) {
   const perDay = {};
   for (const day of DAYS) perDay[day] = [];
   for (const sec of sections) {
+    if (sec.isComplement) continue;   // NEW-FU-687 (Part A): carried halves never appear in the grid
+    if (labels.isInfoOnlyCourse(sec)) continue;   // NEW-FU-688: info-only (external/thesis/research) never in the grid
     if (!sec.startTime || !sec.endTime) continue;
     const ss = gTimeToSlot(sec.startTime), es = gTimeToSlot(sec.endTime);
     if (ss >= es) continue;
@@ -278,9 +297,12 @@ function gridChildren(sections, subtitle, semester, softIds = new Set()) {
         const o = occ[day][lane][slot];
         if (o && o.type === 'start') {
           const sec = o.sec;
-          const fill = softIds.has(sec.id) ? SOFT_FILL : (LEVEL_FILL[sec.academicLevel] || 'E8F4FD');
+          // NEW-FU-682: a carried complement card is rose-filled with a leading "Carried" tag line.
+          const isComp = sec.isComplement;
+          const fill = softIds.has(sec.id) ? SOFT_FILL : isComp ? COMPLEMENT_FILL : (LEVEL_FILL[sec.academicLevel] || 'E8F4FD');
           const lines = [
-            `${sec.courseCode ?? ''} ${sectionLabel(sec)} · ${labels.sectionTypeShort(sec.sectionType)}`,   // NEW-FU-666: Lec/Lab flag
+            ...(isComp ? [scope.COMPLEMENT_TAG_SHORT] : []),
+            `${sec.courseCode ?? ''} ${sectionLabel(sec)} · ${labels.sectionTypeShort(labels.effectiveSectionType(sec))}`,   // NEW-FU-666/687: Lec/Lab/Prj/Ths flag (derived)
             `${(sec.startTime ?? '').substring(0, 5)}–${(sec.endTime ?? '').substring(0, 5)}`,
             sec.instructorName ?? '',
             sec.venueName ?? '',
@@ -328,7 +350,8 @@ async function buildGridDocxBuffer(scheduleId, filter, semester) {
 // NEW-FU-657: OH header lacks Course Code / Days, so the import's section-table
 // finder skips it; a dedicated OH finder picks it up.
 // NEW-FU-660: OH / instructor / venue reference sets are fetched SCOPED via the shared
-// exportScope helpers, so a scoped Word doc carries only that entity's reference data.
+// exportScope helpers, so a scoped Word doc carries the selected entity's reference
+// data plus any complementary references required for a valid re-import.
 function officeHoursChildren(ohRows, semester) {
   const headers = ['Instructor', 'Day', 'Start Time', 'End Time'];
   const rows = [new TableRow({ children: headers.map(headerCell), tableHeader: true })];
@@ -374,6 +397,16 @@ function venuesChildren(rows, semester, scopeName) {
 }
 
 // ── COMBINED (schedule + table + office hours + instructors + venues) ──────────────
+// NEW-FU-680: a small legend below the table defining Course Type / Section Type (and that they are
+// independent — a Capstone course can have Lecture sections). Same content in PDF/Word/Excel, all scopes.
+function typeLegendChildren() {
+  const line = (text, bold) => new Paragraph({
+    children: [new TextRun({ text, italics: !bold, bold: !!bold, size: bold ? 16 : 15, color: bold ? '1F4E79' : '444444' })],
+    spacing: { after: 40 },
+  });
+  return [line(labels.TYPE_LEGEND_TITLE, true), ...labels.typeLegendLines().map((l) => line(l, false))];
+}
+
 async function buildCombinedDocxBuffer(scheduleId, filter = { type: 'full' }, semester) {
   // NEW-FU-660: every half is scoped to the same filter — the table reads the SCOPED
   // section set (not the whole term), and OH / instructor / venue reference data is
@@ -392,20 +425,32 @@ async function buildCombinedDocxBuffer(scheduleId, filter = { type: 'full' }, se
   ]);
   const groups = groupSections(scopedSections);
 
-  // NEW-FU-667: a VENUE file also carries the venue's instructors + their office hours; explain
-  // why (once, just before those sections) so the user doesn't read it as an error/afterthought.
-  const venueNote = (scopeName === 'venue' && (ohRows.length || instrRows.length))
-    ? [new Paragraph({ children: [new PageBreak()] }),
-       new Paragraph({ children: [new TextRun({ text: scope.VENUE_EXPORT_NOTE, italics: true, color: '555555', size: 18 })] })]
-    : [];
+  // NEW-FU-667/FU-679: a VENUE file also carries the venue's instructors + their office hours;
+  // explain why on the SAME page as (directly above) the Office Hours it accompanies — matching the
+  // PDF — so the reader sees the note WHILE reading the office hours. (Was its own block split off by
+  // a page break onto a separate page from the OH, so it read as a disconnected afterthought.)
+  const venueNotePara = () => new Paragraph({
+    children: [new TextRun({ text: scope.VENUE_EXPORT_NOTE, italics: true, color: '555555', size: 18 })],
+    spacing: { after: 200 },
+  });
+  const wantNote    = scopeName === 'venue' && (ohRows.length || instrRows.length);
+  const noteOnOH    = wantNote && ohRows.length > 0;   // ride with the Office Hours when present…
+  const noteOnInstr = wantNote && !ohRows.length;      // …else with the Instructors page
   const children = [
     ...gridChildren(sections, subtitle, semester, softIds),
     // Page break so Half B (the importable table) starts on its own page.
     new Paragraph({ children: [new PageBreak()] }),
-    ...tableChildren(scheduleId, semester, groups, tableTitle),
-    ...venueNote,
-    ...(ohRows.length ? [new Paragraph({ children: [new PageBreak()] }), ...officeHoursChildren(ohRows, semester)] : []),
-    ...(instrRows.length ? [new Paragraph({ children: [new PageBreak()] }), ...instructorsChildren(instrRows, semester, scopeName)] : []),
+    ...tableChildren(scheduleId, semester, groups, tableTitle),   // NEW-FU-687 (Part B): ASSIGNED sections only
+    ...typeLegendChildren(),   // NEW-FU-680/687 (Part D): Course Type / Section Type definitions, on the SAME page directly below the table
+    // NEW-FU-687 (Part B): the carried complementary halves go in their OWN table (on a fresh page), with a
+    // red heading + red note — never mixed with the assigned table, so a carried section's instructor/venue
+    // is never mistaken for the assigned entity's own.
+    ...(scopedSections.some(s => s.isComplement)
+      ? [new Paragraph({ children: [new PageBreak()] }),
+         ...tableChildren(scheduleId, semester, groups, scope.COMPLEMENT_EXPORT_TITLE, { complementOnly: true })]
+      : []),
+    ...(ohRows.length ? [new Paragraph({ children: [new PageBreak()] }), ...(noteOnOH ? [venueNotePara()] : []), ...officeHoursChildren(ohRows, semester)] : []),
+    ...(instrRows.length ? [new Paragraph({ children: [new PageBreak()] }), ...(noteOnInstr ? [venueNotePara()] : []), ...instructorsChildren(instrRows, semester, scopeName)] : []),
     ...(venueRows.length ? [new Paragraph({ children: [new PageBreak()] }), ...venuesChildren(venueRows, semester, scopeName)] : []),
   ];
 

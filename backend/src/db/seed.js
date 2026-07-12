@@ -45,6 +45,7 @@ const CAPSTONE_CODES = new Set(['SWE411', 'SWE412', 'SWE413', 'SWE414']);
 // conflict rule is skipped for these. Currently just SWE 399 Summer
 // Training.
 const EXTERNAL_CODES = new Set(['SWE399']);
+const SEMINAR_CODES = new Set(['SWE599']);
 
 // NEW-FU-275 (Phase 52 #3 + #4): old-format capstone being phased out
 // after term 252. Term 261 and 262 must NOT include SWE 412 sections.
@@ -53,10 +54,10 @@ const DISCONTINUED_FROM_261 = new Set(['SWE412']);
 const DAY_MAP = { U: 'Sunday', M: 'Monday', T: 'Tuesday', W: 'Wednesday', R: 'Thursday' };
 
 // NEW-FU-498 (Phase 122): PRJ now buckets as its own 'Prj' type (capstone
-// projects), and THS as 'Ths' (thesis) — matching the registrar. SEM (seminar)
-// stays 'Lec'. LAB stays Lab. THS rows usually have no schedule and are dropped
-// before they reach here, but the mapping is kept for completeness/fidelity.
-const ACTIVITY_TO_SECTION_TYPE = { LEC: 'Lec', LAB: 'Lab', PRJ: 'Prj', THS: 'Ths', SEM: 'Lec' };
+// projects), and THS as 'Ths' (thesis) — matching the registrar. LAB stays Lab.
+// NEW-FU-688/690: ST/INT/THS/RES are information-only and carry no meeting;
+// ST/INT/RES derive their display label from course flags, so they persist as Lec.
+const ACTIVITY_TO_SECTION_TYPE = { LEC: 'Lec', LAB: 'Lab', PRJ: 'Prj', THS: 'Ths', SEM: 'Sem', ST: 'Lec', INT: 'Lec', RES: 'Lec' };
 
 // ── Load raw data once ─────────────────────────────────────────────────────
 const catalog = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'catalog-swe-ug.json'), 'utf8'));
@@ -64,12 +65,51 @@ const catalogByCode = Object.fromEntries(catalog.map(c => [c.code, c]));
 const allOfferings = {};
 const activeUGCodes  = new Set();   // catalog UG codes that appear in any term
 const gradCodes      = new Map();   // 5xx/6xx code → { title, hasLab }
+const courseFlags    = new Map();   // course code → registrar-level flags inferred from activities
+
+function flagsFor(code) {
+  if (!courseFlags.has(code)) {
+    courseFlags.set(code, {
+      isExternal: EXTERNAL_CODES.has(code),
+      isThesis: false,
+      isResearch: false,
+      isSeminar: SEMINAR_CODES.has(code),
+    });
+  }
+  return courseFlags.get(code);
+}
+
+function markActivity(code, activity) {
+  const flags = flagsFor(code);
+  switch (String(activity || '').toUpperCase()) {
+    case 'ST':
+    case 'INT':
+      flags.isExternal = true;
+      break;
+    case 'THS':
+      flags.isThesis = true;
+      break;
+    case 'RES':
+      flags.isResearch = true;
+      break;
+    case 'SEM':
+      flags.isSeminar = true;
+      break;
+    default:
+      break;
+  }
+}
+
 for (const t of TERMS) {
   if (!t.file) { allOfferings[t.short] = []; continue; }  // synthesized terms (262)
   const data = JSON.parse(fs.readFileSync(path.join(DATA_DIR, t.file), 'utf8'));
   allOfferings[t.short] = data.rows;
   for (const r of data.rows) {
     const code = r.courseSec.split('-')[0].replace(/\s+/g, '');
+    markActivity(code, r.activity);
+    if (String(r.name || '').toLowerCase().includes('seminar')) {
+      flagsFor(code).isSeminar = true;
+    }
     if (catalogByCode[code]) {
       activeUGCodes.add(code);
     } else if (/^SWE[5-9]\d{2}$/.test(code) || /^SWE6\d{2}$/.test(code)) {
@@ -425,11 +465,16 @@ async function seed() {
       const c = catalogByCode[code];
       const display = code.slice(0, 3) + ' ' + code.slice(3);
       const isCapstone = CAPSTONE_CODES.has(code);
+      const flags = flagsFor(code);
       const r = await client.query(
         `INSERT INTO courses
-           (course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-        [display, c.title, creditHours(code), academicLevel(code), 'UG', 1, hasLab(code), isCapstone]
+           (course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone, is_external, is_thesis, is_research, is_seminar)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+        [
+          display, c.title, creditHours(code), academicLevel(code), 'UG', 1,
+          hasLab(code), isCapstone, flags.isExternal, flags.isThesis,
+          flags.isResearch, flags.isSeminar,
+        ]
       );
       courseIds.set(code, r.rows[0].id);
     }
@@ -438,11 +483,13 @@ async function seed() {
     for (const code of [...gradCodes.keys()].sort()) {
       const { title, hasLab: gradHasLab } = gradCodes.get(code);
       const display = code.slice(0, 3) + ' ' + code.slice(3);
+      const flags = flagsFor(code);
+      const credits = flags.isSeminar ? 1 : 3;
       const r = await client.query(
         `INSERT INTO courses
-           (course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone)
-         VALUES ($1, $2, 3, 'Graduate', 'GR', 1, $3, FALSE) RETURNING id`,
-        [display, title, gradHasLab]
+           (course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone, is_external, is_thesis, is_research, is_seminar)
+         VALUES ($1, $2, $3, 'Graduate', 'GR', 1, $4, FALSE, $5, $6, $7, $8) RETURNING id`,
+        [display, title, credits, flags.isSeminar ? false : gradHasLab, flags.isExternal, flags.isThesis, flags.isResearch, flags.isSeminar]
       );
       courseIds.set(code, r.rows[0].id);
     }
@@ -489,6 +536,28 @@ async function seed() {
           skipReasons.discontinued++; continue;
         }
 
+        const flags = flagsFor(codeFull);
+        const isInfoOnlyActivity = flags.isExternal || flags.isThesis || flags.isResearch;
+        if (isInfoOnlyActivity && (!r.day || !r.time || !parseTime(r.time))) {
+          const instructorName = r.instructor?.trim();
+          if (!instructorName) { skipReasons.blankInstructor++; continue; }
+          const { gender, number } = splitSection(r.courseSec.split('-')[1]);
+          const courseId = courseIds.get(codeFull);
+          const scheduleId = scheduleIds.get(t.short);
+          const instructorId = instructorIds.get(instructorEmail(instructorName));
+          const sectionType = flags.isThesis ? 'Ths' : 'Lec';
+          await client.query(
+            `INSERT INTO sections
+               (schedule_id, course_id, instructor_id, venue_id,
+                section_number, day, start_time, end_time, section_type, gender)
+             VALUES ($1, $2, $3, NULL, $4, NULL, NULL, NULL, $5, $6)
+             ON CONFLICT DO NOTHING`,
+            [scheduleId, courseId, instructorId, number, sectionType, gender]
+          );
+          inserted++;
+          continue;
+        }
+
         // Drop-incomplete rule (NEW-FU-272 #2). Bucket the reason for the
         // tally so the operator can see exactly why each row was dropped.
         if (!r.day || !r.time || !parseTime(r.time)) { skipReasons.noSchedule++; continue; }
@@ -518,7 +587,8 @@ async function seed() {
         if (!instructorName)  { skipReasons.blankInstructor++; continue; }
 
         const { gender, number } = splitSection(r.courseSec.split('-')[1]);
-        const sectionType = ACTIVITY_TO_SECTION_TYPE[r.activity] || 'Lec';
+        const sectionFlags = flagsFor(codeFull);
+        const sectionType = sectionFlags.isSeminar ? 'Sem' : (ACTIVITY_TO_SECTION_TYPE[r.activity] || 'Lec');
 
         const courseId = courseIds.get(codeFull);
         const scheduleId = scheduleIds.get(t.short);
@@ -526,7 +596,8 @@ async function seed() {
         const instructorId = instructorIds.get(email);
         const venueId = hasVenue ? venueIds.get(venueLoc) : null;
 
-        for (const day of days) {
+        const seedDays = sectionFlags.isSeminar ? days.slice(0, 1) : days;
+        for (const day of seedDays) {
           await client.query(
             `INSERT INTO sections
                (schedule_id, course_id, instructor_id, venue_id,
@@ -633,27 +704,6 @@ async function seed() {
       }
       recordSlot('261', instructorEmail('MANSOUR ALHARTHI'),
                  ['Monday', 'Wednesday'], '09:30', '10:45');
-    }
-
-    // NEW-FU-275 (Phase 52 #5): SWE 399 placeholder section in term 253.
-    // The section's day/time are sentinel values (Saturday 00:00–00:01)
-    // so it satisfies the NOT NULL + end>start constraints but doesn't
-    // collide with anything real. The conflict engine short-circuits at
-    // the top of every rule for is_external=true courses, so this row
-    // never fires anything. Frontend can render it as a sidebar-only
-    // entry (no grid card) based on `isExternal`.
-    const swe399Id = courseIds.get('SWE399');
-    const sched253 = scheduleIds.get('253');
-    if (swe399Id && sched253) {
-      await client.query(
-        `INSERT INTO sections
-           (schedule_id, course_id, instructor_id, venue_id,
-            section_number, day, start_time, end_time, section_type, gender)
-         VALUES ($1, $2, NULL, NULL, '01', 'Saturday', '00:00', '00:01', 'Lec', 'M')
-         ON CONFLICT DO NOTHING`,
-        [sched253, swe399Id]
-      );
-      inserted++;
     }
 
     // NEW-FU-273 (Phase 51 #2): deterministic office hours per instructor.

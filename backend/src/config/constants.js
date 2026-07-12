@@ -143,6 +143,7 @@ const SECTION_TYPE = {
   LAB: 'Lab',
   PRJ: 'Prj',
   THS: 'Ths',
+  SEM: 'Sem',
 };
 
 // ── Section-number ranges (NEW-FU-106) ────────────────────────────────────────
@@ -157,6 +158,7 @@ const SECTION_NUMBER_RANGE = {
   // registrar, e.g. SWE 412-01, SWE 413-01/02, SWE 494-01).
   Prj: { min: 1,  max: 49, regex: /^(0[1-9]|[1-4][0-9])$/ },
   Ths: { min: 1,  max: 49, regex: /^(0[1-9]|[1-4][0-9])$/ },
+  Sem: { min: 1,  max: 49, regex: /^(0[1-9]|[1-4][0-9])$/ },
 };
 
 // ── Section duration limits (NEW-FU-106) ──────────────────────────────────────
@@ -169,12 +171,11 @@ const SECTION_NUMBER_RANGE = {
 const SECTION_DURATION = {
   Lec: { min: 50, max: 75,  defaults: [50, 75] },
   Lab: { min: 50, max: 160, defaults: [50, 75, 160] },
-  // NEW-FU-498 (Phase 122): Project/Thesis meet in long single blocks (or, for
-  // thesis, often no fixed meeting at all — the duration check is skipped when
-  // no time is set). 50–180 covers the registrar's PRJ spread (75-min SWE 413,
-  // 100-min SWE 414, 160-min SWE 412).
-  Prj: { min: 50, max: 180, defaults: [75, 100, 160] },
+  // NEW-FU-498 (Phase 122): Project sections may be untimed, or timed as one
+  // weekly block. The allowed timed durations are discrete registrar patterns.
+  Prj: { min: 50, max: 180, defaults: [50, 75, 100, 160] },
   Ths: { min: 50, max: 180, defaults: [75, 100, 160] },
+  Sem: { min: 75, max: 75, defaults: [75] },
 };
 
 // ── Days of week (as stored in DB) ───────────────────────────────────────────

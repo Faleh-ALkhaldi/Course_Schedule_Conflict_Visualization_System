@@ -417,17 +417,17 @@ async function createTerm({ code, createdBy, departmentId = DEFAULT_DEPT, starts
       }
       const isoCourse = await client.query(
         `SELECT DISTINCT c.id, c.course_code, c.name, c.credits, c.academic_level,
-                         c.category, c.num_sections, c.has_lab, c.is_capstone, c.is_external
+                         c.category, c.num_sections, c.has_lab, c.is_capstone, c.is_external, c.is_thesis, c.is_research, c.is_seminar
            FROM sections s JOIN courses c ON c.id = s.course_id
           WHERE s.schedule_id = $1 AND c.owner_semester IS DISTINCT FROM $2`,
         [newId, code]);
       for (const r of isoCourse.rows) {
         const ins = await client.query(
           `INSERT INTO courses (course_code, name, credits, academic_level, category,
-                                num_sections, has_lab, is_capstone, is_external, owner_semester)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+                                num_sections, has_lab, is_capstone, is_external, is_thesis, is_research, is_seminar, owner_semester)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
           [r.course_code, r.name, r.credits, r.academic_level, r.category,
-           r.num_sections, r.has_lab, r.is_capstone, r.is_external, code]);
+           r.num_sections, r.has_lab, r.is_capstone, r.is_external, r.is_thesis, r.is_research, r.is_seminar, code]);
         await client.query(
           `UPDATE sections SET course_id = $1 WHERE schedule_id = $2 AND course_id = $3`,
           [ins.rows[0].id, newId, r.id]);

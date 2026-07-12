@@ -24,7 +24,8 @@ const VALID_DAYS = new Set(Object.keys(DAY_INDEX));
 // Standard durations in minutes.
 const DUR_50  = 50;
 const DUR_75  = 75;
-const DUR_160 = 160;   // 2h 40m — lab only
+const DUR_100 = 100;
+const DUR_160 = 160;   // 2h 40m — lab/project
 
 // Per-row helpers. Each rule has a `match` predicate that takes
 // `{ days, duration }` and returns true if the candidate fits. We
@@ -86,6 +87,13 @@ function durationMinutes(startTime, endTime) {
  * @returns {{ ok: true } | { ok: false, error: string }}
  */
 function validateSectionPattern({ credits, hasLab, sectionType, days, startTime, endTime }) {
+  // NEW-FU-688: a TIME-LESS (info-only) section — no day and no times — is always valid. Off-campus
+  // training (Summer Training / Internship), thesis, research, and an untimed project exist as side-
+  // panel information with no meeting; there is no pattern to enforce. (A section with SOME of day/
+  // start/end but not all still falls through to the normal checks, which reject the partial state.)
+  if ((days == null || days.length === 0) && !startTime && !endTime) {
+    return { ok: true };
+  }
   // Credit cap — domain-level invariant. KFUPM has no 0 or 5+ credit
   // courses, and 4-credit courses must have a lab. Caller is
   // expected to enforce these at the course level too; we double-
@@ -96,8 +104,8 @@ function validateSectionPattern({ credits, hasLab, sectionType, days, startTime,
   if (credits === 4 && !hasLab) {
     return { ok: false, error: '4-credit courses must have a lab section. Set hasLab on the course or use 3 credits.' };
   }
-  if (!['Lec', 'Lab', 'Prj', 'Ths'].includes(sectionType)) {
-    return { ok: false, error: `Invalid sectionType "${sectionType}". Expected "Lec", "Lab", "Prj", or "Ths".` };
+  if (!['Lec', 'Lab', 'Prj', 'Ths', 'Sem'].includes(sectionType)) {
+    return { ok: false, error: `Invalid sectionType "${sectionType}". Expected "Lec", "Lab", "Prj", "Ths", or "Sem".` };
   }
   if (!Array.isArray(days) || days.length === 0 || !days.every(d => VALID_DAYS.has(d))) {
     return { ok: false, error: `Invalid days ${JSON.stringify(days)}. Expected non-empty subset of Sunday–Thursday.` };
@@ -107,14 +115,32 @@ function validateSectionPattern({ credits, hasLab, sectionType, days, startTime,
     return { ok: false, error: `endTime must be after startTime (got ${duration} min).` };
   }
 
-  // NEW-FU-498 (Phase 122): Project/Thesis sections are pattern-FLEXIBLE — they
-  // meet in long single blocks (capstone projects) or have no fixed lecture
-  // pattern (thesis), so the rigid (credits × day-pattern × duration) Lec/Lab
-  // rules don't apply. Only the 50–180 min duration bound is enforced (mirrors
-  // the controller's SECTION_DURATION_BY_TYPE backstop).
-  if (sectionType === 'Prj' || sectionType === 'Ths') {
-    if (duration < 50 || duration > 180) {
-      return { ok: false, error: `${sectionType === 'Prj' ? 'Project' : 'Thesis'} section must be 50–180 minutes (got ${duration}).` };
+  // Project sections may be untimed; when timed, they are exactly one meeting
+  // day with one of the registrar-supported project block lengths.
+  if (sectionType === 'Prj') {
+    if (!anyDay(days)) {
+      return { ok: false, error: `A Project meets on a single day when timed (got ${days.join('+') || 'none'}).` };
+    }
+    if (![DUR_50, DUR_75, DUR_100, DUR_160].includes(duration)) {
+      return { ok: false, error: `Project section duration must be 50, 75, 100, or 160 minutes (got ${duration}).` };
+    }
+    return { ok: true };
+  }
+
+  if (sectionType === 'Ths') {
+    return { ok: false, error: 'Thesis sections are information-only and must not have a meeting time.' };
+  }
+
+  // NEW-FU-688 / FU-689: a Seminar meets on a SINGLE day for EXACTLY 75 minutes (a graduate seminar
+  // block — distinct from a 1-credit Lecture's fixed 50 min). One day, one fixed duration. The
+  // Graduate-only constraint is enforced at the section-create/import gate (it needs the course's
+  // category, which the pure pattern validator does not carry).
+  if (sectionType === 'Sem') {
+    if (days.length !== 1) {
+      return { ok: false, error: `A Seminar meets on a single day (got ${days.join('+') || 'none'}).` };
+    }
+    if (duration !== 75) {
+      return { ok: false, error: `A Seminar section must be exactly 75 minutes (got ${duration}).` };
     }
     return { ok: true };
   }
@@ -234,7 +260,8 @@ const DAY_TEMPLATE_LABELS = {
 // validator's rule table.
 // NEW-FU-532 (Batch 11): the legal duration set per credits. 75 min is reserved for
 // 3- and 4-credit courses (a 2-day pattern); 0/1/2-credit courses are 50 min only.
-function legalDurationsForCourse({ credits, hasLab }) {
+function legalDurationsForCourse({ credits, hasLab, isSeminar }) {
+  if (isSeminar) return [DUR_75];
   const c = Number(credits);
   if (c === 0 || c === 1 || c === 2) return [DUR_50];
   if (c === 3 || c === 4) return [DUR_50, DUR_75];
@@ -261,9 +288,10 @@ function legalDurationsForCourse({ credits, hasLab }) {
 //       3 cr +lab               → 2 lecture meetings (+ a separate lab)
 //       4 cr (+lab)             → 3 meetings (Sun/Tue/Thu) (+ a separate lab)
 //   (Lab duration never dictates credits.)
-function legalDayTemplatesForCourse({ credits, hasLab, duration }) {
+function legalDayTemplatesForCourse({ credits, hasLab, duration, isSeminar }) {
   const c = Number(credits);
   const d = Number(duration);
+  if (isSeminar) return d === DUR_75 ? ['ONE_DAY'] : [];
   if (d === DUR_75) return (c === 3 || c === 4) ? ['MW', 'ST', 'TT'] : [];
   // d === 50
   if (c === 0) return ['ONE_DAY'];
@@ -308,7 +336,7 @@ function decomposeLegacyName(name) {
  *
  * @returns Array<{ value, label, note, days, duration }>
  */
-function legalPatternsForCourse({ credits, hasLab }) {
+function legalPatternsForCourse({ credits, hasLab, isSeminar }) {
   const c = Number(credits);
   const wrap = (name) => ({
     value: name,
@@ -322,6 +350,7 @@ function legalPatternsForCourse({ credits, hasLab }) {
   // is dictated by credits; 3-credit-with-lab is a 2-day lecture (the 3-day Sun/Tue/Thu
   // belongs to no-lab 3-credit); 4-credit is a 3-day lecture (+ lab); 0-credit (SWE 413
   // capstone) is a single 50-min meeting.
+  if (isSeminar) return [wrap('ONE_DAY_75')];
   if (c === 0) return [wrap('ONE_DAY_50')];
   if (c === 1) return [wrap('ONE_DAY_50')];
   if (c === 2) return ['ST_50', 'MW_50', 'TT_50'].map(wrap);
@@ -359,7 +388,10 @@ function resolvePattern(input) {
     const tpl = input.dayPattern;
     const dur = Number(input.duration);
     if (!Object.prototype.hasOwnProperty.call(DAY_TEMPLATES, tpl)) return null;
-    if (![DUR_50, DUR_75].includes(dur)) return null;
+    const allowedDurations = tpl === 'ONE_DAY'
+      ? [DUR_50, DUR_75, DUR_100, DUR_160]
+      : [DUR_50, DUR_75];
+    if (!allowedDurations.includes(dur)) return null;
     const days = DAY_TEMPLATES[tpl];
     if (days === '__ANY__') {
       // Single-day template. Honor `day` if supplied; else expand

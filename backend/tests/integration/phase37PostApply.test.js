@@ -408,14 +408,16 @@ describe('FU-391: Phase 37 Quick Fix POST-APPLY battery (30 scenarios)', () => {
     await assertPostApplyConsistent(sched, planRes);
   });
 
-  test('P-Q11: R-14 (course missing Lab) — unresolvable with concrete reason', async () => {
+  test('P-Q11: R-14 (orphan Lab — a Lab with no Lecture) — unresolvable with concrete reason', async () => {
     const { scheduleId: sched, courses, instructors, venues } = await freshTermSchedule();   // NEW-FU-673
-    // A has_lab course with only a Lec section (and no Lab) → R-14 (missing required Lab).
+    // NEW-FU-681: R-14 now fires for an ORPHAN LAB (a Lab section with NO Lecture). A lecture-only
+    // has_lab course is a legitimate scoped / in-progress state and no longer flags (the lab is
+    // managed separately); an orphan lab is still a real structural error with no auto-fix.
     const labCourse = pickLab(courses);
     const hall = lectureHalls(venues)[0];
     await createSection(sched, { courseId: labCourse.id, instructorId: instructors[1].id,
-      venueId: hall.id, sectionNumber: '01', sectionType: 'Lec',
-      days: ['Sunday','Tuesday','Thursday'], startTime: '14:30', endTime: '15:20' });
+      venueId: hall.id, sectionNumber: '50', sectionType: 'Lab',
+      days: ['Monday'], startTime: '14:30', endTime: '15:20' });
     const planRes = await planAndApply(sched);
     await assertPostApplyConsistent(sched, planRes);
   });

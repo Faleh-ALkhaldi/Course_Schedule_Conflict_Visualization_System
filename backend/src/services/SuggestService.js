@@ -80,6 +80,24 @@ function nextAddModeSectionNumber(baseMap, courseId, gender, sectionType) {
   return String(next).padStart(2, '0');
 }
 
+function boolFlag(row, camelName, snakeName) {
+  return row?.[camelName] === true || row?.[snakeName] === true;
+}
+
+function isInfoOnlyCourseRow(course) {
+  return boolFlag(course, 'isExternal', 'is_external')
+      || boolFlag(course, 'isThesis',   'is_thesis')
+      || boolFlag(course, 'isResearch', 'is_research');
+}
+
+function isProjectCourseRow(course) {
+  return boolFlag(course, 'isCapstone', 'is_capstone');
+}
+
+function isAutoSchedulableCourse(course) {
+  return !isInfoOnlyCourseRow(course) && !isProjectCourseRow(course);
+}
+
 // NEW-FU-241: pattern-aware slot generator. resolvePattern() returns
 // a { dayCombos, duration } shape: an ARRAY of day-combos (so the
 // ONE_DAY_* synthetic patterns can expand to 5 single-day candidates
@@ -314,7 +332,7 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
   const seen12 = new Set();
   for (const sec of rows) {
     if (!sec.venueId || !sec.venueType) continue;
-    if (sec.sectionType !== 'Lec' || sec.venueType !== 'Laboratory') continue;
+    if (!['Lec', 'Sem'].includes(sec.sectionType) || sec.venueType !== 'Laboratory') continue;
     const k = `${sec.courseId}|${sec.sectionNumber}`;
     if (!seen12.has(k)) { seen12.add(k); total++; weighted += ruleWeight('R-12'); ruleIds.add('R-12'); }
   }
@@ -339,7 +357,9 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
     if (sec.sectionType === 'Lab') s.hasLab = true;
   }
   for (const s of courseStatus.values()) {
-    if (!(s.hasLec && s.hasLab)) { total++; weighted += ruleWeight('R-14'); ruleIds.add('R-14'); }
+    // NEW-FU-681: only an ORPHAN LAB (Lab w/o Lecture) is R-14; a lecture-only has_lab course is a
+    // legitimate scoped / in-progress state (the lab is managed separately). Mirrors ScheduleService.
+    if (s.hasLab && !s.hasLec) { total++; weighted += ruleWeight('R-14'); ruleIds.add('R-14'); }
   }
 
   // NEW-FU-392 (Phase 37): R-15 detection — credit coverage. The
@@ -349,6 +369,10 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
   // and the user saw the conflict reappear. Mirror the QuickFix
   // evaluateInMemory R-15 logic exactly so the suggester's preview
   // sees the same conflicts as the runtime evaluator.
+  // NEW-FU-684: derive "has a lab" from the flag OR a real Lab section (mirror ScheduleService/QuickFix)
+  // so the suggester's preview matches the runtime engine — a course whose Lab is present isn't counted
+  // as an under-length lecture even when its has_lab flag is stale/false.
+  const grp15HasLab = new Set(rows.filter(s => s.sectionType === 'Lab').map(s => s.courseId));
   const grp15 = new Map();
   for (const sec of rows) {
     if (sec.sectionType !== 'Lec') continue;
@@ -360,7 +384,7 @@ function countAttemptConflicts(assignments, scheduleId, ohMap, engine) {
     const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;
     let g = grp15.get(key);
     if (!g) {
-      g = { totalMinutes: 0, credits: Number(sec.credits), hasLab: Boolean(sec.hasLab) };
+      g = { totalMinutes: 0, credits: Number(sec.credits), hasLab: Boolean(sec.hasLab) || grp15HasLab.has(sec.courseId) };
       grp15.set(key, g);
     }
     const dur = Section.toMinutes(sec.endTime) - Section.toMinutes(sec.startTime);
@@ -565,10 +589,9 @@ class SuggestService {
     const panelConfigById = Array.isArray(options.configs)
       ? new Map(options.configs.filter(c => c && c.courseId).map(c => [c.courseId, c]))
       : null;
-    // Load every course that lives in the same department as this
-    // schedule. The suggester operates on the GLOBAL courses table
-    // (courses aren't per-term in this schema), so we read them all
-    // and let the user opt-out via the modal's per-course checkbox.
+    // Load every course that belongs to this schedule's term. Another term's
+    // private course id is rejected below; legacy catalog/template ids remain
+    // accepted for backward compatibility with older direct-API callers.
     // NEW-FU-415 (Phase 103 item 1): then drop courses that are NOT offered in
     // this term per the curriculum rules (SWE 412 after 252, SWE 399 outside
     // Summer) so they never surface in the Suggest modal / recommendations for
@@ -582,7 +605,8 @@ class SuggestService {
     // auto-choose silently no-op'd (every course fell back to hardcoded defaults). findAll(term)
     // returns the term's own courses, including just-created section-less ones (FU-650).
     const allCoursesRaw = recTermCode ? await courseRepo.findAll(recTermCode) : await courseRepo.findAll();
-    const allCourses = filterCoursesForTerm(allCoursesRaw, recTermCode);
+    const allCourses = filterCoursesForTerm(allCoursesRaw, recTermCode)
+      .filter(isAutoSchedulableCourse);
     if (allCourses.length === 0) {
       return { recommendations: [], capacityWarnings: [] };
     }
@@ -613,7 +637,11 @@ class SuggestService {
     // capacityWarnings.
     const existing = await query(`
       SELECT day, instructor_id, venue_id, start_time::text, end_time::text
-      FROM sections WHERE schedule_id = $1
+      FROM sections
+      WHERE schedule_id = $1
+        AND day IS NOT NULL
+        AND start_time IS NOT NULL
+        AND end_time IS NOT NULL
     `, [scheduleId]);
     const existingRows = existing.rows;
 
@@ -713,7 +741,7 @@ class SuggestService {
     // starting rotations even with the same course set.
     const pickCountByProfile = new Map();
     function profileKey(c) {
-      return `${Number(c.credits)}-${Boolean(c.has_lab) ? 'lab' : 'nolab'}`;
+      return `${Number(c.credits)}-${Boolean(c.is_seminar || c.isSeminar) ? 'seminar' : Boolean(c.has_lab) ? 'lab' : 'nolab'}`;
     }
     // Per-schedule hash bumps the starting rotation index so two
     // empty schedules (e.g., Fall 2025 vs. Fall 2026) don't both
@@ -748,7 +776,7 @@ class SuggestService {
       // legalDayTemplatesForCourse) stays lenient so legacy 75-min with-lab lectures already
       // in the data remain editable.
       const candidates = [];
-      for (const pat of legalPatternsForCourse({ credits, hasLab })) {
+      for (const pat of legalPatternsForCourse({ credits, hasLab, isSeminar: Boolean(course.is_seminar || course.isSeminar) })) {
         const decomp = decomposeLegacyName(pat.value);
         if (!decomp) continue;
         const { template, duration } = decomp;
@@ -918,12 +946,13 @@ class SuggestService {
     for (const [courseId, info] of forcedByCourse) {
       const course = courseById.get(courseId);
       if (!course) continue;
-      const sectionTypeText = info.sectionTypes.has('Lab')
-        && info.sectionTypes.has('Lecture')
-          ? 'section(s)'
-          : info.sectionTypes.has('Lab')
-            ? 'lab'
-            : 'lecture';
+      const hasLab = info.sectionTypes.has('Lab');
+      const hasScheduledNonLab = info.sectionTypes.has('Lec') || info.sectionTypes.has('Sem');
+      const sectionTypeText = hasLab && hasScheduledNonLab
+        ? 'section(s)'
+        : hasLab
+          ? 'lab'
+          : info.sectionTypes.has('Sem') ? 'seminar' : 'lecture';
       capacityWarnings.push({
         courseId,
         courseCode: course.course_code,
@@ -979,11 +1008,14 @@ class SuggestService {
     // NEW-FU-392 (Phase 37): include `credits` so downstream R-15
     // detection in countAttemptConflicts has the data it needs.
     const courseRows = await query(
-      `SELECT id, course_code, academic_level, category, has_lab, credits FROM courses WHERE id = ANY($1)`,
+      `SELECT id, course_code, academic_level, category, has_lab, credits,
+              is_capstone, is_external, is_thesis, is_research, is_seminar, owner_semester
+         FROM courses WHERE id = ANY($1)`,
       [courseConfigs.map(c => c.courseId)]
     );
+    const loadedCourseRows = courseRows.rows;
     const courseInfo = {};
-    for (const r of courseRows.rows) {
+    for (const r of loadedCourseRows) {
       courseInfo[r.id] = {
         courseId:      r.id,
         scheduleId,
@@ -992,6 +1024,11 @@ class SuggestService {
         category:      r.category,
         hasLab:        r.has_lab,
         credits:       Number(r.credits),
+        isCapstone:    r.is_capstone,
+        isExternal:    r.is_external,
+        isThesis:      r.is_thesis,
+        isResearch:    r.is_research,
+        isSeminar:     r.is_seminar,
       };
     }
 
@@ -1014,13 +1051,22 @@ class SuggestService {
     // when only some IDs are valid. The check runs BEFORE the in-memory
     // greedy phase so we don't burn CPU on a doomed request.
     const requestedIds = [...new Set(courseConfigs.map(c => c.courseId))];
-    const knownIds     = new Set(courseRows.rows.map(r => r.id));
+    const knownIds     = new Set(loadedCourseRows.map(r => r.id));
     const unknownIds   = requestedIds.filter(id => !knownIds.has(id));
     if (unknownIds.length > 0) {
       const err = new Error(
         `Unknown course ID${unknownIds.length > 1 ? 's' : ''}: ${unknownIds.join(', ')}`
       );
       err.status = 400;
+      throw err;
+    }
+    const outOfTermCourses = loadedCourseRows.filter(r => r.owner_semester != null && r.owner_semester !== termCode);
+    if (outOfTermCourses.length > 0) {
+      const labels = outOfTermCourses.map(r => {
+        return `${r.course_code} (term ${r.owner_semester})`;
+      }).join(', ');
+      const err = new Error(`Suggest can only schedule courses owned by term ${termCode}. Invalid course(s): ${labels}.`);
+      err.status = 409;
       throw err;
     }
 
@@ -1080,26 +1126,20 @@ class SuggestService {
       : await query(`SELECT id, name, type, capacity FROM venues ORDER BY type, name`);
     const venues = venueRows.rows;
 
-    // NEW-FU-296 (Phase 26): when applyToCourseIds is set, the wipe
-    // below only deletes sections of THOSE courses. Sections of other
-    // courses survive — they're "immovable" and the greedy must respect
-    // them. Load them now (with their full row data including time,
-    // instructor, and venue) so runOneAttempt can pre-seed working[]
-    // and the load balancers. Skipped when applyToCourseIds is absent
-    // (legacy "wipe all" path — no immovables to seed).
-    // NEW-FU-655: in 'add' mode NOTHING is wiped — every existing section
-    // (including the applied courses') survives and must be seeded as immovable
-    // so the appended sections are placed without clashing with them. So we load
-    // the existing sections whenever applyToCourseIds is set (the legacy
-    // immovable-others case) OR add mode is on (immovable-everything).
+    // Existing rows that survive the wipe still constrain placement. In scoped
+    // replace, that means non-selected rows plus selected project/info-only rows;
+    // in full replace, it means project/info-only rows only.
     let existingSectionsForSeed = [];
-    if (Array.isArray(options.applyToCourseIds) || addMode) {
+    {
+      const applySet = Array.isArray(options.applyToCourseIds)
+        ? new Set(options.applyToCourseIds) : null;
       const existingRes = await query(`
         SELECT
           s.id, s.schedule_id, s.course_id, s.instructor_id, s.venue_id,
           s.section_number, s.day, s.start_time::text, s.end_time::text,
           s.section_type,
-          c.course_code, c.academic_level, c.category, c.num_sections, c.has_lab
+          c.course_code, c.academic_level, c.category, c.num_sections, c.has_lab,
+          c.is_capstone, c.is_external, c.is_thesis, c.is_research, c.is_seminar
         FROM sections s
         JOIN courses c ON c.id = s.course_id
         WHERE s.schedule_id = $1
@@ -1107,13 +1147,13 @@ class SuggestService {
       // Convert to the same shape working[] expects (the Section domain
       // attributes the conflict engine reads — courseId, sectionNumber,
       // day, startTime, endTime, instructorId, venueId, sectionType,
-      // courseCode, academicLevel). In 'replace' mode, skip courses in the
-      // apply set — the wipe is about to delete them anyway. In 'add' mode keep
-      // them all (no wipe happens), so the appended sections route around the
-      // existing ones.
-      const applySet = new Set(options.applyToCourseIds ?? []);
+      // courseCode, academicLevel).
       for (const row of existingRes.rows) {
-        if (!addMode && applySet.has(row.course_id)) continue;
+        const autoSchedulable = isAutoSchedulableCourse(row);
+        const shouldSeed =
+          addMode ||
+          (applySet ? (!applySet.has(row.course_id) || !autoSchedulable) : !autoSchedulable);
+        if (!shouldSeed) continue;
         existingSectionsForSeed.push({
           id:            row.id,
           scheduleId:    row.schedule_id,
@@ -1130,6 +1170,8 @@ class SuggestService {
           category:      row.category,
           numSections:   row.num_sections,
           hasLab:        row.has_lab,
+          isSeminar:     row.is_seminar,
+          autoSchedulable,
         });
       }
     }
@@ -1189,6 +1231,7 @@ class SuggestService {
     for (const cfg of courseConfigs) {
       const info = courseInfo[cfg.courseId];
       if (!info) continue;
+      if (!isAutoSchedulableCourse(info)) continue;
       // NEW-FU-248: accept either the legacy single-name (cfg.pattern)
       // or the new two-axis form (cfg.dayPattern + cfg.duration). The
       // resolver handles both shapes; we pass whichever the caller sent.
@@ -1203,7 +1246,7 @@ class SuggestService {
       // that keeps the requested duration; otherwise fall back to the course's first legal pattern.
       let lecTemplate = cfg.dayPattern, lecDuration = Number(cfg.duration);
       if (cfg.dayPattern) {
-        const legalPats = legalPatternsForCourse({ credits: info.credits, hasLab: info.hasLab })
+        const legalPats = legalPatternsForCourse({ credits: info.credits, hasLab: info.hasLab, isSeminar: info.isSeminar })
           .map(p => decomposeLegacyName(p.value)).filter(Boolean);   // [{ template, duration }]
         const exact = legalPats.some(p => p.template === lecTemplate && p.duration === lecDuration);
         if (!exact && legalPats.length) {
@@ -1262,7 +1305,7 @@ class SuggestService {
         for (let sec = 1; sec <= count; sec++) {
           tasks.push({
             ...info,
-            sectionType:    'Lec',
+            sectionType:    info.isSeminar ? 'Sem' : 'Lec',
             gender,
             sectionNumber:  String(sec).padStart(2, '0'),         // '01'..'49' (per gender)
             totalSections:  count,
@@ -1464,32 +1507,13 @@ class SuggestService {
         venueLoad.set(venueId, (venueLoad.get(venueId) ?? 0) + 1);
       }
 
-      // NEW-FU-296 (Phase 26): pre-seed `working[]` with sections of
-      // courses NOT in applyToCourseIds. Finishes the Phase 21 deferred
-      // work — when the user runs Suggest with a subset of courses
-      // selected, the immovable existing sections (the ones whose
-      // courses are NOT in the apply set) should constrain placement
-      // of the new sections. Without this, the greedy treats those
-      // courses as if they didn't exist and happily places new sections
-      // on top of their existing rooms / instructors / times.
-      //
-      // Reads `options.applyToCourseIds` from the outer closure. When
-      // unset (the legacy "apply to all" path), nothing pre-seeds and
-      // the greedy starts fresh — same as before this phase.
+      // Pre-seed `working[]` with existing rows that survive this suggest run
+      // so generated rows route around preserved project/info-only meetings.
       const applySetForSeed = Array.isArray(options.applyToCourseIds)
         ? new Set(options.applyToCourseIds) : null;
-      // NEW-FU-296 (Phase 26): existingSectionsForSeed is computed by
-      // the outer suggest() closure and includes only courses NOT in
-      // applyToCourseIds — i.e., the immovable ones. We thread it in
-      // via the closure rather than as an explicit param to keep the
-      // runOneAttempt signature small.
-      // NEW-FU-655: in 'add' mode NOTHING is wiped, so EVERY existing section is
-      // immovable (existingSectionsForSeed already includes the applied courses'
-      // sections in add mode) — seed them all so appended sections route around
-      // them. The per-section skip below only applies in 'replace' mode.
-      if ((addMode || applySetForSeed) && existingSectionsForSeed.length > 0) {
+      if (existingSectionsForSeed.length > 0) {
         for (const sec of existingSectionsForSeed) {
-          if (!addMode && applySetForSeed.has(sec.courseId)) continue; // movable (replace) — skip
+          if (!addMode && applySetForSeed?.has(sec.courseId) && sec.autoSchedulable) continue; // movable (replace) — skip
           // Treat as already-placed: feeds into the working[] set so
           // scoreCombo's conflict engine sees it, and bumps instrLoad /
           // venueLoad / slotUsage so the balancer knows about it.
@@ -1912,13 +1936,27 @@ class SuggestService {
         // NEW-FU-655: 'add' mode KEEPS the existing sections — skip the wipe and
         // append the generated ones (renumbered below). 'replace' wipes first.
         if (!addMode) {
-          await client.query(
-            `DELETE FROM sections WHERE schedule_id = $1 AND course_id = ANY($2)`,
-            [scheduleId, [...applyToCourseIds]]
-          );
+          const wipeCourseIds = [...applyToCourseIds].filter(id => isAutoSchedulableCourse(courseInfo[id]));
+          if (wipeCourseIds.length === 0) {
+            // Selected rows are side-panel-only/project rows; preserve them.
+          } else {
+            await client.query(
+              `DELETE FROM sections WHERE schedule_id = $1 AND course_id = ANY($2)`,
+              [scheduleId, wipeCourseIds]
+            );
+          }
         }
       } else if (!addMode) {
-        await client.query(`DELETE FROM sections WHERE schedule_id = $1`, [scheduleId]);
+        await client.query(`
+          DELETE FROM sections s
+          USING courses c
+          WHERE s.schedule_id = $1
+            AND c.id = s.course_id
+            AND COALESCE(c.is_capstone, false) = false
+            AND COALESCE(c.is_external, false) = false
+            AND COALESCE(c.is_thesis, false) = false
+            AND COALESCE(c.is_research, false) = false
+        `, [scheduleId]);
       }
 
       // NEW-FU-425 (Phase 104 item 2): persist the term-local DUMMY instructors /

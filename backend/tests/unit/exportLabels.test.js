@@ -35,11 +35,32 @@ describe('exportLabels (FU-666) — display ↔ code round-trip', () => {
     expect(labels.genderCode('male')).toBe('M');
     expect(labels.genderCode('F')).toBe('F');
   });
-  test('course type label keeps capstone/external substrings for the importer', () => {
-    expect(labels.courseTypeLabel({ isCapstone: true })).toMatch(/capstone/i);
+  test('course type label — FU-687: capstone surfaces as Project, new Thesis, External/Regular kept', () => {
+    expect(labels.courseTypeLabel({ isCapstone: true })).toBe('Project');   // FU-687 rename
+    expect(labels.courseTypeLabel({ isThesis: true })).toBe('Thesis');      // FU-687 new flag
+    expect(labels.courseTypeLabel({ isSeminar: true })).toBe('Seminar');
     expect(labels.courseTypeLabel({ isExternal: true })).toMatch(/external/i);
     expect(labels.courseTypeLabel({ hasLab: true })).toBe('Has Laboratory');
     expect(labels.courseTypeLabel({})).toBe('Regular');
+  });
+  test('effectiveSectionType — FU-687/688: display-only Lec→Prj/Ths/Sem/St/Int/Res derivation', () => {
+    // stored Lab/Prj/Ths/Sem honoured as-is
+    expect(labels.effectiveSectionType({ sectionType: 'Lab' })).toBe('Lab');
+    expect(labels.effectiveSectionType({ sectionType: 'Prj' })).toBe('Prj');
+    expect(labels.effectiveSectionType({ sectionType: 'Ths' })).toBe('Ths');
+    expect(labels.effectiveSectionType({ sectionType: 'Sem' })).toBe('Sem');   // NEW-FU-688
+    // legacy 'Lec' rows derive from the course nature WITHOUT being rewritten
+    expect(labels.effectiveSectionType({ sectionType: 'Lec', isThesis: true })).toBe('Ths');
+    expect(labels.effectiveSectionType({ sectionType: 'Lec', isResearch: true })).toBe('Res');  // NEW-FU-688
+    expect(labels.effectiveSectionType({ sectionType: 'Lec', isCapstone: true })).toBe('Prj');
+    expect(labels.effectiveSectionType({ sectionType: 'Lec', isSeminar: true })).toBe('Sem');
+    expect(labels.effectiveSectionType({ sectionType: 'Lec' })).toBe('Lec');         // regular lecture
+    // NEW-FU-688: an external course's activity is term-derived — Summer Training in a Summer term, Internship otherwise
+    expect(labels.effectiveSectionType({ sectionType: 'Lec', isExternal: true }, { season: '3' })).toBe('St');
+    expect(labels.effectiveSectionType({ sectionType: 'Lec', isExternal: true }, { season: '2' })).toBe('Int');
+    expect(labels.effectiveSectionType({ sectionType: 'Lec', isExternal: true })).toBe('Int');  // no season → default Internship
+    // snake_case input (DB rows) also accepted
+    expect(labels.effectiveSectionType({ section_type: 'Lec', is_capstone: true })).toBe('Prj');
   });
   test('unknown value passes through UNCHANGED (so strict validators still reject it)', () => {
     expect(labels.venueTypeCode('Auditorium')).toBe('Auditorium');

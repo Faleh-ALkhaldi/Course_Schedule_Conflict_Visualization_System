@@ -23,6 +23,19 @@ const ADMIN = { username: 'admin1', password: 'password123' };
 let adminTok;
 const createdCodes = new Set();
 
+function flag(course, camel, snake) {
+  return Boolean(course?.[camel] ?? course?.[snake]);
+}
+
+function isSchedulableOneDayLecture(course) {
+  return Number(course?.credits) === 1
+    && !flag(course, 'hasLab', 'has_lab')
+    && !flag(course, 'isCapstone', 'is_capstone')
+    && !flag(course, 'isExternal', 'is_external')
+    && !flag(course, 'isThesis', 'is_thesis')
+    && !flag(course, 'isResearch', 'is_research');
+}
+
 beforeAll(async () => {
   const r = await request(app).post('/api/v1/auth/login').send(ADMIN);
   expect(r.status).toBe(200);
@@ -206,20 +219,23 @@ describe('FU-244: SuggestService accepts the extended pattern enum', () => {
     const courses = (await request(app)
       .get('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
     ).body;
-    // Need a 1-credit course (or 2-credit-75) for ONE_DAY to be legal.
-    // The seed may not have one; create a throwaway.
-    let oneCreditCourse = courses.find(c => Number(c.credits) === 1);
+    // Need a schedulable 1-credit lecture course for ONE_DAY to be legal.
+    // Info-only/project rows are deliberately ignored by Suggest, so the
+    // fixture must not accidentally reuse one of those seeded courses.
+    let oneCreditCourse = courses.find(isSchedulableOneDayLecture);
     let createdCourseId = null;
     if (!oneCreditCourse) {
-      const cR = await request(app)
-        .post('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
-        .send({
-          courseCode: `T1C${Date.now().toString(36).slice(-4)}`,
-          name: '1-cr Day Test', credits: 1,
-          academicLevel: 'Freshman', category: 'UG', hasLab: false,
-        });
-      expect(cR.status).toBe(201);
-      oneCreditCourse = cR.body;
+      for (let n = 180; n <= 199 && !oneCreditCourse; n++) {
+        const cR = await request(app)
+          .post('/api/v1/courses').set('Authorization', `Bearer ${adminTok}`)
+          .send({
+            courseCode: `SWE ${n}`,
+            name: 'One Day Pattern Test', credits: 1,
+            academicLevel: 'Freshman', category: 'UG', hasLab: false,
+          });
+        if (cR.status === 201) oneCreditCourse = cR.body;
+      }
+      expect(oneCreditCourse).toBeTruthy();
       createdCourseId = oneCreditCourse.id;
     }
 

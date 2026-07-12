@@ -322,6 +322,59 @@ class ScheduleService {
   }
 
   /**
+   * Collapse a timed Project section back to its side-panel-only form.
+   * Keeps one row for instructor/section-number assignment and removes all
+   * schedule fields plus the venue (venue without a meeting time is invalid).
+   */
+  async clearSectionTime(sectionId, { instructorId, sectionNumber } = {}) {
+    const peek = await sectionRepo.findById(sectionId);
+    if (!peek) throw new Error(`Section ${sectionId} not found.`);
+    const scheduleId = peek.scheduleId;
+
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+      await assertSchedulerEditableLocked(client, scheduleId);
+      const section = await loadSectionLocked(client, sectionId);
+      const groupRes = await client.query(
+        `SELECT id
+           FROM sections
+          WHERE schedule_id = $1 AND course_id = $2 AND section_number = $3 AND gender = $4
+          FOR UPDATE`,
+        [section.scheduleId, section.courseId, section.sectionNumber, section.gender ?? 'M']
+      );
+      const keepId = groupRes.rows.some(r => r.id === sectionId)
+        ? sectionId
+        : (groupRes.rows[0]?.id ?? sectionId);
+      const deleteIds = groupRes.rows.map(r => r.id).filter(id => id !== keepId);
+      if (deleteIds.length) {
+        await client.query(`DELETE FROM sections WHERE id = ANY($1)`, [deleteIds]);
+      }
+      await client.query(
+        `UPDATE sections
+            SET instructor_id = COALESCE($2, instructor_id),
+                section_number = COALESCE($3, section_number),
+                venue_id = NULL,
+                day = NULL,
+                start_time = NULL,
+                end_time = NULL,
+                updated_at = NOW()
+          WHERE id = $1`,
+        [keepId, instructorId ?? null, sectionNumber ?? null]
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      try { client.release(err); } catch { /* ignore */ }
+      throw err;
+    } finally {
+      try { client.release(); } catch { /* already released via catch path */ }
+    }
+
+    return this._revalidateAndReturn(scheduleId);
+  }
+
+  /**
    * Create a new section — and optionally create siblings for the day group.
    * The client passes { days: ['Sunday','Tuesday','Thursday'] } or a single day.
    *
@@ -330,7 +383,10 @@ class ScheduleService {
    * group rather than leaving stranded partial-group rows behind.
    */
   async createSection(scheduleId, data) {
-    const daysToCreate = data.days ?? [data.day];
+    // NEW-FU-688: a conflict-exempt activity (Project / info-only) can be UNTIMED — the controller
+    // sends days:[] and day:null. Collapse that to a single null-day row so exactly ONE section is
+    // persisted (an empty day-array would otherwise loop zero times and silently create nothing).
+    const daysToCreate = (Array.isArray(data.days) && data.days.length) ? data.days : [data.day ?? null];
     let firstSectionId = null;
 
     const client = await getClient();
@@ -722,7 +778,7 @@ class ScheduleService {
         s.section_type, s.gender,
         c.course_code, c.name AS course_name,
         c.academic_level, c.category, c.num_sections, c.has_lab, c.credits,
-        c.is_capstone, c.is_external,
+        c.is_capstone, c.is_external, c.is_thesis, c.is_research,
         i.name AS instructor_name,
         v.name AS venue_name, v.type AS venue_type
       FROM sections s
@@ -754,6 +810,11 @@ class ScheduleService {
       // NEW-FU-275 (Phase 52 #5): external (SWE 399) — every rule skips
       // these sections in the conflict engine.
       isExternal: row.is_external,
+      // NEW-FU-687 (Phase 125): thesis (SWE 610) — independent research, no
+      // fixed time/place, so it is exempt from every rule exactly like external.
+      isThesis: row.is_thesis,
+      // NEW-FU-688 (Phase 126): research (sibling of thesis) — same full exemption.
+      isResearch: row.is_research,
     }));
 
     const instrIds = [...new Set(sections.map(s => s.instructorId).filter(Boolean))];
@@ -952,7 +1013,7 @@ class ScheduleService {
     for (const sec of sections) {
       if (!sec.venueId || !sec.venueType) continue; // R-10 covers missing venue
       if (sec.isCapstone) continue;                // Phase 50 #1
-      if (sec.isExternal) continue;                // Phase 52 #5 (SWE 399)
+      if (sec.isConflictExempt) continue;  // NEW-FU-688: external/thesis/research/project all exempt // Phase 52 #5 (SWE 399) + FU-687 thesis (SWE 610)
       if (sec.venueType === 'Multipurpose') continue; // Phase 50 #3
       const key = `${sec.courseId}|${sec.sectionNumber}|${sec.gender ?? 'M'}`;   // audit: gender in identity
       // R-11: Lab section in a non-Lab venue
@@ -967,14 +1028,15 @@ class ScheduleService {
           }));
         }
       }
-      // R-12: Lecture section in a Lab venue
-      if (sec.sectionType === 'Lec' && sec.venueType === 'Laboratory') {
+      // R-12: Lecture/Seminar section in a Lab venue
+      if (['Lec', 'Sem'].includes(sec.sectionType) && sec.venueType === 'Laboratory') {
         if (!f12Seen.has(key)) {
           f12Seen.add(key);
+          const sectionKind = sec.sectionType === 'Sem' ? 'Seminar' : 'Lecture';
           result.add(new Conflict({
             id: null, scheduleId,
             ruleId: 'R-12', severity: 'Soft',
-            description: `Lecture section ${sec.sectionNumber} of ${sec.courseCode ?? sec.courseId} is assigned to ${sec.venueName ?? 'a lab venue'} (Laboratory). Lecture sections should be in a Lecture Hall.`,
+            description: `${sectionKind} section ${sec.sectionNumber} of ${sec.courseCode ?? sec.courseId} is assigned to ${sec.venueName ?? 'a lab venue'} (Laboratory). ${sectionKind} sections should be in a Lecture Hall.`,
             sectionAId: sec.id, sectionBId: null,
           }));
         }
@@ -997,7 +1059,8 @@ class ScheduleService {
       if (!sec.instructorId) continue;
       // NEW-FU-275 (Phase 52 #5): external (SWE 399) — no instructor by
       // design; R-09 already skips, R-13 must too for consistency.
-      if (sec.isExternal) continue;
+      // NEW-FU-687: thesis (SWE 610) — same full exemption.
+      if (sec.isConflictExempt) continue;  // NEW-FU-688: external/thesis/research/project all exempt
       if (f13Seen.has(sec.instructorId)) continue;
       if (!ohMap.has(sec.instructorId)) {
         f13Seen.add(sec.instructorId);
@@ -1025,7 +1088,7 @@ class ScheduleService {
     const f14CourseStatus = new Map(); // courseId → { hasLec, hasLab, anySec, courseCode }
     for (const sec of sections) {
       if (!sec.hasLab) continue; // course doesn't require both
-      if (sec.isExternal) continue; // Phase 52 #5
+      if (sec.isConflictExempt) continue;  // NEW-FU-688: external/thesis/research/project all exempt // Phase 52 #5 + FU-687
       let status = f14CourseStatus.get(sec.courseId);
       if (!status) {
         status = { hasLec: false, hasLab: false, anySec: sec, courseCode: sec.courseCode };
@@ -1035,12 +1098,17 @@ class ScheduleService {
       if (sec.sectionType === 'Lab') status.hasLab = true;
     }
     for (const { hasLec, hasLab, anySec, courseCode } of f14CourseStatus.values()) {
-      if (hasLec && hasLab) continue;
-      const missing = !hasLec ? 'Lecture' : 'Lab';
+      // NEW-FU-681: the Lecture anchors a course's offering; the Lab is frequently scheduled
+      // SEPARATELY (a different instructor, a different venue, a later import). So a has_lab course
+      // that currently shows only its LECTURE is a legitimate, in-progress state — NOT a conflict
+      // (this false-fired on every scoped instructor/venue import that carried only the lecture).
+      // Only an ORPHAN LAB — a Lab section with no Lecture in the term — is a real structural error.
+      if (hasLec) continue;        // lecture present → fine (the lab may live elsewhere / arrive later)
+      if (!hasLab) continue;       // neither type present for this course → nothing to flag here
       result.add(new Conflict({
         id: null, scheduleId,
         ruleId: 'R-14', severity: 'Soft',
-        description: `${courseCode ?? 'A course'} is set up to have both lectures and labs, but it's missing a ${missing} section. Add at least one ${missing} section, or change the course so it no longer includes a lab.`,
+        description: `${courseCode ?? 'A course'} has a Lab section but no Lecture section. Add the Lecture section, or change the course so it no longer includes a lab.`,
         sectionAId: anySec.id, sectionBId: null,
       }));
     }
@@ -1069,11 +1137,20 @@ class ScheduleService {
     //
     // Dedup by section_group (courseId + sectionNumber). A single group
     // with 2 surviving days produces ONE R-15, not 2.
+    // NEW-FU-684: a course with an ACTUAL Lab section genuinely has a lab, so its lecture only needs to
+    // cover (credits-1) credits — even when the course's has_lab FLAG is stale/false (e.g. an import that
+    // lost the flag, or a later untag). Without this, a correct 100-min lecture of such a course
+    // false-fires R-15 ("needs 150 min"), and the only offered remediations are to EXTEND the lecture or
+    // DROP it — ignoring the lab that is right there. Deriving "has a lab" from the data (flag OR a Lab
+    // section present) makes the credit-coverage check match reality.
+    const courseHasLabSection = new Set(
+      sections.filter(s => s.sectionType === 'Lab').map(s => s.courseId)
+    );
     const f15Groups = new Map(); // key: courseId|sectionNumber → { meetings, course details }
     for (const sec of sections) {
       if (sec.sectionType !== 'Lec') continue;
       if (!sec.credits) continue;       // courses without credits — defensive
-      if (sec.isExternal) continue;     // Phase 52 #5 (SWE 399 off-campus)
+      if (sec.isConflictExempt) continue;  // NEW-FU-688: external/thesis/research/project all exempt     // Phase 52 #5 + FU-687 (off-campus / research)
       if (!sec.startTime || !sec.endTime) continue;
       // NEW-FU-272 (Phase 50 #3): capstone-style courses (is_capstone=true)
       // legitimately meet once a week for project supervision — the credit-
@@ -1087,7 +1164,7 @@ class ScheduleService {
         group = {
           totalMinutes: 0,
           credits:      Number(sec.credits),
-          hasLab:       Boolean(sec.hasLab),
+          hasLab:       Boolean(sec.hasLab) || courseHasLabSection.has(sec.courseId),   // NEW-FU-684: flag OR a real Lab section
           courseCode:   sec.courseCode,
           sectionNumber: sec.sectionNumber,
           anySec:       sec,

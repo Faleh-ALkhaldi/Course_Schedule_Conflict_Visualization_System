@@ -105,13 +105,28 @@ function titleCaseCourseName(raw) {
   }).join(' ');
 }
 
-// At most ONE of has_lab / capstone / external. A plain lecture course has none;
-// these three are mutually-exclusive course TYPES, not stackable attributes.
-function courseFlagError({ hasLab, isCapstone, isExternal } = {}) {
-  const count = [hasLab, isCapstone, isExternal].filter(Boolean).length;
+// At most ONE of has_lab / project(capstone) / external / thesis. A plain lecture course has none;
+// these are mutually-exclusive course TYPES, not stackable attributes.
+// NEW-FU-687: "Project" is the user-facing name of the stored is_capstone flag; "Thesis" is the
+// new is_thesis flag. Both stay mutually exclusive with the others.
+function courseFlagError({ hasLab, isCapstone, isExternal, isThesis, isResearch, isSeminar } = {}) {
+  const count = [hasLab, isCapstone, isExternal, isThesis, isResearch, isSeminar].filter(Boolean).length;
   return count > 1
-    ? 'A course can be only one of: Has-lab, Capstone, or External (pick at most one).'
+    ? 'A course can be only one of: Has-lab, Project, External, Thesis, Research, or Seminar (pick at most one).'
     : null;
+}
+
+function seminarFlagError({ courseCode, academicLevel, category, credits, isSeminar } = {}) {
+  if (!isSeminar) return null;
+  const m = COURSE_CODE_RE.exec(String(courseCode ?? '').trim());
+  const n = m ? parseInt(m[1], 10) : NaN;
+  if (category !== 'GR' || academicLevel !== 'Graduate' || n < 500 || n > 699) {
+    return 'The Seminar flag is only allowed for Graduate SWE 500–699 courses.';
+  }
+  if (Number(credits) !== 1) {
+    return 'Seminar courses must be exactly 1 credit.';
+  }
+  return null;
 }
 
 // NEW-FU-561 (audit P2-8): a 4-credit course MUST have a lab. sectionPattern enforces
@@ -134,7 +149,7 @@ function creditsFlagError({ credits, hasLab, isCapstone } = {}) {
   // never be created. As a capstone it is venue-exempt but still instructor-required and
   // time-clash-checked (handled where the section/venue/window rules live).
   if (c === 0 && !isCapstone)
-    return 'A 0-credit course must be a Capstone — set the Capstone flag (a 0-credit course is a capstone part, e.g. SWE 413).';
+    return 'A 0-credit course must be a Project — set the Project flag (a 0-credit course is a capstone/project part, e.g. SWE 413).';
   return null;
 }
 
@@ -142,6 +157,6 @@ module.exports = {
   COURSE_CODE_RE, COURSE_NAME_RE,
   isValidCourseCode, courseCodeError,
   isValidCourseName, courseNameError, titleCaseCourseName,
-  courseFlagError, creditsFlagError,
+  courseFlagError, seminarFlagError, creditsFlagError,
   levelForCourseNumber, courseCodeLevelError, resolveAcademicLevel,
 };

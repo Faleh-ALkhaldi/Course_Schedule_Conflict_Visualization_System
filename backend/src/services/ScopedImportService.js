@@ -49,6 +49,7 @@ const SNAPSHOT_SQL = `
          s.section_type, s.gender,
          c.course_code, c.name AS course_name, c.academic_level, c.category,
          c.num_sections, c.has_lab, c.credits, c.is_capstone, c.is_external,
+         c.is_thesis, c.is_research, c.is_seminar,
          i.name AS instructor_name, v.name AS venue_name, v.type AS venue_type
     FROM sections s
     JOIN courses c ON c.id = s.course_id
@@ -71,6 +72,7 @@ function rowToSection(row) {
     venueName: row.venue_name, sectionType: row.section_type, venueType: row.venue_type,
     hasLab: row.has_lab, credits: row.credits, isCapstone: row.is_capstone,
     gender: row.gender, isExternal: row.is_external,
+    isThesis: row.is_thesis, isResearch: row.is_research, isSeminar: row.is_seminar,
   });
 }
 
@@ -112,18 +114,46 @@ async function upsertEntities(client, scheduleId, ownerSemester, rowData, refs, 
   // Courses ──────────────────────────────────────────────────────────────────
   const courseByCode = new Map();
   const cRes = await client.query(
-    `SELECT id, course_code, name, academic_level, category, num_sections FROM courses WHERE owner_semester = $1`,
+    `SELECT id, course_code, name, academic_level, category, num_sections,
+            has_lab, is_capstone, is_external, is_thesis, is_research, is_seminar
+       FROM courses WHERE owner_semester = $1`,
     [ownerSemester]);
   for (const c of cRes.rows) courseByCode.set(c.course_code?.toLowerCase(), c);
 
   const hasLabByCourse = opts.skipRowEntities ? new Map() : deriveHasLabByCourse(rowData);
-  const isCapstoneByCourse = new Map(), isExternalByCourse = new Map();
+  const isCapstoneByCourse = new Map(), isExternalByCourse = new Map(), isThesisByCourse = new Map(), isResearchByCourse = new Map(), isSeminarByCourse = new Map();  // NEW-FU-687/688
   const sectionCountByCourse = new Map();
   for (const r of rowData) {
     const k = String(r.courseCode ?? '').toLowerCase();
     if (r.isCapstone) isCapstoneByCourse.set(k, true);
     if (r.isExternal) isExternalByCourse.set(k, true);
+    if (r.isThesis)   isThesisByCourse.set(k, true);   // NEW-FU-687
+    if (r.isResearch) isResearchByCourse.set(k, true); // NEW-FU-688
+    if (r.isSeminar)  isSeminarByCourse.set(k, true);
     sectionCountByCourse.set(k, (sectionCountByCourse.get(k) || 0) + 1);
+  }
+
+  for (const [key, course] of courseByCode.entries()) {
+    if (!sectionCountByCourse.has(key)) continue;
+    const existingFlag =
+      course.is_capstone ? 'Project' :
+      course.is_external ? 'External' :
+      course.is_thesis ? 'Thesis' :
+      course.is_research ? 'Research' :
+      course.is_seminar ? 'Seminar' :
+      'Lecture';
+    const importedFlag =
+      isCapstoneByCourse.get(key) ? 'Project' :
+      isExternalByCourse.get(key) ? 'External' :
+      isThesisByCourse.get(key) ? 'Thesis' :
+      isResearchByCourse.get(key) ? 'Research' :
+      isSeminarByCourse.get(key) ? 'Seminar' :
+      'Lecture';
+    if (existingFlag !== importedFlag) {
+      const e = new Error(`${course.course_code}: course type is fixed as ${existingFlag}; delete and recreate the course before importing it as ${importedFlag}.`);
+      e.status = 400;
+      throw e;
+    }
   }
 
   if (!opts.skipRowEntities) {
@@ -140,13 +170,36 @@ async function upsertEntities(client, scheduleId, ownerSemester, rowData, refs, 
       // merge would mint an invalid 4-credit no-lab course that no later UI add-section accepts.
       const hasLab = hasLabByCourse.get(key) || Number(row.credits) === 4;
       const res = await client.query(
-        `INSERT INTO courses (course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone, is_external, owner_semester)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-         RETURNING id, course_code, name, academic_level, category, num_sections`,
+        `INSERT INTO courses (course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone, is_external, is_thesis, is_research, is_seminar, owner_semester)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         RETURNING id, course_code, name, academic_level, category, num_sections,
+                   has_lab, is_capstone, is_external, is_thesis, is_research, is_seminar`,
         [row.courseCode, row.courseName, row.credits, level, isGR ? 'GR' : 'UG',
          sectionCountByCourse.get(key) || 1, hasLab,
-         isCapstoneByCourse.get(key) || false, isExternalByCourse.get(key) || false, ownerSemester]);
+         isCapstoneByCourse.get(key) || false, isExternalByCourse.get(key) || false,
+         isThesisByCourse.get(key) || false, isResearchByCourse.get(key) || false,
+         isSeminarByCourse.get(key) || false, ownerSemester]);   // NEW-FU-687/688
       courseByCode.set(key, res.rows[0]);
+    }
+
+    // NEW-FU-682: a scoped MERGE often adds sections to a course that ALREADY exists in the term —
+    // seeded from the template term (createTerm copies the prior term's courses) or added by an earlier
+    // partial import — so the create loop above SKIPS it and its has_lab is whatever the seed/earlier
+    // import left. When THIS file's rows now imply a lab (a Lab section, the "Has Laboratory" course
+    // type via deriveHasLabByCourse, or a 4-credit course), the completed lecture+lab course would
+    // false-fire R-15 if has_lab were stale-false (a 3-credit has_lab lecture legitimately meets only
+    // 100 min, but a plain 3-credit course "needs" 150). Reconcile has_lab UP — never down (a partial
+    // file that omits the lab must not strip the flag). This makes the FU-682 re-import conflict-free
+    // regardless of the pre-existing course state.
+    const needLab = new Set();
+    for (const r of rowData) {
+      const k = String(r.courseCode ?? '').toLowerCase();
+      if (hasLabByCourse.get(k) || Number(r.credits) === 4) needLab.add(k);
+    }
+    for (const k of needLab) {
+      await client.query(
+        `UPDATE courses SET has_lab = true WHERE owner_semester = $1 AND LOWER(course_code) = $2 AND has_lab = false`,
+        [ownerSemester, k]);
     }
   }
 
@@ -247,8 +300,35 @@ function groupRows(rowData) {
   return [...map.values()];
 }
 
+function groupHasMeetingTime(group) {
+  return Array.isArray(group.days) && group.days.length > 0 && !!group.startTime && !!group.endTime;
+}
+
+function effectiveImportedSectionType(group, course) {
+  if (group.sectionType === 'Sem' || group.isSeminar || course?.is_seminar) return 'Sem';
+  if (group.sectionType === 'Prj' || group.isCapstone || course?.is_capstone) return 'Prj';
+  return group.sectionType ?? 'Lec';
+}
+
 // Build the proposed Section objects for one group at a given start minute.
 function proposeGroup(group, scheduleId, course, instructor, venue, startMin) {
+  const sectionType = effectiveImportedSectionType(group, course);
+  if (!groupHasMeetingTime(group)) {
+    return [new Section({
+      id: `__imp__${course.id}_${group.sectionNumber}_${group.gender}_unscheduled_0`,
+      scheduleId, courseId: course.id,
+      instructorId: instructor?.id ?? null, venueId: null,
+      sectionNumber: String(group.sectionNumber), day: null,
+      startTime: null, endTime: null,
+      courseCode: course.course_code, courseName: course.name,
+      academicLevel: course.academic_level, category: course.category,
+      numSections: course.num_sections, instructorName: instructor?.name ?? null,
+      venueName: null, sectionType,
+      venueType: null, hasLab: false, credits: group.credits,
+      isCapstone: group.isCapstone, gender: group.gender, isExternal: group.isExternal,
+      isThesis: group.isThesis, isResearch: group.isResearch, isSeminar: group.isSeminar || course?.is_seminar,
+    })];
+  }
   const dur = hm(group.endTime) - hm(group.startTime);
   return group.days.map((day, i) => new Section({
     id: `__imp__${course.id}_${group.sectionNumber}_${group.gender}_${day}_${i}`,
@@ -259,9 +339,10 @@ function proposeGroup(group, scheduleId, course, instructor, venue, startMin) {
     courseCode: course.course_code, courseName: course.name,
     academicLevel: course.academic_level, category: course.category,
     numSections: course.num_sections, instructorName: instructor?.name ?? null,
-    venueName: venue?.name ?? null, sectionType: group.sectionType ?? 'Lec',
+    venueName: venue?.name ?? null, sectionType,
     venueType: venue?.type ?? null, hasLab: false, credits: group.credits,
     isCapstone: group.isCapstone, gender: group.gender, isExternal: group.isExternal,
+    isThesis: group.isThesis, isResearch: group.isResearch, isSeminar: group.isSeminar || course?.is_seminar,
   }));
 }
 
@@ -384,11 +465,12 @@ async function mergeScopedImport(scheduleId, parsed, mode) {
       if (!course) { errors.push(`Course "${g.courseCode}" could not be created.`); continue; }
       const instructor = g.instructorName ? ent.instrByName.get(g.instructorName.trim().toLowerCase()) : null;
       const venue      = g.venueName ? ent.venueByName.get(g.venueName.trim().toLowerCase()) : null;
-      const origMin    = hm(g.startTime);
-      const dur        = hm(g.endTime) - hm(g.startTime);
+      const hasMeeting = groupHasMeetingTime(g);
+      const origMin    = hasMeeting ? hm(g.startTime) : 0;
+      const dur        = hasMeeting ? hm(g.endTime) - hm(g.startTime) : 0;
 
       let startMin = origMin;
-      if (mode === 'conflict-free') {
+      if (mode === 'conflict-free' && hasMeeting) {
         const atOrig = proposeGroup(g, scheduleId, course, instructor, venue, origMin);
         if (introducesConflict(placed, atOrig, ohMap, baseKeys)) {
           // Scan the teaching window (R-06-aware) for the nearest conflict-free start.

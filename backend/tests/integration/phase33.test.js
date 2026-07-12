@@ -66,7 +66,9 @@ async function freshTermSchedule(code) {
   // resolver PROPOSES a fix must additionally constrain its fixture to this term's OWNED resources
   // (see the saturated-R-12 test) — owned IS a subset of this list.
   const courses = (await query(
-    `SELECT id, course_code, credits, has_lab, category, num_sections, owner_semester FROM courses
+    `SELECT id, course_code, credits, has_lab, category, num_sections, owner_semester,
+            is_capstone, is_external, is_thesis, is_research
+       FROM courses
       WHERE (owner_semester = $1 OR owner_semester IS NULL) AND category = 'UG'`, [code])).rows
     .map(c => ({ ...c, credits: Number(c.credits) }));
   const instructors = (await query(
@@ -76,6 +78,16 @@ async function freshTermSchedule(code) {
     `SELECT id, type, owner_semester FROM venues
       WHERE (owner_semester = $1 OR owner_semester IS NULL) AND is_dummy = false ORDER BY name`, [code])).rows;
   return { scheduleId: sched.id, courses, instructors, venues };
+}
+
+function schedulableLectureCourse(c) {
+  return Number(c.credits) === 3
+    && !c.has_lab
+    && c.category === 'UG'
+    && !c.is_capstone
+    && !c.is_external
+    && !c.is_thesis
+    && !c.is_research;
 }
 
 describe('FU-346: recommend accepts sectionsHint', () => {
@@ -139,7 +151,7 @@ describe('FU-348: Quick Fix compound op for saturated R-11/R-12', () => {
     const lab   = ownedVenues.find(v => v.type === 'Laboratory');
     expect(lab).toBeTruthy();
 
-    const c = ownedCourses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
+    const c = ownedCourses.find(schedulableLectureCourse);
     const instr = ownedInstr[0];
 
     // 1. Block a band of LectureHalls at Sunday 09:00 by creating filler
@@ -149,7 +161,7 @@ describe('FU-348: Quick Fix compound op for saturated R-11/R-12', () => {
     //    course per hall), so `fillerCourses.length === halls.length` holds
     //    regardless of how many halls the owned pool exposes.
     const fillerCourses = ownedCourses
-      .filter(c2 => Number(c2.credits) === 3 && !c2.has_lab && c2.category === 'UG' && c2.id !== c.id);
+      .filter(c2 => schedulableLectureCourse(c2) && c2.id !== c.id);
     expect(fillerCourses.length).toBeGreaterThanOrEqual(2);
     const halls = ownedVenues.filter(v => v.type === 'LectureHall').slice(0, fillerCourses.length);
     expect(halls.length).toBeGreaterThanOrEqual(2);
@@ -214,7 +226,7 @@ describe('FU-348: Quick Fix compound op for saturated R-11/R-12', () => {
     // the move and the reassign land in the DB.
     // NEW-FU-673: term-valid resources so section-create doesn't 409 on a foreign-term copy.
     const { scheduleId, courses, instructors, venues } = await freshTermSchedule('272');
-    const c     = courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
+    const c     = courses.find(schedulableLectureCourse);
     const instr = instructors[0];
     const oldVenue = venues.find(v => v.type === 'LectureHall');
     const newVenue = venues.find(v => v.type === 'LectureHall' && v.id !== oldVenue.id);
@@ -304,7 +316,7 @@ describe('FU-350: Multi-section suggester spreads siblings', () => {
     // UG 3cr no-lab course if this term doesn't own SWE 201.
     const { scheduleId, courses } = await freshTermSchedule('282');
     const target = courses.find(c => c.course_code === 'SWE 201')
-      ?? courses.find(c => Number(c.credits) === 3 && !c.has_lab && c.category === 'UG');
+      ?? courses.find(schedulableLectureCourse);
     expect(target).toBeTruthy();
 
     const sug = await request(app)

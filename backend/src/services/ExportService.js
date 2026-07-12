@@ -21,22 +21,20 @@ const labels = require('../domain/exportLabels');   // NEW-FU-666: end-user disp
 // every other section-writing path (assignSection/createSection/deleteSection
 // /updateSectionInfo/suggest) enforces.
 const schedSvc = require('./ScheduleService');
-// NEW-FU-660: shared scope helpers — an instructor/venue export carries ONLY that
-// entity's data (sections + its OH + the venues/instructors it touches), and the
-// file is stamped with a scope the importer reads.
+// NEW-FU-660/FU-682: shared scope helpers — an instructor/venue export is focused
+// on that entity, but also carries complementary Lec/Lab rows and references needed
+// for a complete, safe re-import. The file is stamped with a scope the importer reads.
 const scope = require('./exportScope');
 // NEW-FU-662: parse-layer safety caps (sheet/row counts) — a file that passed the
 // pre-parse zip gate but is still abnormally large is rejected before we iterate it.
 const { assertSheetCount, assertRowCount } = require('../domain/uploadSafety');
 
-// NEW-FU-660: the scoped section set, as the repository's Section domain objects the
-// table/grid renderers consume. Mirrors addScheduleSheet's inline branching so Half B
-// (the section table) covers the SAME sections as Half A (the grid) — instructor- or
-// venue-only, not the whole term.
+// NEW-FU-660/FU-682: the scoped section set, as the repository's Section domain
+// objects the table/grid renderers consume. Half B covers the same focused set as
+// Half A: the entity's own sections plus required complementary Lec/Lab halves.
 async function fetchScopedSections(scheduleId, filter = { type: 'full' }) {
-  if (filter && filter.type === 'instructor' && filter.id) return sectionRepo.findByInstructor(scheduleId, filter.id);
-  if (filter && filter.type === 'venue'      && filter.id) return sectionRepo.findByVenue(scheduleId, filter.id);
-  return sectionRepo.findBySchedule(scheduleId);
+  // NEW-FU-682: also carry the complementary half of each has_lab course (flagged isComplement).
+  return sectionRepo.findScopedWithComplement(scheduleId, filter);
 }
 
 const sectionRepo  = new SectionRepository();
@@ -52,6 +50,9 @@ const LEVEL_COLORS = {
   Graduate:  'FFEADDC1',
 };
 const SOFT_COLOR   = 'FFFFE08A';
+// NEW-FU-682: rose fill for a CARRIED COMPLEMENT section (a lab course's other half) — same hue as the
+// PDF/Word exports, distinct from every level color and the amber soft color. ARGB (exceljs).
+const COMPLEMENT_COLOR = 'FFF3CCDD';
 const OH_COLOR     = 'FFD9D9D9';
 const HEADER_COLOR = 'FF1F4E79';
 const TIME_BG      = 'FFE8EEF7';
@@ -176,10 +177,10 @@ function cellToTimeString(value) {
 // ── TABLE EXPORT (Half B) ─────────────────────────────────────────────────────
 // NEW-FU-657: the section table is written into a CALLER-SUPPLIED workbook so it can
 // ride alongside the visual "Schedule" grid sheet in one combined file.
-// NEW-FU-660: the table is now SCOPED to the same filter as the grid — an instructor
-// or venue export lists ONLY that entity's sections, not the whole term. buildTable-
-// Workbook (back-compat) passes no filter → defaults to the whole term.
-async function addSectionsSheet(wb, scheduleId, filter = { type: 'full' }) {
+// NEW-FU-660/FU-682: the table is scoped to the same focused set as the grid: the
+// selected entity's own sections plus any carried complementary Lec/Lab rows needed
+// for a complete import. buildTableWorkbook (back-compat) passes no filter → full term.
+async function addSectionsSheet(wb, scheduleId, filter = { type: 'full' }, semester) {  // NEW-FU-688: semester drives ST/INT season derivation
   const sections = await fetchScopedSections(scheduleId, filter);
 
   // Group by courseId+sectionNumber+gender (logical section). Gender is part of the
@@ -194,6 +195,11 @@ async function addSectionsSheet(wb, scheduleId, filter = { type: 'full' }) {
     }
     groups.get(key).days.push(sec.day);
   }
+
+  // NEW-FU-682: only when this file carries a lab course's other half do we add the "Note" column
+  // (parseExcelToRows maps by header name, so the unknown "Note" header is ignored → round-trip-safe;
+  // full-term and non-lab scoped exports stay byte-identical).
+  const hasComplement = [...groups.values()].some(g => g.sec.isComplement);
 
   const ws = wb.addWorksheet('Sections');
 
@@ -234,6 +240,8 @@ async function addSectionsSheet(wb, scheduleId, filter = { type: 'full' }) {
     // came back as a LectureHall and fired R-11/R-12.
     { header:'Venue Type',     key:'venueType',     width:14 },
   ];
+  // NEW-FU-687 (Part B): no per-row "Note" column anymore — carried sections moved to their OWN table
+  // below (renderCarried), so the assigned table keeps the clean 16-column shape.
 
   ws.columns = cols;
 
@@ -247,16 +255,18 @@ async function addSectionsSheet(wb, scheduleId, filter = { type: 'full' }) {
     cell.border = thin('FF1F4E79');
   });
 
-  // Data rows
+  // Data rows. NEW-FU-687 (Part B): a shared writer so the ASSIGNED table and the separate CARRIED
+  // table below share one definition; `carried` flips the fill + the section-type derivation source.
   let rowNum = 2;
-  for (const [, { sec, days }] of groups) {
+  const writeRow = (sec, days, carried) => {
     const startT   = (sec.startTime ?? '').substring(0,5);
     const endT     = (sec.endTime   ?? '').substring(0,5);
     const [h1,m1]  = startT.split(':').map(Number);
     const [h2,m2]  = endT.split(':').map(Number);
-    const duration = (h2*60+m2) - (h1*60+m1);
+    // NEW-FU-688: untimed conflict-exempt activity (Project / info-only) → blank duration, not NaN.
+    const duration = (startT && endT) ? ((h2*60+m2) - (h1*60+m1)) : '';
     const level    = sec.academicLevel ?? '';
-    const argb     = LEVEL_COLORS[level] ?? 'FFFFFFFF';
+    const argb     = carried ? COMPLEMENT_COLOR : (LEVEL_COLORS[level] ?? 'FFFFFFFF');
 
     const row = ws.getRow(rowNum++);
     row.height = 18;
@@ -268,9 +278,9 @@ async function addSectionsSheet(wb, scheduleId, filter = { type: 'full' }) {
     // NEW-FU-666: emit END-USER labels, never the stored codes (UG/GR, Lec, LectureHall, M/F).
     row.getCell('category').value      = labels.categoryDisplay(sec.category);
     row.getCell('credits').value       = sec.credits ?? '';                       // NEW-FU-657
-    row.getCell('courseType').value    = labels.courseTypeLabel(sec);             // NEW-FU-657
+    row.getCell('courseType').value    = labels.courseTypeLabel(sec);             // NEW-FU-657/687: Project/Thesis
     row.getCell('sectionNumber').value = safeCell(sec.sectionNumber  ?? '');
-    row.getCell('sectionType').value   = labels.sectionTypeDisplay(sec.sectionType ?? 'Lec'); // NEW-FU-100
+    row.getCell('sectionType').value   = labels.sectionTypeDisplay(labels.effectiveSectionType(sec, { season: semester })); // NEW-FU-100/687/688: Lec→Prj/Ths + ST/INT by season
     row.getCell('gender').value        = labels.genderDisplay(sec.gender === 'F' ? 'F' : 'M'); // NEW-FU-502
     row.getCell('days').value          = days.sort().join(', ');
     row.getCell('startTime').value     = startT;
@@ -282,21 +292,74 @@ async function addSectionsSheet(wb, scheduleId, filter = { type: 'full' }) {
 
     row.eachCell(cell => {
       cell.fill   = { type:'pattern', pattern:'solid', fgColor:{ argb } };
-      cell.font   = { size:9 };
+      cell.font   = { size:9, italic: !!carried };
       cell.alignment = { vertical:'middle', horizontal:'left' };
       cell.border = thin();
     });
-  }
+  };
+  // ASSIGNED sections only in the main table (carried halves go to a separate table below).
+  for (const [, { sec, days }] of groups) { if (sec.isComplement) continue; writeRow(sec, days, false); }
 
   // Auto-filter on header. NEW-FU-100 (Section Type), NEW-FU-502 (Gender),
-  // NEW-FU-657 (Credits + Course Type + Venue Type) → now 16 columns, A..P.
-  ws.autoFilter = { from:'A1', to:`P1` };
+  // NEW-FU-657 (Credits + Course Type + Venue Type) → 16 columns A..P (17 → Q with the FU-682 Note column).
+  ws.autoFilter = { from:'A1', to:`${String.fromCharCode(64 + cols.length)}1` };
+
+  // NEW-FU-680: a small legend below the table defining the easily-confused Course Type / Section Type
+  // columns (and that they are independent — a Capstone course can have Lecture sections). One BLANK
+  // spacer row separates it from the data so it's outside the auto-filter range; and because these
+  // rows carry no Course Code / Section #, parseExcelToRows skips them — the round-trip is unchanged.
+  let lr = rowNum + 1;   // one blank spacer row, then the legend
+  const legendRow = (text, bold) => {
+    lr += 1;
+    const c = ws.getCell(lr, 1);
+    c.value = text;
+    ws.mergeCells(lr, 1, lr, 8);
+    c.font = { italic: !bold, bold: !!bold, size: bold ? 9 : 8, color: { argb: bold ? 'FF1F4E79' : 'FF444444' } };
+    c.alignment = { wrapText: true, vertical: 'top', horizontal: 'left' };
+    ws.getRow(lr).height = bold ? 16 : 24;
+  };
+  legendRow(labels.TYPE_LEGEND_TITLE, true);
+  for (const line of labels.typeLegendLines()) legendRow(line, false);
+
+  // NEW-FU-687 (Part B): a SEPARATE carried-complement table below the legend — its own red title, a red
+  // note, and its own column-header row, then the carried rows (rose-filled). It is never mixed with the
+  // assigned table, so a reader of an instructor file never mistakes a carried section's venue (or a venue
+  // file's carried instructor) for the assigned entity's own. The carried rows DO carry a Course Code +
+  // Section #, so parseExcelToRows still re-imports them = the round-trip stays complete; the title/note
+  // rows carry neither, so they are skipped on import.
+  const ncols = cols.length;
+  const lastCol = String.fromCharCode(64 + ncols);
+  if (hasComplement) {
+    rowNum = lr + 3;   // a clear gap below the legend
+    // NEW-FU-687: the title + note go in column A ONLY (no merge). A MERGED row makes ExcelJS return the
+    // master value when the importer reads the Section # cell, so a merged banner is parsed as a (bad)
+    // data row and rejected. Unmerged, the Section # / Days / Start / End cells are genuinely empty, so
+    // parseExcelToRows (skip-if-any-empty) skips these two rows — while Excel still overflows the long
+    // text across the empty cells to the right, so it reads like a banner.
+    const titleR = ws.getRow(rowNum++);
+    const tc = titleR.getCell(1);
+    tc.value = scope.COMPLEMENT_EXPORT_TITLE;
+    tc.font = { bold: true, size: 10, color: { argb: 'FFC2185B' } };
+    const noteR = ws.getRow(rowNum++);
+    const nc = noteR.getCell(1);
+    nc.value = scope.COMPLEMENT_EXPORT_NOTE;
+    nc.font = { italic: true, size: 8, color: { argb: 'FFC2185B' } };
+    nc.alignment = { wrapText: true, vertical: 'top', horizontal: 'left' };
+    noteR.height = 30;
+    // NEW-FU-687: NO repeated column-header row here — a header row carries "Course Code"/"Section #"
+    // text that parseExcelToRows would read as a (bad) data row and reject the whole import. The carried
+    // rows align under the main table's row-1 header (same columns) and are rose-filled + titled, which is
+    // distinction enough; the title/note rows carry no Section #, so the importer skips them. The carried
+    // DATA rows DO carry a Course Code + Section #, so they re-import = the round-trip stays complete.
+    for (const [, { sec, days }] of groups) { if (sec.isComplement) writeRow(sec, days, true); }
+  }
+
   return ws;
 }
 
 async function buildTableWorkbook(scheduleId, semester) {
   const wb = new ExcelJS.Workbook();
-  await addSectionsSheet(wb, scheduleId);
+  await addSectionsSheet(wb, scheduleId, { type: 'full' }, semester);   // NEW-FU-688: pass season for ST/INT
   return wb;
 }
 
@@ -308,11 +371,12 @@ async function buildTableWorkbook(scheduleId, semester) {
 async function addScheduleSheet(wb, scheduleId, filter, semester) {
   let sections=[], officeHours=[], sheetName=semester||'Schedule';
 
+  // NEW-FU-682: the grid carries the complementary half of each has_lab course too (flagged isComplement).
   if (filter.type==='instructor' && filter.id) {
     const [instr,ohs,secs]=await Promise.all([
       instrRepo.findById(filter.id),
       instrRepo.getOfficeHours(filter.id),
-      sectionRepo.findByInstructor(scheduleId,filter.id),
+      sectionRepo.findScopedWithComplement(scheduleId,filter),
     ]);
     sections=secs; officeHours=ohs;
     // NEW-C1 + NEW-FU-79: sheet name is user-visible AND must satisfy Excel's
@@ -323,7 +387,7 @@ async function addScheduleSheet(wb, scheduleId, filter, semester) {
   } else if (filter.type==='venue' && filter.id) {
     const {VenueRepository}=require('../repositories/repositories');
     const venue=await new VenueRepository().findById(filter.id);
-    sections=await sectionRepo.findByVenue(scheduleId,filter.id);
+    sections=await sectionRepo.findScopedWithComplement(scheduleId,filter);
     sheetName=`${safeFilenamePart(semester) || 'Schedule'} – ${safeFilenamePart(venue?.name) || 'Venue'}`;
   } else {
     // NEW-FU-657: whole-term schedule grid (every section in the schedule). No
@@ -345,6 +409,8 @@ async function addScheduleSheet(wb, scheduleId, filter, semester) {
   for (const day of DAYS) { daySecEntries[day]=[]; dayOhEntries[day]=[]; }
 
   for (const sec of sections) {
+    if (sec.isComplement) continue;   // NEW-FU-687 (Part A): carried halves never appear in the grid sheet
+    if (labels.isInfoOnlyCourse(sec)) continue;   // NEW-FU-688: info-only (external/thesis/research) never in the grid sheet
     if (!sec.startTime||!sec.endTime) continue;
     const ss=timeToSlot(sec.startTime),es=timeToSlot(sec.endTime);
     if (ss>=es) continue;
@@ -422,7 +488,9 @@ async function addScheduleSheet(wb, scheduleId, filter, semester) {
       if (endRow<=startRow) continue;
       const excelCol=dayStartExcelCol[day]+colIdx;
       const isSoft=softIds.has(sec.id);
-      const argb=isSoft?SOFT_COLOR:(LEVEL_COLORS[sec.academicLevel]??'FFE8F4FD');
+      // NEW-FU-682: a carried complement card is rose-filled with a leading "Carried" tag line.
+      const isComp=sec.isComplement;
+      const argb=isSoft?SOFT_COLOR:isComp?COMPLEMENT_COLOR:(LEVEL_COLORS[sec.academicLevel]??'FFE8F4FD');
       safeMerge(ws,startRow,excelCol,endRow-1,excelCol);
       const cell=ws.getCell(startRow,excelCol);
       // NEW-C1: sanitise each line individually before joining, then once more
@@ -430,7 +498,8 @@ async function addScheduleSheet(wb, scheduleId, filter, semester) {
       // `=` from any source line — Excel only checks the first character of
       // the whole cell, but defence in depth is cheap).
       cell.value = safeCell([
-        safeCell(`${sec.courseCode??''} ${sectionLabel(sec)} · ${labels.sectionTypeShort(sec.sectionType)}`),   // NEW-FU-666: Lec/Lab flag
+        ...(isComp ? [safeCell(scope.COMPLEMENT_TAG_SHORT)] : []),
+        safeCell(`${sec.courseCode??''} ${sectionLabel(sec)} · ${labels.sectionTypeShort(labels.effectiveSectionType(sec))}`),   // NEW-FU-666/687: Lec/Lab/Prj/Ths flag
         `${(sec.startTime??'').substring(0,5)}–${(sec.endTime??'').substring(0,5)}`,
         safeCell(sec.instructorName ?? '(no instructor)'),
         safeCell(sec.venueName ?? ''),
@@ -466,26 +535,45 @@ async function buildGridWorkbook(scheduleId, filter, semester) {
 // ── OFFICE HOURS (reference data, carried so re-import has no R-13) ───────────────
 // NEW-FU-657: office hours aren't in the section table but the conflict engine
 // needs them (R-13 "no office hours", R-04 instructor clash).
-// NEW-FU-660: scoped — the OH set is now `scope.fetchOfficeHours(scheduleId, filter)`
-// so an instructor export carries only that instructor's OH, and a venue export only
-// the OH of the instructors who teach in it. (Whole-term export is unchanged.)
+// NEW-FU-660/FU-682: scoped OH comes from exportScope so a focused file includes
+// the selected entity's office hours plus any carried complement instructors' office
+// hours required for conflict checks. (Whole-term export is unchanged.)
 async function addOfficeHoursSheet(wb, scheduleId, filter = { type: 'full' }) {
   const ohs = await scope.fetchOfficeHours(scheduleId, filter);
   const ws = wb.addWorksheet('OfficeHours');
+  // NEW-FU-679: keys + widths only (NO auto header at row 1) so a VENUE file can carry the
+  // explanatory note in the leading rows, with the importable header a couple of rows below it.
+  // The importer (parseOfficeHoursSheet) now finds the header row by CONTENT, so this is import-safe.
   ws.columns = [
-    { header:'Instructor', key:'instructor', width:24 },
-    { header:'Day',        key:'day',        width:12 },
-    { header:'Start Time', key:'startTime',  width:12 },
-    { header:'End Time',   key:'endTime',    width:12 },
+    { key:'instructor', width:24 },
+    { key:'day',        width:12 },
+    { key:'startTime',  width:12 },
+    { key:'endTime',    width:12 },
   ];
-  const hdr = ws.getRow(1); hdr.height = 20;
+
+  let r = 1;
+  // NEW-FU-679 (issue 3): the VENUE-file note lives HERE now — directly above the office-hours
+  // table, on the SAME sheet — so it's read together with the office hours (was on the separate
+  // "Meta" sheet, which the user reads independently → confusing). PDF/Word place it the same way.
+  if (scope.scopeOf(filter) === 'venue') {
+    const note = ws.getCell(r, 1);
+    note.value = scope.VENUE_EXPORT_NOTE;
+    ws.mergeCells(r, 1, r, 4);
+    note.font = { italic:true, size:9, color:{ argb:'FF555555' } };
+    note.alignment = { wrapText:true, vertical:'top', horizontal:'left' };
+    ws.getRow(r).height = 58;   // room for the wrapped note
+    r += 2;   // one blank spacer row before the table
+  }
+
+  const hdr = ws.getRow(r); hdr.height = 20;
+  ['Instructor', 'Day', 'Start Time', 'End Time'].forEach((label, i) => { hdr.getCell(i + 1).value = label; });
   hdr.eachCell(cell => {
     cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb: HEADER_COLOR } };
     cell.font = { bold:true, color:{ argb:'FFFFFFFF' }, size:10 };
     cell.alignment = { vertical:'middle', horizontal:'center' };
     cell.border = thin('FF1F4E79');
   });
-  let r = 2;
+  r += 1;
   for (const oh of ohs) {
     const row = ws.getRow(r++);
     row.getCell('instructor').value = safeCell(oh.instructor_name ?? '');
@@ -563,10 +651,10 @@ function addMetaSheet(wb, scopeName, entity, semester) {
   ];
   styleHeaderRow(ws);
   const rows = [['Scope', scopeName], ['Entity', entity ?? ''], ['Term', semester ?? '']];
-  // NEW-FU-667: in a VENUE file, explain why the OfficeHours / Instructors sheets are present.
-  // (A data-sheet header row can't be shifted without breaking the importer, so the note lives
-  // here in the metadata sheet — the designated place for "what is this file" information.)
-  if (scopeName === 'venue') rows.push(['Note', scope.VENUE_EXPORT_NOTE]);
+  // NEW-FU-679 (issue 3): the venue explanatory note moved OFF this Meta sheet onto the OfficeHours
+  // sheet — directly above the office-hours table — so it's read together with the office hours
+  // instead of in this separate metadata sheet. Meta now carries only the machine-readable markers
+  // the importer keys off (Scope drives merge-vs-replace).
   let r = 2;
   for (const [field, value] of rows) {
     const row = ws.getRow(r++);
@@ -584,13 +672,13 @@ function addMetaSheet(wb, scopeName, entity, semester) {
 // re-importing rebuilds the whole term exactly.
 async function buildCombinedWorkbook(scheduleId, filter = { type: 'full' }, semester) {
   const wb = new ExcelJS.Workbook();
-  // NEW-FU-660: EVERY half is scoped to the same filter now — a scoped export carries
-  // only that instructor's/venue's schedule + only its own reference data, and a Meta
-  // sheet stamps the scope so the importer merges (scoped) or replaces (full).
+  // NEW-FU-660/FU-682: every half uses the same focused filter: the selected entity's
+  // own schedule plus complementary rows/references needed for import integrity. The
+  // Meta sheet stamps the scope so the importer merges (scoped) or replaces (full).
   const scopeName = scope.scopeOf(filter);
   const entity    = await scope.fetchScopeEntity(filter);
   await addScheduleSheet(wb, scheduleId, filter, semester);
-  await addSectionsSheet(wb, scheduleId, filter);
+  await addSectionsSheet(wb, scheduleId, filter, semester);   // NEW-FU-688: pass season for ST/INT
   await addOfficeHoursSheet(wb, scheduleId, filter);
   await addInstructorsSheet(wb, scheduleId, filter);
   await addVenuesSheet(wb, scheduleId, filter);
@@ -729,10 +817,16 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
     // with the section-derived has_lab (a capstone/external course has no Lab row).
     const isCapstoneByCourse = new Map();
     const isExternalByCourse = new Map();
+    const isThesisByCourse   = new Map();   // NEW-FU-687
+    const isResearchByCourse = new Map();   // NEW-FU-688
+    const isSeminarByCourse  = new Map();
     for (const r of rowData) {
       const k = r.courseCode.toLowerCase();
       if (r.isCapstone) isCapstoneByCourse.set(k, true);
       if (r.isExternal) isExternalByCourse.set(k, true);
+      if (r.isThesis)   isThesisByCourse.set(k, true);   // NEW-FU-687
+      if (r.isResearch) isResearchByCourse.set(k, true); // NEW-FU-688
+      if (r.isSeminar)  isSeminarByCourse.set(k, true);
     }
 
     for (const row of rowData) {
@@ -753,14 +847,17 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
         // INSERT (the old `ON CONFLICT (course_code)` had no matching index post-migration-023,
         // which dropped the bare UNIQUE for partial per-term/template indexes, and would throw).
         const res = await client.query(`
-          INSERT INTO courses (course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone, is_external, owner_semester)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-          RETURNING id, course_code, name, academic_level, category, num_sections
+          INSERT INTO courses (course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone, is_external, is_thesis, is_research, is_seminar, owner_semester)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          RETURNING id, course_code, name, academic_level, category, num_sections, is_seminar
         `, [row.courseCode, row.courseName, row.credits, level, isGR?'GR':'UG',
             sectionCountByCourse.get(key) || 1,     // NEW-FU-657b: real count
             hasLabByCourse.get(key) || false,
             isCapstoneByCourse.get(key) || false,   // NEW-FU-657
             isExternalByCourse.get(key) || false,   // NEW-FU-657
+            isThesisByCourse.get(key) || false,     // NEW-FU-687
+            isResearchByCourse.get(key) || false,   // NEW-FU-688
+            isSeminarByCourse.get(key) || false,
             ownerSemester]);
         courseByCode.set(key, res.rows[0]);
       }
@@ -878,7 +975,11 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
       const instructor = instrByName.get(row.instructorName?.toLowerCase()) ?? null;
       const venue      = venueByName.get(row.venueName?.toLowerCase())      ?? null;
 
-      for (const day of row.days) {
+      // NEW-FU-690: an info-only / untimed section (Thesis / Research / untimed Project / Summer
+      // Training / Internship) carries NO days — persist it as a single NULL-day, NULL-time row so it
+      // round-trips on re-import. A blank time string is coerced to NULL (the column is nullable).
+      const daysToInsert = row.days.length ? row.days : [null];
+      for (const day of daysToInsert) {
         try {
           const ins = await client.query(`
             INSERT INTO sections
@@ -890,7 +991,7 @@ async function commitRows(rowData, scheduleId, officeHours = [], instructorsRef 
             scheduleId, course.id,
             instructor?.id ?? null,
             venue?.id      ?? null,
-            row.sectionNumber, day, row.startTime, row.endTime,
+            row.sectionNumber, day, row.startTime || null, row.endTime || null,
             row.sectionType ?? 'Lec',
             row.gender === 'F' ? 'F' : 'M',   // NEW-FU-502 (Phase 123)
           ]);
@@ -1054,7 +1155,13 @@ async function parseExcelToRows(buffer) {
     const daysStr       = getStr('Days');
     const startTime     = getTime('Start Time');
     const endTime       = getTime('End Time');
-    if (!courseCode || !sectionNumber || !daysStr || !startTime || !endTime) continue;
+    // NEW-FU-690: a real data row needs a Course Code + Section # — the day/time may be BLANK for an
+    // info-only section (Thesis / Research / untimed Project / Summer Training / Internship), so it
+    // must still round-trip on re-import. The legend / title / note rows are FULL-WIDTH MERGED cells,
+    // so every column (incl. Course Code AND Section #) returns the SAME text — a real data row never
+    // has courseCode === sectionNumber, so that equality uniquely skips those non-data rows (while a
+    // genuinely malformed course code on a real row still flows through to the field validator).
+    if (!courseCode || !sectionNumber || courseCode === sectionNumber) continue;
 
     // NEW-M13 + NEW-FU-24 + NEW-FU-68: lowercased optional-column lookup.
     const creditsCol = headers['credits'];
@@ -1070,9 +1177,10 @@ async function parseExcelToRows(buffer) {
     // NEW-FU-666: accept the END-USER label ("Lecture"/"Laboratory"/…) OR the legacy code
     // ("Lec"/"Lab"/…). labels.sectionTypeCode maps known forms to the code; an unknown value
     // passes through so the strict field gate still rejects it (here it just defaults to Lec).
+    // NEW-FU-688: + Sem is a real stored type; St/Int/Res are flag-derived → fall through to Lec.
     const rawSectionType = getStr('Section Type');
     const stCode = labels.sectionTypeCode(rawSectionType);
-    const sectionType = (['Lec','Lab','Prj','Ths'].includes(stCode) ? stCode : 'Lec');
+    const sectionType = (['Lec','Lab','Prj','Ths','Sem'].includes(stCode) ? stCode : 'Lec');
     // NEW-FU-502 (Phase 123): gender round-trip. Primary source is the new
     // Gender column ('F' → female, anything else → 'M' — matches the column
     // default in migration 014, so files exported before this column existed
@@ -1096,8 +1204,12 @@ async function parseExcelToRows(buffer) {
       sectionNumber,
       sectionType,    // NEW-FU-100
       gender,         // NEW-FU-502
-      isCapstone:    /capstone/.test(courseTypeRaw),   // NEW-FU-657
+      isCapstone:    /capstone|project/.test(courseTypeRaw),   // NEW-FU-657/687: "Project" = renamed Capstone (legacy "Capstone" still accepted)
+      isThesis:      /thesis/.test(courseTypeRaw),             // NEW-FU-687
+      isResearch:    /research/.test(courseTypeRaw),           // NEW-FU-688
+      isSeminar:     /seminar/.test(courseTypeRaw) || stCode === 'Sem',
       isExternal:    /external/.test(courseTypeRaw),   // NEW-FU-657
+      courseTypeHasLab: /laborator/.test(courseTypeRaw),   // NEW-FU-681: preserve has_lab from the "Has Laboratory" label even when the file carries no Lab row
       days: daysStr.split(/[,;/\s]+/).map(d => d.trim()).filter(Boolean),
       startTime,
       endTime,
@@ -1196,16 +1308,25 @@ function parseOfficeHoursSheet(wb) {
   const ws = wsByName(wb, 'OfficeHours');   // NEW-FU-674: case-insensitive
   if (!ws) return [];
   assertRowCount(ws.rowCount, 'OfficeHours sheet');   // NEW-FU-669
-  const headers = Object.create(null);   // NEW-FU-669: null-proto header map
-  ws.getRow(1).eachCell((cell, colNum) => {
-    const v = cell.value?.toString().trim();
-    if (v) headers[v.toLowerCase()] = colNum;
-  });
+  // NEW-FU-679: locate the header row by CONTENT, not a hard-coded row 1. A VENUE file now carries
+  // the explanatory note (+ a blank spacer) in the leading rows of THIS sheet (issue 3), so the
+  // 'Instructor / Day / Start Time / End Time' header may sit a couple of rows down. Scan the first
+  // rows for the row that has all four headers; a normal header-at-row-1 file is found at r=1.
+  let headers = null, headerRow = 0;
+  const scanLimit = Math.min(ws.rowCount, 12);
+  for (let r = 1; r <= scanLimit; r++) {
+    const h = Object.create(null);   // NEW-FU-669: null-proto header map
+    ws.getRow(r).eachCell((cell, colNum) => {
+      const v = cell.value?.toString().trim();
+      if (v) h[v.toLowerCase()] = colNum;
+    });
+    if (h['instructor'] && h['day'] && h['start time'] && h['end time']) { headers = h; headerRow = r; break; }
+  }
+  if (!headers) return [];
   const iCol = headers['instructor'], dCol = headers['day'],
         sCol = headers['start time'], eCol = headers['end time'];
-  if (!iCol || !dCol || !sCol || !eCol) return [];
   const out = [];
-  for (let r = 2; r <= ws.rowCount; r++) {
+  for (let r = headerRow + 1; r <= ws.rowCount; r++) {
     const row = ws.getRow(r);
     const instructorName = cellScalar(row.getCell(iCol)?.value)?.toString().trim() ?? '';   // NEW-FU-672: unwrap formula/rich/hyperlink cells (start/end already via cellToTimeString→cellScalar)
     const day            = cellScalar(row.getCell(dCol)?.value)?.toString().trim() ?? '';
@@ -1235,9 +1356,8 @@ const EXPORT_FORMATS = {
     ext:  'xlsx',
     async build(scheduleId, filter, semester) {
       // NEW-FU-657: always emit the combined workbook (Schedule grid sheet +
-      // Sections table sheet). The filter only selects WHICH grid is Half A;
-      // Half B is always the whole-term table so the file round-trips into a
-      // complete schedule.
+      // Sections table sheet). NEW-FU-682: scoped files keep Half A and Half B
+      // aligned to the focused scope plus required complementary rows/references.
       const wb = await buildCombinedWorkbook(scheduleId, filter, semester);
       // Caller streams via wb.xlsx.write(res); return shape kept distinct
       // so the controller can detect "workbook vs buffer".
@@ -1248,8 +1368,8 @@ const EXPORT_FORMATS = {
     mime: 'application/pdf',
     ext:  'pdf',
     async build(scheduleId, filter, semester) {
-      // NEW-FU-657: always emit the combined PDF (grid page(s) + section table).
-      // The filter selects which grid is Half A; Half B is the whole-term table.
+      // NEW-FU-657/FU-682: always emit the combined PDF (grid page(s) + scoped
+      // section/reference tables for the selected export scope).
       const buffer = await pdfSvc.buildCombinedPdfBuffer(scheduleId, filter, semester);
       return { buffer };
     },
@@ -1258,8 +1378,8 @@ const EXPORT_FORMATS = {
     mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     ext:  'docx',
     async build(scheduleId, filter, semester) {
-      // NEW-FU-657: always emit the combined DOCX (per-day schedule list +
-      // section table). Filter selects Half A's scope; Half B is whole-term.
+      // NEW-FU-657/FU-682: always emit the combined DOCX (per-day schedule list +
+      // scoped section/reference tables for the selected export scope).
       const buffer = await docxSvc.buildCombinedDocxBuffer(scheduleId, filter, semester);
       return { buffer };
     },

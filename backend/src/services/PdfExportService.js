@@ -6,11 +6,12 @@
  *
  * NEW-FU-657: the public export is the COMBINED document —
  *   buildCombinedPdfBuffer(scheduleId, filter, semester)
- *     page 1+:  visual weekly schedule grid (Half A, scope = filter)
- *     then:     full-semester section table (Half B, every section)
- *     then:     office-hours table (so a re-import is conflict-clean)
- * Half B is always the whole term so the file round-trips into a complete
- * schedule. The table/OH column layouts (TABLE_COLS / OH_COLS / LEFT_MARGIN) are
+ *     page 1+:  visual weekly schedule grid (Half A, focused scope = filter)
+ *     then:     scoped section table (Half B, same focused scope)
+ *     then:     reference tables needed for a conflict-clean re-import
+ * Whole-term files still carry every section. Instructor/venue files carry the
+ * selected entity plus required complementary Lec/Lab rows and references. The
+ * table/OH column layouts (TABLE_COLS / OH_COLS / LEFT_MARGIN) are
  * EXPORTED so ImportParserService can reconstruct columns by x-position — text is
  * drawn left-aligned at colLeft+pad and width-fitted (never overflows its cell),
  * so a positional pdfjs parse maps every token back to its column unambiguously.
@@ -36,9 +37,9 @@ const conflictRepo = new ConflictRepository();
 // NEW-FU-660: the scoped section set (instructor / venue / whole-term) as Section
 // domain objects — Half B's table now covers the same sections as Half A's grid.
 async function fetchScopedSections(scheduleId, filter = { type: 'full' }) {
-  if (filter && filter.type === 'instructor' && filter.id) return sectionRepo.findByInstructor(scheduleId, filter.id);
-  if (filter && filter.type === 'venue'      && filter.id) return sectionRepo.findByVenue(scheduleId, filter.id);
-  return sectionRepo.findBySchedule(scheduleId);
+  // NEW-FU-682: a scoped export also carries the COMPLEMENTARY half of each has_lab course (flagged
+  // isComplement) so a re-import rebuilds the COMPLETE lecture+lab course.
+  return sectionRepo.findScopedWithComplement(scheduleId, filter);
 }
 
 const DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday'];
@@ -48,6 +49,11 @@ const LEVEL_COLORS = {
   Senior:    '#E8E0F5', Graduate:  '#EADDC1',
 };
 const SOFT_COLOR   = '#FFE08A';
+// NEW-FU-682: a rose tint + deep-rose border for a CARRIED COMPLEMENT section (a lab course's other
+// half). Distinct from every cool level pastel and the amber soft-conflict color, so the eye separates
+// "carried" rows/cards at a glance even before reading the side note. ASCII hex (pdfkit, light + dark).
+const COMPLEMENT_BG     = '#F3CCDD';
+const COMPLEMENT_BORDER = '#C2185B';
 const HEADER_COLOR = '#1F4E79';
 const TIME_BG      = '#E8EEF7';
 const BORDER_COL   = '#94A3B8';
@@ -86,8 +92,8 @@ const TABLE_COLS = [
   { key: 'courseType',    label: 'Course Type',    width: 40 },
   { key: 'sectionNumber', label: 'Section #',      width: 32 },
   { key: 'sectionType',   label: 'Section Type',   width: 42 },
-  { key: 'gender',        label: 'Gender',         width: 26 },
-  { key: 'days',          label: 'Days',           width: 102 },   // NEW-FU-671: −6 to fund Academic Level (still fits "Sunday, Tuesday, Thursday")
+  { key: 'gender',        label: 'Gender',         width: 32 },   // NEW-FU-679: +6 so the header "Gender" AND the value "Female" fit one line (was 26pt → char-wrapped to "Gende r" / "Femal e")
+  { key: 'days',          label: 'Days',           width: 96 },   // NEW-FU-671: −6 to fund Academic Level · NEW-FU-679: −6 more to fund Gender (days still wraps "Sunday, Tuesday, Thursday" at its commas)
   { key: 'startTime',     label: 'Start Time',     width: 30 },
   { key: 'endTime',       label: 'End Time',       width: 30 },
   { key: 'duration',      label: 'Duration (min)', width: 34 },
@@ -147,9 +153,37 @@ function fitText(doc, str, maxWidth) {
   return s;
 }
 
-function pdfToBuffer(buildFn) {
+// NEW-FU-679: draw text into a fixed-width table cell WITHOUT ever char-breaking a single word.
+// PDFKit wraps multi-word text at spaces/hyphens, but a single token wider than the cell is split
+// MID-CHARACTER ("Gender"→"Gende\nr", "Female"→"Femal\ne") — which both looks broken AND corrupts
+// the positional importer's line-rejoin (it would reconstruct "Femal e"). If the widest unbreakable
+// token exceeds the inner width, shrink THIS cell's font just enough to fit it (down to a 4.5pt
+// floor), then draw; multi-word text still wraps at spaces. Text stays left-aligned at the column
+// x, so the positional importer maps every cell back to its column regardless of the per-cell size.
+function fitCellText(doc, value, x, y, innerW, baseSize, fontName, textOpts) {
+  const str = String(value ?? '');
+  doc.font(fontName).fontSize(baseSize);
+  let widest = 0;
+  for (const tok of str.split(/[\s-]+/)) {
+    if (!tok) continue;
+    const w = doc.widthOfString(tok);
+    if (w > widest) widest = w;
+  }
+  const size = (widest > innerW && widest > 0) ? Math.max(4.5, baseSize * innerW / widest) : baseSize;
+  doc.fontSize(size).text(str, x, y, { width: innerW, ...textOpts });
+  doc.fontSize(baseSize);
+}
+
+// NEW-FU-680: `firstPageOpts` lets the GRID build open the document on a dynamically-sized first
+// page (wide enough for a dense schedule — see gridPageSize); margin defaults to LEFT_MARGIN.
+function pdfToBuffer(buildFn, firstPageOpts) {
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN });
+    // NEW-FU-680: an explicit ARRAY size is already [width, height] — do NOT also pass `layout`, or
+    // pdfkit re-orients it to portrait (tall + narrow). Named-size pages keep size+layout as before.
+    const opts = (firstPageOpts && Array.isArray(firstPageOpts.size))
+      ? Object.assign({ margin: LEFT_MARGIN }, firstPageOpts)
+      : Object.assign({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN }, firstPageOpts || {});
+    const doc = new PDFDocument(opts);
     const chunks = [];
     doc.on('data', (c) => chunks.push(c));
     doc.on('end',  () => resolve(Buffer.concat(chunks)));
@@ -159,9 +193,29 @@ function pdfToBuffer(buildFn) {
   });
 }
 
+// NEW-FU-680: the weekly grid PAGE widens with density so even the busiest day's side-by-side
+// sections (lanes) stay wide enough to show a full course / time / instructor on one line — ending
+// the truncation ("AHMED AL-NAZER…", "17:20–…") that plagued the DENSE full-term grid where many
+// overlapping sections squeezed cards into tiny lanes. A4-landscape is the FLOOR (sparse
+// instructor/venue grids are unchanged); the page grows up to a safety cap for dense terms. The
+// height stays A4-landscape — a 50-min block there already holds four lines (instructor/venue grids
+// prove it); only horizontal room was missing. renderGridInto reads doc.page.width, so it adapts
+// automatically; the PNG export rasterizes this same page, so the image widens too.
+const A4_LANDSCAPE = [841.89, 595.28];
+const GRID_MAX_SCALE = 2.6;     // hard cap (≈ A1) so a pathological term can't explode the page
+// Scale the WHOLE grid page up with density, keeping the A4 aspect ratio, so a dense grid's cards grow
+// in BOTH width (lanes stay wide enough for a full name/time on one line) AND height (a 50-min block
+// stays tall enough for all four lines). renderGridInto derives dayColW + rowH from the page, so both
+// follow automatically. ≤ 2 lanes (sparse instructor/venue grids) → A4 (unchanged); denser → larger.
+function gridPageSize(maxLanes) {
+  const scale = Math.min(GRID_MAX_SCALE, Math.max(1, Math.max(1, maxLanes) / 2));
+  return [A4_LANDSCAPE[0] * scale, A4_LANDSCAPE[1] * scale];
+}
+const maxLanesOf = (laneTotals) => Math.max(1, ...Object.values(laneTotals || {}).map(Number));
+
 // ── TABLE (Half B) ───────────────────────────────────────────────────────────
-// NEW-FU-660: scoped — an instructor/venue export's table lists only that entity's
-// sections (same set as the grid).
+// NEW-FU-660/FU-682: scoped table groups use the same focused set as the grid: the
+// selected entity's own sections plus carried complementary Lec/Lab sections.
 async function fetchTableGroups(scheduleId, filter = { type: 'full' }) {
   const sections = await fetchScopedSections(scheduleId, filter);
   const groups = new Map();
@@ -176,9 +230,16 @@ async function fetchTableGroups(scheduleId, filter = { type: 'full' }) {
 // NEW-FU-660: `title` carries the scope-tagged heading (full → "Full Semester (all
 // sections)"; instructor/venue → "Instructor/Venue Schedule · <name>"), which the PDF
 // importer reads to detect the file's scope.
-function renderTableInto(doc, groups, semester, title) {
-  doc.font('Helvetica-Bold').fontSize(15).fillColor(HEADER_COLOR)
+// NEW-FU-687 (Part B): `complementOnly` splits one combined group map into two tables — the ASSIGNED
+// table (complementOnly=false, the entity's own sections) and a separate CARRIED table
+// (complementOnly=true, the reference-only complementary halves). `noteText`, when set (carried table),
+// is drawn IN RED inside the repeating page header, so the "these are carried, not part of this
+// schedule" warning shows on EVERY page the carried table spans — never just the first.
+function renderTableInto(doc, groups, semester, title, { complementOnly = false, noteText = null } = {}) {
+  doc.font('Helvetica-Bold').fontSize(complementOnly ? 12 : 15)
+     .fillColor(complementOnly ? COMPLEMENT_BORDER : HEADER_COLOR)
      .text(title || `${semester || 'Schedule'} — Full Semester (all sections)`, { align: 'left' });
+  doc.fillColor('#000000');
   doc.moveDown(0.4);
 
   const cols    = TABLE_COLS;
@@ -192,21 +253,34 @@ function renderTableInto(doc, groups, semester, title) {
   // truncated to "Course Co"/"Acad. Level"/"Cat."/… The data cells (below) wrap too.
   const HEADER_H = 24;
   const drawHeader = () => {
-    doc.rect(left, y, totalW, HEADER_H).fill(HEADER_COLOR);
+    // NEW-FU-687 (Part B): the red carried-table note rides the header so it repeats on every page.
+    if (noteText) {
+      doc.font('Helvetica-Oblique').fontSize(7.5).fillColor(COMPLEMENT_BORDER);
+      doc.text(noteText, left, y, { width: totalW });
+      y = doc.y + 3; doc.fillColor('#000000');
+    }
+    doc.rect(left, y, totalW, HEADER_H).fill(complementOnly ? COMPLEMENT_BORDER : HEADER_COLOR);
     doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(TABLE_FONT);
     let x = left;
-    for (const c of cols) { doc.text(c.label, x + 2, y + 3, { width: c.width - 4, lineGap: 0, ellipsis: false }); x += c.width; }
+    // NEW-FU-679: fitCellText guarantees no header word is ever char-split (e.g. "Gender"→"Gende r").
+    for (const c of cols) { fitCellText(doc, c.label, x + 2, y + 3, c.width - 4, TABLE_FONT, 'Helvetica-Bold', { lineGap: 0, ellipsis: false }); x += c.width; }
     y += HEADER_H;
   };
   drawHeader();
 
   for (const [, { sec, days }] of groups) {
+    // NEW-FU-687 (Part B): assigned table skips carried rows; carried table skips assigned rows.
+    if (Boolean(sec.isComplement) !== complementOnly) continue;
     const startT = (sec.startTime ?? '').substring(0, 5);
     const endT   = (sec.endTime   ?? '').substring(0, 5);
     const [h1, m1] = startT.split(':').map(Number);
     const [h2, m2] = endT.split(':').map(Number);
-    const duration = (h2 * 60 + m2) - (h1 * 60 + m1);
-    const bg = LEVEL_COLORS[sec.academicLevel] ?? '#FFFFFF';
+    // NEW-FU-688: untimed conflict-exempt activity (Project / info-only) → blank duration, not "NaN".
+    const durationText = (startT && endT) ? String((h2 * 60 + m2) - (h1 * 60 + m1)) : '';
+    // NEW-FU-682: a carried complement row is shaded rose (style mark) instead of its level color — the
+    // PDF importer reads cells positionally, so a text tag column would corrupt the last cell; the shade
+    // is purely visual and the side note (renderComplementNoteInto) names what the rose rows are.
+    const bg = sec.isComplement ? COMPLEMENT_BG : (LEVEL_COLORS[sec.academicLevel] ?? '#FFFFFF');
 
     const values = {
       courseCode:    sec.courseCode    ?? '',
@@ -216,12 +290,12 @@ function renderTableInto(doc, groups, semester, title) {
       credits:       sec.credits ?? '',
       courseType:    labels.courseTypeLabel(sec),
       sectionNumber: sec.sectionNumber ?? '',
-      sectionType:   labels.sectionTypeDisplay(sec.sectionType ?? 'Lec'),
+      sectionType:   labels.sectionTypeDisplay(labels.effectiveSectionType(sec, { season: semester })),   // NEW-FU-687/688: Lec→Prj/Ths + ST/INT by season
       gender:        labels.genderDisplay(sec.gender === 'F' ? 'F' : 'M'),
       days:          days.sort().join(', '),
       startTime:     startT,
       endTime:       endT,
-      duration:      String(duration),
+      duration:      durationText,
       instructor:    sec.instructorName ?? '',
       venue:         sec.venueName      ?? '',
       venueType:     labels.venueTypeDisplay(sec.venueType),
@@ -242,15 +316,17 @@ function renderTableInto(doc, groups, semester, title) {
     const rowH = Math.max(14, Math.ceil(cellH) + 2 * PAD);
 
     if (y + rowH > doc.page.height - doc.page.margins.bottom) {
-      doc.addPage(); y = doc.page.margins.top; drawHeader();
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN }); y = doc.page.margins.top; drawHeader();
       doc.font('Helvetica').fontSize(TABLE_FONT);
     }
 
     doc.rect(left, y, totalW, rowH).fill(bg).fillColor('#000000');
     doc.font('Helvetica').fontSize(TABLE_FONT).fillColor('#000000');
     let x = left;
+    // NEW-FU-679: fitCellText guarantees no value is ever char-split (e.g. "Female"→"Femal e"),
+    // which also keeps the positional re-import lossless (no "Femal e" reconstruction).
     for (const c of cols) {
-      doc.text(String(values[c.key] ?? ''), x + 2, y + PAD, { width: c.width - 4, lineGap: 1 });
+      fitCellText(doc, values[c.key], x + 2, y + PAD, c.width - 4, TABLE_FONT, 'Helvetica', { lineGap: 1 });
       x += c.width;
     }
 
@@ -259,6 +335,35 @@ function renderTableInto(doc, groups, semester, title) {
     for (const c of cols) { doc.rect(x, y, c.width, rowH).stroke(); x += c.width; }
     y += rowH;
   }
+  doc.y = y;   // NEW-FU-680: publish the table's bottom so the legend (renderTypeLegendInto) draws below it
+}
+
+// NEW-FU-680: a small legend, just below the section table, defining the easily-confused Course Type
+// and Section Type columns (and stating they are independent — a Capstone course can have Lecture
+// sections). Shown in every PDF (all scopes). Small font so it never competes with the table.
+function renderTypeLegendInto(doc) {
+  const left = doc.page.margins.left;
+  const w = doc.page.width - left - doc.page.margins.right;
+  // start a fresh page only if there isn't room for the ~4 small lines
+  if (doc.y + 46 > doc.page.height - doc.page.margins.bottom) { doc.addPage({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN }); doc.y = doc.page.margins.top; }
+  else { doc.y += 8; }
+  doc.font('Helvetica-Bold').fontSize(8).fillColor(HEADER_COLOR).text(labels.TYPE_LEGEND_TITLE, left, doc.y, { width: w });
+  doc.moveDown(0.2);
+  doc.font('Helvetica').fontSize(7.5).fillColor('#444444');
+  for (const line of labels.typeLegendLines()) { doc.text(line, left, doc.y, { width: w }); doc.moveDown(0.15); }
+  doc.fillColor('#000000');
+}
+
+// NEW-FU-682: the side note explaining the rose-shaded "Carried" rows/cards — shown only when the file
+// actually carries ≥1 complement section. Drawn just below the table/legend (next to the rows it
+// describes), mirroring the VENUE_EXPORT_NOTE styling.
+function renderComplementNoteInto(doc) {
+  const left = doc.page.margins.left;
+  const w = doc.page.width - left - doc.page.margins.right;
+  if (doc.y + 56 > doc.page.height - doc.page.margins.bottom) { doc.addPage({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN }); doc.y = doc.page.margins.top; }
+  else { doc.y += 8; }
+  doc.font('Helvetica-Oblique').fontSize(8).fillColor('#7A2540').text(scope.COMPLEMENT_EXPORT_NOTE, left, doc.y, { width: w, align: 'left' });
+  doc.fillColor('#000000');
 }
 
 async function buildTablePdfBuffer(scheduleId, semester) {
@@ -267,9 +372,9 @@ async function buildTablePdfBuffer(scheduleId, semester) {
 }
 
 // ── OFFICE HOURS (reference data; carried so re-import has no R-13) ───────────────
-// NEW-FU-660: the OH / instructor / venue reference sets are now fetched SCOPED via
-// the shared exportScope helpers, so an instructor/venue PDF carries only that
-// entity's reference data. (Whole-term export is unchanged.)
+// NEW-FU-660/FU-682: the OH / instructor / venue reference sets come from shared
+// exportScope helpers, so scoped PDFs carry the selected entity's references plus
+// any complementary references needed for a valid re-import.
 function renderOfficeHoursInto(doc, ohRows, semester) {
   doc.font('Helvetica-Bold').fontSize(15).fillColor(HEADER_COLOR)
      .text(`${semester || 'Schedule'} — Office Hours`, { align: 'left' });
@@ -292,7 +397,7 @@ function renderOfficeHoursInto(doc, ohRows, semester) {
 
   for (const oh of ohRows) {
     if (y + ROW_H > doc.page.height - doc.page.margins.bottom) {
-      doc.addPage(); y = doc.page.margins.top; drawHeader();
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN }); y = doc.page.margins.top; drawHeader();
     }
     doc.rect(left, y, totalW, ROW_H).fill('#FFFFFF').fillColor('#000000');
     const vals = [oh.instructor_name ?? '', oh.day ?? '', (oh.start_time ?? '').substring(0, 5), (oh.end_time ?? '').substring(0, 5)];
@@ -324,7 +429,7 @@ function renderRefTable(doc, title, cols, rows) {
   };
   drawHeader();
   for (const row of rows) {
-    if (y + ROW_H > doc.page.height - doc.page.margins.bottom) { doc.addPage(); y = doc.page.margins.top; drawHeader(); }
+    if (y + ROW_H > doc.page.height - doc.page.margins.bottom) { doc.addPage({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN }); y = doc.page.margins.top; drawHeader(); }
     doc.rect(left, y, totalW, ROW_H).fill('#FFFFFF').fillColor('#000000');
     doc.font('Helvetica').fontSize(9).fillColor('#000000');
     let x = left;
@@ -336,21 +441,37 @@ function renderRefTable(doc, title, cols, rows) {
   }
 }
 
+// NEW-FU-679: pick the LARGEST font (down to a 4pt floor) at which `text` fits the card box
+// (width w, height h) once wrapped — so a short block (a 50-min class is only ~26pt tall on the
+// page-height grid) shows ALL of its lines at the biggest readable size instead of being chopped
+// to "AHMED AL-NAZER…". Returns { size, fits }; fits=false only when even 4pt overflows (then the
+// caller ellipsizes as a last resort). Smaller fonts also pull an over-wide name within the lane,
+// so the card never char-breaks either. Pure (font/size only) → unit-testable.
+function pickCardFont(doc, text, w, h, maxF) {
+  doc.font('Helvetica');
+  for (let f = maxF; f >= 4; f -= 0.5) {
+    doc.fontSize(f);
+    if (doc.heightOfString(text, { width: w }) <= h) return { size: f, fits: true };
+  }
+  return { size: 4, fits: false };
+}
+
 // ── GRID (Half A) ──────────────────────────────────────────────────────────────
 async function fetchGridData(scheduleId, filter, semester) {
   let sections = [];
   let title = `${semester || 'Schedule'} — Full Schedule`;
 
+  // NEW-FU-682: the grid (like the table) carries the complementary half of each has_lab course.
   if (filter.type === 'instructor' && filter.id) {
     const [instr, secs] = await Promise.all([
       instrRepo.findById(filter.id),
-      sectionRepo.findByInstructor(scheduleId, filter.id),
+      sectionRepo.findScopedWithComplement(scheduleId, filter),
     ]);
     sections = secs;
     title = `${semester || 'Schedule'} — ${instr?.name || 'Instructor'}`;
   } else if (filter.type === 'venue' && filter.id) {
     const venue = await new VenueRepository().findById(filter.id);
-    sections = await sectionRepo.findByVenue(scheduleId, filter.id);
+    sections = await sectionRepo.findScopedWithComplement(scheduleId, filter);
     title = `${semester || 'Schedule'} — ${venue?.name || 'Venue'}`;
   } else {
     sections = await sectionRepo.findBySchedule(scheduleId);
@@ -364,6 +485,15 @@ async function fetchGridData(scheduleId, filter, semester) {
 
   const daySecs = Object.fromEntries(DAYS.map(d => [d, []]));
   for (const sec of sections) {
+    // NEW-FU-687 (Part A/C): the carried complementary half must not be drawn in the focused
+    // schedule grid (and so never in the rasterized PNG, which renders this same grid). The grid
+    // shows the selected entity's own scheduled sections; carried complements live in a separate
+    // table with their own note.
+    if (sec.isComplement) continue;
+    // NEW-FU-688: the info-only family (external → Summer Training/Internship, thesis, research) is
+    // NEVER drawn in the grid even if it carries a placeholder time — it is information-only. Project
+    // is NOT excluded here: it draws when timed (the !startTime guard below handles the untimed case).
+    if (labels.isInfoOnlyCourse(sec)) continue;
     if (!sec.startTime || !sec.endTime) continue;
     const ss = timeToSlot(sec.startTime);
     const es = timeToSlot(sec.endTime);
@@ -439,33 +569,47 @@ function renderGridInto(doc, { daySecs, laneTotals, softIds, title }) {
       const h      = (endSlot - startSlot) * rowH;
       const x      = xBase + lane * subW;
       const isSoft = softIds.has(sec.id);
-      const bg     = isSoft ? SOFT_COLOR : (LEVEL_COLORS[sec.academicLevel] ?? '#E8F4FD');
+      // NEW-FU-682: a carried complement card is rose-tinted with a rose border and a leading "Carried"
+      // tag line, so it's distinct from the entity's own cards (the side note on the table page explains it).
+      const isComp = sec.isComplement;
+      const bg     = isSoft ? SOFT_COLOR : isComp ? COMPLEMENT_BG : (LEVEL_COLORS[sec.academicLevel] ?? '#E8F4FD');
       doc.rect(x + 1, y + 1, subW - 2, h - 1).fill(bg);
-      doc.strokeColor(isSoft ? '#B45309' : '#2E75B6').lineWidth(0.6)
+      doc.strokeColor(isSoft ? '#B45309' : isComp ? COMPLEMENT_BORDER : '#2E75B6').lineWidth(0.6)
          .rect(x + 1, y + 1, subW - 2, h - 1).stroke();
       const lines = [
-        `${sec.courseCode ?? ''} ${sectionLabel(sec)} · ${labels.sectionTypeShort(sec.sectionType)}`,   // NEW-FU-666: Lec/Lab flag
+        ...(isComp ? [scope.COMPLEMENT_TAG_SHORT] : []),
+        `${sec.courseCode ?? ''} ${sectionLabel(sec)} · ${labels.sectionTypeShort(labels.effectiveSectionType(sec))}`,   // NEW-FU-666/687: Lec/Lab/Prj/Ths flag
         `${(sec.startTime ?? '').substring(0, 5)}–${(sec.endTime ?? '').substring(0, 5)}`,
         sec.instructorName ?? '(no instructor)',
         sec.venueName ?? '',
       ].filter(Boolean);
-      doc.fillColor('#000000').font('Helvetica').fontSize(laneTot > 2 ? 6 : 7)
-         .text(lines.join('\n'), x + 2, y + 2, { width: subW - 4, height: h - 3, ellipsis: true });
+      // NEW-FU-679: auto-FIT the card text to its block instead of truncating it. A short block
+      // (a 50-min class is only ~26pt tall on the page-height grid) can't hold four lines at 7pt,
+      // so the old { height, ellipsis:true } chopped names to "AHMED AL-NAZER…". Pick the LARGEST
+      // font (down to a 4pt floor) at which every line fits the block's width AND height; the
+      // smaller font also pulls any over-wide name within the lane so nothing char-breaks. Only a
+      // truly impossible block still ellipsizes. (The PNG export rasterizes THIS grid → fixed too.)
+      const cardText = lines.join('\n');
+      const cardW = subW - 4, cardH = h - 3;
+      const { size: cardFont, fits: cardFits } = pickCardFont(doc, cardText, cardW, cardH, laneTot > 2 ? 6 : 7);
+      doc.fontSize(cardFont).fillColor('#000000')
+         .text(cardText, x + 2, y + 2, { width: cardW, height: cardH, ellipsis: !cardFits });
     }
   });
 }
 
 async function buildGridPdfBuffer(scheduleId, filter, semester) {
   const data = await fetchGridData(scheduleId, filter, semester);
-  return pdfToBuffer((doc) => renderGridInto(doc, data));
+  // NEW-FU-680: size the page to the density so dense grids don't truncate (sparse → A4).
+  return pdfToBuffer((doc) => renderGridInto(doc, data), { size: gridPageSize(maxLanesOf(data.laneTotals)) });
 }
 
 // NEW-FU-667: the IMAGE export. The old PNG was a client-side html2canvas screenshot of the
 // LIVE DOM, so it captured whatever was on screen — the wrong scope (a "venue" image showed the
 // whole-term grid), the current theme (dark/light), and the current view/mode. We instead
-// RASTERIZE the same SCOPED, theme-independent grid PDF the other formats already produce, so a
-// venue image shows ONLY that venue's grid, an instructor image only that instructor's, and the
-// whole-term image the whole grid — deterministic, scope-correct, and identical in every theme.
+// RASTERIZE the same scoped, theme-independent grid PDF the other formats already produce. A
+// venue or instructor image shows the focused scoped grid, including carried complements when
+// needed; the whole-term image shows the whole grid — deterministic and scope-correct.
 // (Uses pdfjs to render the grid page onto an @napi-rs/canvas surface → PNG; no browser/DOM.)
 async function buildGridPngBuffer(scheduleId, filter, semester) {
   const pdfBuf = await buildGridPdfBuffer(scheduleId, filter, semester);
@@ -486,9 +630,9 @@ async function buildGridPngBuffer(scheduleId, filter, semester) {
 
 // ── COMBINED (grid + table + office hours) ────────────────────────────────────────
 async function buildCombinedPdfBuffer(scheduleId, filter = { type: 'full' }, semester) {
-  // NEW-FU-660: every half is scoped to the same filter — a scoped PDF carries only
-  // that entity's grid + table + reference data. The table heading is scope-tagged so
-  // the PDF importer can detect whether to merge (instructor/venue) or replace (full).
+  // NEW-FU-660/FU-682: every half is scoped to the same focused set. A scoped PDF
+  // carries the selected entity's data plus required complementary rows/references.
+  // The table heading is scope-tagged so the PDF importer can detect merge vs replace.
   const scopeName = scope.scopeOf(filter);
   const entity    = await scope.fetchScopeEntity(filter);
   const tableTitle = scope.tableTitle(semester, scopeName, entity);
@@ -501,8 +645,25 @@ async function buildCombinedPdfBuffer(scheduleId, filter = { type: 'full' }, sem
   ]);
   return pdfToBuffer((doc) => {
     renderGridInto(doc, gridData);
-    doc.addPage();
-    renderTableInto(doc, groups, semester, tableTitle);
+    // NEW-FU-680: the grid page is dynamically sized (page 1); the table + reference pages revert to
+    // A4 landscape. addPage() with no args thereafter repeats A4, keeping the rest standard.
+    // NEW-FU-682: pin every post-grid page to margin LEFT_MARGIN. pdfkit RESETS the margin to its 72pt
+    // default whenever addPage is given an options object without `margin`, so FU-680's explicit
+    // {size,layout} silently shifted the table 44pt right of the importer's column geometry (which is
+    // anchored at LEFT_MARGIN=28) — the positional PDF re-import then read every value one column over
+    // (course code → "", name column → "SWE 206 …") and found NO section table, so scoped PDFs would
+    // not round-trip. Forcing margin: LEFT_MARGIN realigns export and import.
+    doc.addPage({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN });
+    renderTableInto(doc, groups, semester, tableTitle);            // NEW-FU-687 (Part B): ASSIGNED sections only
+    renderTypeLegendInto(doc);   // NEW-FU-680: Course Type / Section Type definitions, just below the table
+    // NEW-FU-687 (Part B): the carried complementary halves go in their OWN table on a fresh page — never
+    // mixed into the assigned table — with a RED note repeated on every page of that table, so the reader
+    // never confuses a carried section's instructor/venue with the assigned entity's own.
+    if ([...groups.values()].some(g => g.sec.isComplement)) {
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN });
+      renderTableInto(doc, groups, semester, scope.COMPLEMENT_EXPORT_TITLE,
+        { complementOnly: true, noteText: scope.COMPLEMENT_EXPORT_NOTE });
+    }
     // NEW-FU-667: explain (once, at the top of the first reference page) why a VENUE file also
     // lists the instructors who teach here and their office hours — so it doesn't read as a bug.
     let venueNoteShown = false;
@@ -515,28 +676,32 @@ async function buildCombinedPdfBuffer(scheduleId, filter = { type: 'full' }, sem
       doc.moveDown(0.8).fillColor('#000000');
     };
     if (ohRows.length) {
-      doc.addPage();
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN });
       showVenueNote();
       renderOfficeHoursInto(doc, ohRows, semester);
     }
     if (instrRows.length) {
-      doc.addPage();
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN });
       showVenueNote();
       // NEW-FU-666: SINGULAR heading in a single-instructor file ("Instructor", not "Instructors").
       const h = scopeName === 'instructor' ? 'Instructor' : 'Instructors';
       renderRefTable(doc, `${semester || 'Schedule'} — ${h}`, INSTRUCTOR_COLS, instrRows);
     }
     if (venueRows.length) {
-      doc.addPage();
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: LEFT_MARGIN });
       const h = scopeName === 'venue' ? 'Venue' : 'Venues';   // NEW-FU-666: singular for a single-venue file
       // NEW-FU-666: humanize the venue type column (LectureHall → Lecture Hall).
       const rows = venueRows.map(v => ({ ...v, type: labels.venueTypeDisplay(v.type) }));
       renderRefTable(doc, `${semester || 'Schedule'} — ${h}`, VENUE_COLS, rows);
     }
-  });
+  }, { size: gridPageSize(maxLanesOf(gridData.laneTotals)) });   // NEW-FU-680: page 1 (grid) sized to density
 }
 
 module.exports = {
   buildTablePdfBuffer, buildGridPdfBuffer, buildGridPngBuffer, buildCombinedPdfBuffer,
   TABLE_COLS, OH_COLS, INSTRUCTOR_COLS, VENUE_COLS, LEFT_MARGIN,
+  // NEW-FU-679: exposed for the layout regression tests (no-char-wrap + no-truncation invariants).
+  fitCellText, pickCardFont, TABLE_FONT,
+  // NEW-FU-680: exposed for the density-scaling regression test (dense grids get a bigger page).
+  gridPageSize, A4_LANDSCAPE,
 };

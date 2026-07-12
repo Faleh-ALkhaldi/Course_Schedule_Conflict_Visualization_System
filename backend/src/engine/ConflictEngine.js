@@ -40,11 +40,13 @@ class ConflictEngine {
     // NEW-FU-275 (Phase 52 #5): external sections (SWE 399 internship)
     // are off-campus by design — instructor, venue, schedule, and even
     // the time-window check (R-06) don't apply. Short-circuit before any
-    // rule runs.
-    if (changed.isExternal) return result;
-    // Also strip external siblings from the comparison set so a non-
-    // external section doesn't fire R-01/R-02/R-04/R-05 against them.
-    const others = allSections.filter(s => s.id !== changed.id && !s.isExternal);
+    // rule runs. NEW-FU-687: thesis (SWE 610) is independent research with
+    // no fixed time/place — same full exemption.
+    // NEW-FU-688: External / Thesis / Research / Project are all conflict-exempt (isConflictExempt).
+    if (changed.isConflictExempt) return result;
+    // Also strip every conflict-exempt sibling from the comparison set so a non-exempt section doesn't
+    // fire R-01/R-02/R-04/R-05 against one.
+    const others = allSections.filter(s => s.id !== changed.id && !s.isConflictExempt);
 
     // R-06 first: if the time window itself is wrong, flag immediately
     for (const c of R06Rule.evaluate(changed)) result.add(c);

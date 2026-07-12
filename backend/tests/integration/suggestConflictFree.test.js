@@ -146,7 +146,10 @@ describe('FU-343: Phase 32 conflict-free suggest', () => {
     // Hard conflicts must NEVER appear in suggest output — they have
     // weight 1000 in the scoring, so any attempt that would create one
     // loses to any attempt without. This is the "always-true" invariant.
-    const scheduleId = await freshTermSchedule('263');
+    // Use a regular Fall term. Summer-only terms can legitimately have no
+    // auto-schedulable recommendations now that project/info-only activities
+    // are excluded from Suggest.
+    const scheduleId = await freshTermSchedule('281');
     await runSuggestWithRecommend(scheduleId);
     const conflicts = await getConflicts(scheduleId);
     const hardRules = new Set(['R-01', 'R-04', 'R-05', 'R-06']);

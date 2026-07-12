@@ -89,13 +89,20 @@ function normalizeRow(raw, rowNum) {
   const dd = (raw['days']         ?? '').trim();
   const st = (raw['start time']   ?? '').trim().substring(0, 5);
   const et = (raw['end time']     ?? '').trim().substring(0, 5);
-  if (!cc || !sn || !dd || !st || !et) return null;
+  // NEW-FU-690: a data row needs a Course Code + Section # — day/time may be BLANK for an info-only
+  // section (Thesis / Research / untimed Project / Summer Training / Internship), which must still
+  // round-trip on re-import (parity with the Excel parser). A legend/note row repeats one text across
+  // columns, so cc === sn uniquely skips it; the field validator still gates a missing time per row.
+  if (!cc || !sn || cc === sn) return null;
 
   // NEW-FU-498 (Phase 122): recognize all four types (Lec/Lab/Prj/Ths); unknown → Lec.
   // NEW-FU-666: accept the end-user label ("Lecture"/"Laboratory"/…) as well as the code.
+  // NEW-FU-688: + Sem (Seminar) is a real stored type. The activity labels St/Int/Res are
+  // DERIVED from the course's external/research flag, so they intentionally fall through to a
+  // stored 'Lec' here — effectiveSectionType re-derives ST/INT/RES on the way back out.
   const rawType = (raw['section type'] ?? '').trim();
   const stCode = labels.sectionTypeCode(rawType);
-  const sectionType = ['Lec','Lab','Prj','Ths'].includes(stCode) ? stCode : 'Lec';
+  const sectionType = ['Lec','Lab','Prj','Ths','Sem'].includes(stCode) ? stCode : 'Lec';
 
   // NEW-FU-502 (Phase 123): gender round-trip — mirror of the xlsx parser.
   // Gender column 'F' marks female; an F-prefixed section number ("F-55")
@@ -120,8 +127,14 @@ function normalizeRow(raw, rowNum) {
     sectionNumber: sn,
     sectionType,
     gender,         // NEW-FU-502
-    isCapstone:    /capstone/.test(ct),   // NEW-FU-657
+    // NEW-FU-687: "Project" is the renamed Capstone label (legacy "Capstone" still accepted); "Thesis"
+    // is the new research flag. Both round-trip from the Course Type column.
+    isCapstone:    /capstone|project/.test(ct),   // NEW-FU-657/687
+    isThesis:      /thesis/.test(ct),             // NEW-FU-687
+    isResearch:    /research/.test(ct),           // NEW-FU-688
+    isSeminar:     /seminar/.test(ct) || stCode === 'Sem',
     isExternal:    /external/.test(ct),   // NEW-FU-657
+    courseTypeHasLab: /laborator/.test(ct),   // NEW-FU-681: preserve has_lab from the "Has Laboratory" label even when the file carries no Lab row
     days:          dd.split(/[,;/\s]+/).map(d => d.trim()).filter(Boolean),
     startTime:     st,
     endTime:       et,
@@ -190,11 +203,10 @@ async function parseDocxToRows(buffer) {
   // 40 MB length cap that left the O(n²)-on-unclosed-tags ReDoS reachable at ~1 MB).
   const trCount = assertDocxStructureSafe(html);
   assertRowCount(trCount, 'Word document');
-  // NEW-FU-657: the combined DOCX contains the per-day visual-schedule tables
-  // (Half A) FIRST, then the full-semester section table (Half B). Scan EVERY
-  // <table> and pick the first whose header row satisfies the required schema —
-  // the grid tables (Time / Course / § / …) lack Course Code + Days + Start/End
-  // Time, so they're skipped and we always parse the importable Half-B table.
+  // NEW-FU-657/FU-682: the combined DOCX contains per-day visual-schedule tables
+  // (Half A) first, then the importable scoped section table (Half B). Scan every
+  // <table> and pick the first whose header row satisfies the required schema;
+  // grid tables lack Course Code + Days + Start/End Time, so they are skipped.
   const tableMatches = [...html.matchAll(/<table[\s\S]*?<\/table>/gi)].map(m => m[0]);
   if (!tableMatches.length) throw new Error('No table found in Word document.');
 
@@ -217,8 +229,7 @@ async function parseDocxToRows(buffer) {
   if (!secRows) {
     // Either a grid-only DOCX or a third-party doc without the expected schema.
     throw new Error(
-      'No section table found in the Word document (need columns: Course Code, Section #, Days, Start Time, End Time). ' +
-      'A visual-grid-only Word doc cannot be imported — export the combined / Full Semester DOCX, which round-trips.'
+      'This Word document does not contain the required CSCVS section table. Export a complete CSCVS Word schedule, then import that file.'
     );
   }
 
@@ -424,8 +435,7 @@ async function parsePdfToRows(buffer) {
 
   if (!rows.length) {
     throw new Error(
-      'No section table found in the PDF (need the Full Semester / combined export). ' +
-      'A visual-grid-only PDF cannot be imported — export the combined PDF, which round-trips.'
+      'This PDF does not contain the required CSCVS section table. Export a complete CSCVS PDF schedule, then import that file.'
     );
   }
   // NEW-FU-660: detect the scope from the rendered text (the scope-tagged table

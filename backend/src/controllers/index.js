@@ -18,7 +18,7 @@ const suggestSvc = require('../services/SuggestService');
 // to filter candidates before greedy assignment.
 const sectionPattern = require('../domain/sectionPattern');
 const { filterCoursesForTerm, isCourseAllowedInTerm, disallowReason } = require('../domain/courseTermValidity');
-const { courseCodeError, courseNameError, courseFlagError, creditsFlagError, courseCodeLevelError, titleCaseCourseName } = require('../domain/courseFormat');
+const { courseCodeError, courseNameError, courseFlagError, seminarFlagError, creditsFlagError, courseCodeLevelError, titleCaseCourseName } = require('../domain/courseFormat');
 // NEW-FU-661: instructor name + email format are now a shared domain module (single
 // source of truth) so the import-field validator enforces the SAME rules the API does.
 const { instructorNameError, emailError } = require('../domain/instructorFormat');
@@ -73,24 +73,31 @@ function padSectionNumber(s) {
 }
 // NEW-FU-96: section_type values mirror SECTION_TYPE in constants.js.
 // NEW-FU-498 (Phase 122): + Prj (Project) and Ths (Thesis).
-const VALID_SECTION_TYPES = new Set(['Lec','Lab','Prj','Ths']);
+// NEW-FU-688 (Phase 126): + Sem (Seminar). These are the STORABLE types; the
+// registrar labels ST/INT/RES are DERIVED from course flags (see
+// effectiveSectionType in exportLabels.js), never sent or stored directly.
+const VALID_SECTION_TYPES = new Set(['Lec','Lab','Prj','Ths','Sem']);
 // NEW-FU-108: type-scoped section# ranges. Mirrors SECTION_NUMBER_RANGE in
 // constants.js (kept inline here for hot-path validation perf — no module
 // crossing per request). NEW-FU-498: Prj/Ths share the Lec 01–49 range.
+// NEW-FU-688: Sem shares the Lec 01–49 range too.
 const SECTION_NUM_RE_BY_TYPE = {
   Lec: /^(0[1-9]|[1-4][0-9])$/,
   Lab: /^[5-9][0-9]$/,
   Prj: /^(0[1-9]|[1-4][0-9])$/,
   Ths: /^(0[1-9]|[1-4][0-9])$/,
+  Sem: /^(0[1-9]|[1-4][0-9])$/,
 };
 // NEW-FU-109: duration limits by type. Frontend offers quick-picks; backend
 // validates a numeric in-range minute count.
 // NEW-FU-498 (Phase 122): Prj/Ths allow long single blocks (50–180).
+// NEW-FU-688/689: Sem is EXACTLY 75 (a Seminar is NEVER 50 — that is a 1-credit Lecture; GR-only).
 const SECTION_DURATION_BY_TYPE = {
   Lec: { min: 50, max: 75  },
   Lab: { min: 50, max: 160 },
   Prj: { min: 50, max: 180 },
   Ths: { min: 50, max: 180 },
+  Sem: { min: 75, max: 75  },   // NEW-FU-689: a Seminar is EXACTLY 75 minutes (GR-only — gated at create)
 };
 
 // NEW-FU-109: compute duration in minutes between two HH:MM strings.
@@ -313,21 +320,50 @@ async function crossTermResourceError(termSemester, { instructorId, venueId }) {
   return null;
 }
 
+async function resolveCourseForTerm(termSemester, courseRow) {
+  if (!termSemester || !courseRow) return { course: courseRow };
+  const owner = courseRow.owner_semester ?? null;
+  if (owner === termSemester) return { course: courseRow };
+  if (owner === null) return { course: courseRow };
+  return {
+    error: `Course "${courseRow.course_code}" belongs to term ${owner} and cannot be used in term ${termSemester}. Add it to this term first (or copy the term).`,
+  };
+}
+
 const createSection = ah(async (req, res) => {
   const { scheduleId } = req.params;
   const { courseId, instructorId, venueId, sectionNumber, sectionType, day, days, startTime, endTime,
           gender /* NEW-FU-277 (Phase 53 #2) — 'M' or 'F'; defaults to 'M' */ } = req.body;
   if (gender !== undefined && gender !== 'M' && gender !== 'F')
     return badRequest(res, 'gender must be "M" or "F".');
-  if (!courseId || !sectionNumber || !startTime || !endTime)
-    return badRequest(res, 'Please choose a course, a section number, a start time and an end time.');
+  if (!courseId || !sectionNumber)
+    return badRequest(res, 'Please choose a course and a section number.');
   // NEW-M8: validate input shapes before they reach the DB. Returns precise
   // 400 messages rather than generic "Database constraint violation" 500s.
   if (!isUuid(scheduleId))                              return badRequest(res, 'scheduleId must be a UUID.');
   if (!isUuid(courseId))                                return badRequest(res, 'courseId must be a UUID.');
   if (instructorId && !isUuid(instructorId))            return badRequest(res, 'instructorId must be a UUID.');
   if (venueId && !isUuid(venueId))                      return badRequest(res, 'venueId must be a UUID.');
-  if (!isTime(startTime) || !isTime(endTime))           return badRequest(res, 'startTime and endTime must be HH:MM.');
+  // NEW-FU-688 (Phase 126): load the course up front so the time/day requirement can key off its
+  // activity flags. Conflict-exempt activities — Project (capstone) plus the info-only family
+  // (external → Summer Training/Internship, thesis, research) — may carry NO time/day at all: a
+  // Project draws in the grid IFF it is timed; the info-only family NEVER draws. Everything else
+  // (Lecture / Laboratory / Seminar) still requires a full, valid time slot.
+  let courseRow = await courseRepo.findById(courseId);
+  if (!courseRow) return res.status(404).json({ error: 'Course not found.' });
+  const createSemRow = await query(`SELECT semester FROM schedules WHERE id = $1`, [scheduleId]);
+  const createTermSemester = createSemRow.rows[0]?.semester ?? null;
+  if (!createTermSemester) return res.status(404).json({ error: 'Schedule not found.' });
+  const resolvedCourse = await resolveCourseForTerm(createTermSemester, courseRow);
+  if (resolvedCourse.error) return res.status(409).json({ error: resolvedCourse.error });
+  courseRow = resolvedCourse.course;
+  const hasStart = String(startTime ?? '').trim() !== '';
+  const hasEnd = String(endTime ?? '').trim() !== '';
+  const hasTime = hasStart && hasEnd;
+  if (hasStart !== hasEnd)
+    return badRequest(res, 'startTime and endTime must be provided together.');
+  if (hasTime && (!isTime(startTime) || !isTime(endTime)))
+                                                        return badRequest(res, 'startTime and endTime must be HH:MM.');
   // NEW-FU-96: section_type validation. Defaults if not supplied
   // (backward-compat for clients that don't know about the new field).
   // 'Lab' is only valid if the course has has_lab=true — we look that up
@@ -346,9 +382,16 @@ const createSection = ah(async (req, res) => {
   // the range check, and storage below — so a posted "2" becomes "02".
   const normSectionNumber = padSectionNumber(sectionNumber);
   const effectiveSectionType = sectionType
+    ?? (courseRow.is_thesis ? 'Ths' : null)
+    ?? (courseRow.is_seminar ? 'Sem' : null)
+    ?? (courseRow.is_capstone ? 'Prj' : null)
     ?? (SECTION_NUM_RE_BY_TYPE.Lab.test(normSectionNumber) ? 'Lab' : 'Lec');
   if (!VALID_SECTION_TYPES.has(effectiveSectionType))
-    return badRequest(res, `sectionType must be "Lec", "Lab", "Prj", or "Ths" (got "${sectionType}").`);
+    return badRequest(res, `sectionType must be "Lec", "Lab", "Prj", "Ths", or "Sem" (got "${sectionType}").`);
+  const courseIsInfoOnly = courseRow.is_external || courseRow.is_thesis || courseRow.is_research;
+  const courseIsProject = courseRow.is_capstone || effectiveSectionType === 'Prj';
+  const courseIsSeminar = courseRow.is_seminar || effectiveSectionType === 'Sem';
+  const timeWindowExempt = courseIsInfoOnly || courseIsProject;
   // NEW-FU-95 + NEW-FU-108: section number must be in the type-scoped range
   // (Lec: 01-49; Lab: 50-99). This is stricter than the old FU-95 check
   // which only enforced format. The DB CHECK constraint (migration 010)
@@ -360,66 +403,103 @@ const createSection = ah(async (req, res) => {
   if (!SECTION_NUM_RE_BY_TYPE[effectiveSectionType].test(normSectionNumber))
     return badRequest(res, `sectionNumber for ${effectiveSectionType} sections must be in ${expectedRange} (01–99, single digits accepted and zero-padded).`);
   // NEW-FU-109: duration validation by type. Lec: 50..75; Lab: 50..160.
-  const dur = durationMinutes(startTime, endTime);
-  const durLimits = SECTION_DURATION_BY_TYPE[effectiveSectionType];
-  if (dur < durLimits.min || dur > durLimits.max)
-    return badRequest(res, `${effectiveSectionType} section duration must be ${durLimits.min}–${durLimits.max} minutes (got ${dur}).`);
+  // NEW-FU-688: skipped entirely for an untimed conflict-exempt activity (Project / info-only).
+  if (hasTime) {
+    const dur = durationMinutes(startTime, endTime);
+    const durLimits = SECTION_DURATION_BY_TYPE[effectiveSectionType];
+    if (dur < durLimits.min || dur > durLimits.max)
+      return badRequest(res, `${effectiveSectionType} section duration must be ${durLimits.min}–${durLimits.max} minutes (got ${dur}).`);
+  }
   const dayList = days ?? (day ? [day] : []);
-  if (!dayList.length)                                  return badRequest(res, 'At least one day is required.');
   for (const d of dayList) if (!isDay(d))               return badRequest(res, `Invalid day: "${d}".`);
-  // NEW-FU-96 / NEW-FU-237: load the course once and reuse it for both
-  // the Lab/has_lab gate and the KFUPM pattern validator below.
-  const courseRow = await courseRepo.findById(courseId);
-  if (!courseRow) return res.status(404).json({ error: 'Course not found.' });
+  if (courseIsInfoOnly) {
+    if (hasTime || dayList.length)
+      return badRequest(res, 'Information-only activities must not have meeting days or times.');
+    if (venueId)
+      return badRequest(res, 'Information-only activities must not have a venue.');
+    if (['Lab', 'Prj', 'Sem'].includes(effectiveSectionType))
+      return badRequest(res, 'Information-only activities cannot be Lab, Project, or Seminar sections.');
+    if (effectiveSectionType === 'Ths' && !courseRow.is_thesis)
+      return badRequest(res, 'Only Thesis courses can use the Thesis activity type.');
+  } else if (courseIsProject) {
+    if (effectiveSectionType !== 'Prj')
+      return badRequest(res, 'Project courses can only create Project sections.');
+    if (venueId && !hasTime)
+      return badRequest(res, 'A Project venue requires a meeting time.');
+    if (hasTime && dayList.length !== 1)
+      return badRequest(res, 'A timed Project section must meet on exactly one day.');
+  } else if (courseIsSeminar) {
+    if (!courseRow.is_seminar || effectiveSectionType !== 'Sem')
+      return badRequest(res, 'Seminar sections are only allowed for courses marked Seminar.');
+    const e = seminarFlagError({
+      courseCode: courseRow.course_code,
+      academicLevel: courseRow.academic_level,
+      category: courseRow.category,
+      credits: courseRow.credits,
+      isSeminar: true,
+    });
+    if (e) return badRequest(res, e);
+    if (!hasTime) return badRequest(res, 'Please choose a start time and an end time.');
+    if (dayList.length !== 1) return badRequest(res, 'A Seminar section must meet on exactly one day.');
+  } else {
+    if (['Prj', 'Ths', 'Sem'].includes(effectiveSectionType))
+      return badRequest(res, `${effectiveSectionType} sections require a matching course flag.`);
+    if (!hasTime) return badRequest(res, 'Please choose a start time and an end time.');
+    if (!dayList.length) return badRequest(res, 'At least one day is required.');
+  }
+  // NEW-FU-96 / NEW-FU-237: courseRow was loaded up front (above) and is reused for the
+  // Lab/has_lab gate, the time-window gate, and the KFUPM pattern validator below.
   // NEW-FU-415 (Phase 103 item 1): reject adding a section of a course that is
   // not offered in THIS term (SWE 412 after 252, SWE 399 outside Summer).
-  const createSemRow = await query(`SELECT semester FROM schedules WHERE id = $1`, [scheduleId]);
-  const createTermSemester = createSemRow.rows[0]?.semester ?? null;
   if (!isCourseAllowedInTerm(courseRow.course_code, createTermSemester)) {
     return res.status(409).json({ error: disallowReason(courseRow.course_code, createTermSemester) });
   }
+  const effectiveVenueId = (courseIsInfoOnly || (courseIsProject && !hasTime)) ? null : (venueId || null);
   // NEW-FU-520 (Batch 6): refuse to assign a resource owned by another term.
-  const createXtErr = await crossTermResourceError(createTermSemester, { instructorId, venueId });
+  const createXtErr = await crossTermResourceError(createTermSemester, { instructorId, venueId: effectiveVenueId });
   if (createXtErr) return res.status(409).json({ error: createXtErr });
   if (effectiveSectionType === 'Lab' && !courseRow.has_lab) {
     return res.status(409).json({
       error: `Course ${courseRow.course_code} is not configured for lab sections. Enable "has lab" on the course first.`,
     });
   }
-  // NEW-FU-475 (Phase 114): instructor AND venue are required for a real section —
-  // server-side backstop for the modal's new hard requirement (was a soft R-09/R-10
-  // warning). External courses carry no section assignment; capstone courses have no
-  // venue. Suggest/Import use their own insert paths, so they are unaffected.
-  if (!courseRow.is_external) {
-    if (!instructorId) return badRequest(res, 'An instructor is required for the section.');
-    if (!courseRow.is_capstone && !venueId) return badRequest(res, 'A venue is required for the section.');
+  // NEW-FU-689: a Seminar (75-min single-block) is a GRADUATE activity only. Reject a Sem section
+  // on an Undergraduate course up front (the modal already hides the option for UG courses).
+  if (effectiveSectionType === 'Sem' && !courseRow.is_seminar) {
+    return badRequest(res, `Course ${courseRow.course_code} is not marked as a Seminar course.`);
   }
+  // Instructor is required even for information-only activities; their exemption
+  // is only for venue/time. Non-project scheduled sections still require venue.
+  if (!instructorId) return badRequest(res, 'An instructor is required for the section.');
+  if (!courseIsInfoOnly && !courseIsProject && !effectiveVenueId)
+    return badRequest(res, 'A venue is required for the section.');
   // NEW-FU-595 (Batch 27): one external course per term. A section is what puts a (global)
   // course "in" a term, so this is the authoritative per-term gate — reject if the term
   // already has a DIFFERENT external course.
   if (courseRow.is_external) {
-    const e = await externalTermConflictError(createTermSemester, courseId);
+    const e = await externalTermConflictError(createTermSemester, courseRow.id);
     if (e) return res.status(409).json({ error: e });
   }
-  // H-3: time-order validation
-  if (startTime >= endTime)
+  // H-3: time-order validation (only meaningful when a time slot is present).
+  if (hasTime && startTime >= endTime)
     return badRequest(res, 'endTime must be after startTime.');
   // NEW-FU-454 (Phase 108): enforce the R-06 teaching WINDOW at create time —
   // server-side defense for the modal's input-time guard, so an out-of-window
   // section is rejected up front instead of persisting and surfacing later as a
   // hard conflict.
-  // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00. Capstone is now
-  // bound to the UG window (venue-exempt but NOT time-exempt — every capstone is
-  // a UG Senior course). External courses have no section row → fully exempt.
-  if (!courseRow.is_external && !R06_TIME_EXEMPT_COURSES.has(courseRow.course_code)) {
+  // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00.
+  // NEW-FU-688 (Phase 126): the conflict-exempt set (external, thesis, research, and now
+  // Project) is fully window-exempt — a Project "never raises a conflict" in any of the four
+  // time/venue cases, so a timed Project is informational placement, not a scheduled clash.
+  // Untimed sections (hasTime === false) are skipped outright.
+  if (hasTime && !timeWindowExempt && !R06_TIME_EXEMPT_COURSES.has(courseRow.course_code)) {
     const hm = t => { const [h,mn] = String(t).split(':').map(Number); return (h||0)*60 + (mn||0); };
     const sMin = hm(startTime), eMin = hm(endTime);
     // Window from constants.TIME_WINDOWS — same source R-06 uses, so create-time
-    // validation can't drift from the engine. Capstone is bound to the UG window.
-    const win = TIME_WINDOWS[(courseRow.category === 'GR' && !courseRow.is_capstone) ? 'GR' : 'UG'];
+    // validation can't drift from the engine.
+    const win = TIME_WINDOWS[courseRow.category === 'GR' ? 'GR' : 'UG'];
     if (sMin < win.start || eMin > win.end) {
-      const lbl = courseRow.is_capstone ? '07:00–17:10 (Capstone)'
-                : courseRow.category === 'GR' ? '17:20–22:00 (Graduate)' : '07:00–17:10 (Undergraduate)';
+      const lbl = courseRow.category === 'GR' ? '17:20–22:00 (Graduate)' : '07:00–17:10 (Undergraduate)';
       return badRequest(res, `${courseRow.course_code} must be scheduled within ${lbl} (got ${startTime}–${endTime}).`);
     }
   }
@@ -440,14 +520,17 @@ const createSection = ah(async (req, res) => {
   // (schedule_id, course_id, section_number, day).
   // NEW-FU-96: forward effectiveSectionType to the service.
   const { section, conflictResult } = await schedSvc.createSection(scheduleId, {
-    courseId, instructorId, venueId,
+    courseId: courseRow.id, instructorId, venueId: effectiveVenueId,
     // NEW-FU-510 (Batch 1): store the canonical two-digit value so the UNIQUE
     // (schedule, course, section_number, day) duplicate check sees "02", not "2".
     sectionNumber: normSectionNumber,
     sectionType: effectiveSectionType,
-    day: day ?? dayList[0],
-    days: dayList,
-    startTime, endTime,
+    // NEW-FU-688: an untimed conflict-exempt activity persists with NULL day/start/end —
+    // the service INSERT and the grid renderer both treat a null time as "not scheduled".
+    day: hasTime ? (day ?? dayList[0]) : null,
+    days: hasTime ? dayList : [],
+    startTime: hasTime ? startTime : null,
+    endTime:   hasTime ? endTime   : null,
     // NEW-FU-277 (Phase 53 #2): forward gender through. The service's
     // INSERT will use it (or default to 'M' if omitted).
     gender: gender ?? 'M',
@@ -471,17 +554,22 @@ const restructureSection = ah(async (req, res) => {
 
   // Load the section + its course metadata to validate the new pattern/window (same gates as create).
   const secRow = (await query(
-    `SELECT s.section_type, s.gender, c.course_code, c.credits, c.has_lab, c.category, c.is_capstone, c.is_external
+    `SELECT s.section_type, s.gender, c.course_code, c.credits, c.has_lab, c.category, c.is_capstone, c.is_external, c.is_thesis, c.is_research, c.is_seminar
      FROM sections s JOIN courses c ON c.id = s.course_id WHERE s.id = $1`, [sectionId])).rows[0];
   if (!secRow) return res.status(404).json({ error: 'Section not found.' });
+  if (secRow.is_external || secRow.is_thesis || secRow.is_research)
+    return badRequest(res, 'Information-only activities cannot be scheduled or restructured.');
+  if ((secRow.is_capstone || secRow.section_type === 'Prj') && days.length !== 1)
+    return badRequest(res, 'Project sections must meet on exactly one day when timed.');
 
   // R-06 teaching window (same source + exemptions as createSection).
-  if (!secRow.is_external && !R06_TIME_EXEMPT_COURSES.has(secRow.course_code)) {
+  // NEW-FU-688: the conflict-exempt set (external, thesis, research, Project) is fully window-exempt.
+  const secExempt = secRow.is_external || secRow.is_thesis || secRow.is_research || secRow.is_capstone;
+  if (!secExempt && !R06_TIME_EXEMPT_COURSES.has(secRow.course_code)) {
     const hm = t => { const [h, mn] = String(t).split(':').map(Number); return (h || 0) * 60 + (mn || 0); };
-    const win = TIME_WINDOWS[(secRow.category === 'GR' && !secRow.is_capstone) ? 'GR' : 'UG'];
+    const win = TIME_WINDOWS[secRow.category === 'GR' ? 'GR' : 'UG'];
     if (hm(startTime) < win.start || hm(endTime) > win.end) {
-      const lbl = secRow.is_capstone ? '07:00–17:10 (Capstone)'
-                : secRow.category === 'GR' ? '17:20–22:00 (Graduate)' : '07:00–17:10 (Undergraduate)';
+      const lbl = secRow.category === 'GR' ? '17:20–22:00 (Graduate)' : '07:00–17:10 (Undergraduate)';
       return badRequest(res, `${secRow.course_code} must be scheduled within ${lbl} (got ${startTime}–${endTime}).`);
     }
   }
@@ -503,16 +591,16 @@ const restructureSection = ah(async (req, res) => {
 
 const updateSection = ah(async (req, res) => {
   const { sectionId } = req.params;
-  const { instructorId, venueId, day, startTime, endTime, sectionNumber, sectionType, infoOnly } = req.body;
+  const { instructorId, venueId, day, startTime, endTime, sectionNumber, sectionType, infoOnly, clearTime } = req.body;
   // NEW-M8: validate ids/enums up front.
   if (!isUuid(sectionId))                       return badRequest(res, 'sectionId must be a UUID.');
   if (instructorId && !isUuid(instructorId))    return badRequest(res, 'instructorId must be a UUID.');
   if (venueId && !isUuid(venueId))              return badRequest(res, 'venueId must be a UUID.');
-  // NEW-FU-96: section_type validation on update. Only legal values are
-  // 'Lec' and 'Lab'. The Lab-requires-has_lab check happens in the service
-  // because we need to look up the section's course there.
+  // NEW-FU-96: section_type validation on update. The Lab-requires-has_lab check happens in
+  // the service because we need to look up the section's course there.
+  // NEW-FU-688: + Sem is a storable type (St/Int/Res are derived, never sent here).
   if (sectionType != null && !VALID_SECTION_TYPES.has(sectionType))
-    return badRequest(res, `sectionType must be "Lec", "Lab", "Prj", or "Ths" (got "${sectionType}").`);
+    return badRequest(res, `sectionType must be "Lec", "Lab", "Prj", "Ths", or "Sem" (got "${sectionType}").`);
   // NEW-FU-95 + NEW-FU-108: type-scoped section# validation on update.
   // If the caller is changing the section type and/or number, we validate
   // the (type, number) pair. If sectionNumber is provided without type,
@@ -524,23 +612,44 @@ const updateSection = ah(async (req, res) => {
     if (!isSectionNumber(sectionNumber))
       return badRequest(res, 'sectionNumber must be "01"–"99" (single digits accepted and zero-padded).');
     if (sectionType != null) {
-      const expectedRange = sectionType === 'Lab' ? '50–99' : '01–49'; // NEW-FU-498: Lec/Prj/Ths → 01–49
+      const expectedRange = sectionType === 'Lab' ? '50–99' : '01–49'; // NEW-FU-498/688: Lec/Prj/Ths/Sem → 01–49
       if (!SECTION_NUM_RE_BY_TYPE[sectionType].test(normSectionNumber))
         return badRequest(res, `sectionNumber for ${sectionType} sections must be in ${expectedRange}.`);
     }
   }
+  const metaRes = await query(
+    `SELECT s.schedule_id, s.course_id, s.section_type, s.instructor_id, s.venue_id,
+            s.day, s.start_time::text AS start_time, s.end_time::text AS end_time,
+            s.section_number, s.gender, sc.semester,
+            c.course_code, c.credits, c.has_lab, c.category, c.is_capstone, c.is_external, c.is_thesis, c.is_research, c.is_seminar
+       FROM sections s
+       JOIN schedules sc ON sc.id = s.schedule_id
+       JOIN courses c ON c.id = s.course_id
+      WHERE s.id = $1`,
+    [sectionId]
+  );
+  const sectionMeta = metaRes.rows[0];
+  if (!sectionMeta) return res.status(404).json({ error: 'Section not found.' });
+  const sectionIsInfoOnly = sectionMeta.is_external || sectionMeta.is_thesis || sectionMeta.is_research;
+  const sectionIsProject = sectionMeta.is_capstone || sectionMeta.section_type === 'Prj';
+  const existingHasTime = !!(sectionMeta.day && sectionMeta.start_time && sectionMeta.end_time);
+  const clearingProjectTime = sectionIsProject && clearTime === true;
+  if (sectionType != null && sectionType !== sectionMeta.section_type) {
+    return badRequest(res, 'Section type is fixed after creation. Delete and recreate the section to use another type.');
+  }
   // NEW-FU-109: duration validation on time-edit. Skipped on infoOnly (no
   // time fields supplied) and on partial updates that don't change times.
-  if (!infoOnly && startTime && endTime) {
+  if (!infoOnly && !clearingProjectTime && startTime && endTime) {
+    if (sectionIsInfoOnly) {
+      return badRequest(res, 'Information-only activities cannot be scheduled.');
+    }
     const dur = durationMinutes(startTime, endTime);
     // NEW-FU-445 (Phase 107 M5): validate duration against the section's ACTUAL
     // type, not a 'Lab' default. A time-only edit (drag-resize) sends no type, so
     // the old default (50–160) let a Lec be resized to an illegal 76–160 minutes.
-    let typeForDuration = sectionType;
-    if (!typeForDuration) {
-      const r = await query(`SELECT section_type FROM sections WHERE id = $1`, [sectionId]);
-      typeForDuration = r.rows[0]?.section_type ?? 'Lab';
-    }
+    let typeForDuration = sectionMeta.section_type;
+    if (sectionIsProject && ![50, 75, 100, 160].includes(dur))
+      return badRequest(res, `Project section duration must be 50, 75, 100, or 160 minutes (got ${dur}).`);
     const durLimits = SECTION_DURATION_BY_TYPE[typeForDuration];
     if (durLimits && (dur < durLimits.min || dur > durLimits.max))
       return badRequest(res, `${typeForDuration} section duration must be ${durLimits.min}–${durLimits.max} minutes (got ${dur}).`);
@@ -551,26 +660,52 @@ const updateSection = ah(async (req, res) => {
     // instructor/venue owned by a different term (covers infoOnly reassigns and
     // the drag-move/time-edit assignSection path below).
     if (instructorId || venueId) {
-      const tRow = await query(
-        `SELECT sc.semester FROM sections s JOIN schedules sc ON sc.id = s.schedule_id WHERE s.id = $1`,
-        [sectionId]
-      );
-      const updateXtErr = await crossTermResourceError(tRow.rows[0]?.semester ?? null, { instructorId, venueId });
+      const updateXtErr = await crossTermResourceError(sectionMeta.semester ?? null, { instructorId, venueId });
       if (updateXtErr) return res.status(409).json({ error: updateXtErr });
     }
+    if (sectionIsInfoOnly) {
+      if (!infoOnly) return badRequest(res, 'Information-only activities can only edit instructor and section number.');
+      if (venueId) return badRequest(res, 'Information-only activities must not have a venue.');
+      if (instructorId === null || instructorId === '') return badRequest(res, 'An instructor is required for the section.');
+      const result = await schedSvc.updateSectionInfo(sectionId, {
+        instructorId,
+        venueId: null,
+        sectionNumber: sectionNumber != null ? padSectionNumber(sectionNumber) : undefined,
+      });
+      return res.json({ section: null, conflicts: result });
+    }
+    if (clearingProjectTime) {
+      if (venueId) return badRequest(res, 'Removing a Project meeting time also removes its venue.');
+      if (instructorId === null || instructorId === '') return badRequest(res, 'An instructor is required for the section.');
+      const result = await schedSvc.clearSectionTime(sectionId, {
+        instructorId,
+        sectionNumber: sectionNumber != null ? padSectionNumber(sectionNumber) : undefined,
+      });
+      return res.json({ section: null, conflicts: result });
+    }
     if (infoOnly) {
+      if (sectionIsProject && venueId && !existingHasTime)
+        return badRequest(res, 'A Project venue requires a meeting time.');
+      if (instructorId === null || instructorId === '') return badRequest(res, 'An instructor is required for the section.');
+      if (!sectionIsProject) {
+        const nextVenueId = venueId !== undefined ? venueId : sectionMeta.venue_id;
+        if (!nextVenueId) return badRequest(res, 'A venue is required for the section.');
+      }
       // NEW-FU-59: trim sectionNumber on update too.
       // NEW-FU-96: forward sectionType.
       const result = await schedSvc.updateSectionInfo(sectionId, {
         instructorId, venueId,
         // NEW-FU-510 (Batch 1): store the canonical two-digit value ("2" → "02").
         sectionNumber: sectionNumber != null ? padSectionNumber(sectionNumber) : undefined,
-        sectionType,
       });
       return res.json({ section: null, conflicts: result });
     }
     if (!day || !startTime || !endTime)
       return badRequest(res, 'day, startTime, endTime are required.');
+    if (!sectionIsProject) {
+      const nextVenueId = venueId !== undefined ? venueId : sectionMeta.venue_id;
+      if (!nextVenueId) return badRequest(res, 'A venue is required for the section.');
+    }
     if (!isDay(day))                              return badRequest(res, `Invalid day: "${day}".`);
     if (!isTime(startTime) || !isTime(endTime))   return badRequest(res, 'startTime and endTime must be HH:MM.');
     if (startTime >= endTime)                     return badRequest(res, 'endTime must be after startTime.');
@@ -578,26 +713,20 @@ const updateSection = ah(async (req, res) => {
     // (drag-move, SectionModal time tab). The create path (createSection) already
     // does this; updateSection lacked it, so dragging a UG section past its window
     // or a GR section before its window was accepted and just surfaced as a hard R-06.
-    // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00; capstone bound to the
-    // UG window (venue-exempt but NOT time-exempt); external fully exempt.
+    // NEW-FU-495 (Phase 120): UG 07:00–17:10, GR 17:20–22:00.
+    // NEW-FU-688 (Phase 126): the conflict-exempt set (external, thesis, research, Project) is
+    // fully window-exempt — a Project never raises a conflict, so dragging a timed Project is
+    // informational placement, not a clash to gate.
     {
-      const secRow = await query(
-        `SELECT c.is_external, c.is_capstone, c.category, c.course_code
-           FROM sections s JOIN courses c ON c.id = s.course_id WHERE s.id = $1`,
-        [sectionId]
-      );
-      if (secRow.rows.length > 0) {
-        const cr = secRow.rows[0];
-        if (!cr.is_external && !R06_TIME_EXEMPT_COURSES.has(cr.course_code)) {
-          const hm = t => { const [h,mn] = String(t).split(':').map(Number); return (h||0)*60 + (mn||0); };
-          const sMin = hm(startTime), eMin = hm(endTime);
-          // Window from constants.TIME_WINDOWS (same source as R-06; capstone = UG window).
-          const win = TIME_WINDOWS[(cr.category === 'GR' && !cr.is_capstone) ? 'GR' : 'UG'];
-          if (sMin < win.start || eMin > win.end) {
-            const lbl = cr.is_capstone ? '07:00–17:10 (Capstone)'
-                      : cr.category === 'GR' ? '17:20–22:00 (Graduate)' : '07:00–17:10 (Undergraduate)';
-            return badRequest(res, `${cr.course_code} must be scheduled within ${lbl} (got ${startTime}–${endTime}).`);
-          }
+      const crExempt = sectionMeta.is_external || sectionMeta.is_thesis || sectionMeta.is_research || sectionIsProject;
+      if (!crExempt && !R06_TIME_EXEMPT_COURSES.has(sectionMeta.course_code)) {
+        const hm = t => { const [h,mn] = String(t).split(':').map(Number); return (h||0)*60 + (mn||0); };
+        const sMin = hm(startTime), eMin = hm(endTime);
+        // Window from constants.TIME_WINDOWS (same source as R-06).
+        const win = TIME_WINDOWS[sectionMeta.category === 'GR' ? 'GR' : 'UG'];
+        if (sMin < win.start || eMin > win.end) {
+          const lbl = sectionMeta.category === 'GR' ? '17:20–22:00 (Graduate)' : '07:00–17:10 (Undergraduate)';
+          return badRequest(res, `${sectionMeta.course_code} must be scheduled within ${lbl} (got ${startTime}–${endTime}).`);
         }
       }
     }
@@ -618,7 +747,7 @@ const updateSection = ah(async (req, res) => {
         // so EVERY time-move of one gender's section was rejected with a bogus "isn't a valid
         // pattern" 400. Scoping to s.gender validates only the moved group's own days.
         `SELECT c.credits, c.has_lab, s.section_type,
-                (SELECT array_agg(DISTINCT s2.day)
+                (SELECT array_agg(DISTINCT s2.day) FILTER (WHERE s2.day IS NOT NULL)
                    FROM sections s2
                   WHERE s2.schedule_id = s.schedule_id
                     AND s2.course_id = s.course_id
@@ -633,7 +762,7 @@ const updateSection = ah(async (req, res) => {
       // so a Lab drag-resize was checked only against the loose continuous range and could
       // persist an illegal duration (LAB_RULE allows ONLY 50/75/160 min). Prj/Ths stay
       // ungated here (their flexible meeting has no fixed-duration rule).
-      if (g && (g.section_type === 'Lec' || g.section_type === 'Lab')) {
+      if (g && (g.section_type === 'Lec' || g.section_type === 'Lab' || g.section_type === 'Prj' || g.section_type === 'Sem')) {
         const check = sectionPattern.validateSectionPattern({
           credits:     Number(g.credits),
           hasLab:      Boolean(g.has_lab),
@@ -746,7 +875,7 @@ const SECTION_SNAPSHOT_SQL = `
          s.section_number, s.day, s.start_time::text, s.end_time::text,
          s.section_type, s.gender,
          c.course_code, c.name AS course_name, c.academic_level, c.category,
-         c.num_sections, c.has_lab, c.credits, c.is_capstone, c.is_external,
+         c.num_sections, c.has_lab, c.credits, c.is_capstone, c.is_external, c.is_thesis, c.is_research, c.is_seminar,
          i.name AS instructor_name, v.name AS venue_name, v.type AS venue_type
   FROM sections s
   JOIN courses c ON c.id = s.course_id
@@ -784,7 +913,7 @@ const previewConflicts = ah(async (req, res) => {
     numSections: row.num_sections, instructorName: row.instructor_name,
     venueName: row.venue_name, sectionType: row.section_type, venueType: row.venue_type,
     hasLab: row.has_lab, credits: row.credits, isCapstone: row.is_capstone,
-    gender: row.gender, isExternal: row.is_external,
+    gender: row.gender, isExternal: row.is_external, isThesis: row.is_thesis, isResearch: row.is_research, isSeminar: row.is_seminar,
   });
 
   const snap = await query(SECTION_SNAPSHOT_SQL, [scheduleId]);
@@ -805,7 +934,7 @@ const previewConflicts = ah(async (req, res) => {
 
   // Course / venue / instructor metadata for the proposed section.
   const cRes = await query(
-    `SELECT course_code, name, academic_level, category, num_sections, has_lab, credits, is_capstone, is_external FROM courses WHERE id = $1`,
+    `SELECT course_code, name, academic_level, category, num_sections, has_lab, credits, is_capstone, is_external, is_thesis, is_research, is_seminar FROM courses WHERE id = $1`,
     [courseId]);
   const course = cRes.rows[0];
   if (!course) return res.json({ conflicts: [], conflictFreeStartExists: true });
@@ -849,14 +978,14 @@ const previewConflicts = ah(async (req, res) => {
       course_code: course.course_code, course_name: course.name,
       academic_level: course.academic_level, category: course.category,
       num_sections: course.num_sections, instructor_name: instrName,
-      venue_name: venue?.name, section_type: sectionType || 'Lec', venue_type: venue?.type,
+      venue_name: venue?.name, section_type: course.is_seminar ? 'Sem' : (sectionType || 'Lec'), venue_type: venue?.type,
       has_lab: course.has_lab, credits: course.credits, is_capstone: course.is_capstone,
       // NEW-FU-555 (Batch 18): use the section's REAL gender — hardcoding 'M' flipped a
       // female section to male and defeated the engine's different-gender exemption
       // (R-04/R-05 treat a male + female pair sharing a room/instructor as dual-audience,
       // not a clash). That produced false self-looking conflicts ("§F-12" rendered as
       // "§12" vs "§02") the grid never showed.
-      gender: selfGender || 'M', is_external: course.is_external,
+      gender: selfGender || 'M', is_external: course.is_external, is_thesis: course.is_thesis, is_research: course.is_research, is_seminar: course.is_seminar,
     }));
     const result = engine.evaluateAll([...others, ...proposed], ohMap);
     return result.conflicts.filter(c => !baseKeys.has(`${c.ruleId}|${c.description}`));
@@ -934,7 +1063,7 @@ const autoFixAround = ah(async (req, res) => {
     numSections: row.num_sections, instructorName: row.instructor_name,
     venueName: row.venue_name, sectionType: row.section_type, venueType: row.venue_type,
     hasLab: row.has_lab, credits: row.credits, isCapstone: row.is_capstone,
-    gender: row.gender, isExternal: row.is_external,
+    gender: row.gender, isExternal: row.is_external, isThesis: row.is_thesis, isResearch: row.is_research, isSeminar: row.is_seminar,
   });
 
   const snap = await query(SECTION_SNAPSHOT_SQL, [scheduleId]);
@@ -953,7 +1082,7 @@ const autoFixAround = ah(async (req, res) => {
 
   // Proposed course / venue / instructor metadata.
   const cRes = await query(
-    `SELECT course_code, name, academic_level, category, num_sections, has_lab, credits, is_capstone, is_external FROM courses WHERE id = $1`,
+    `SELECT course_code, name, academic_level, category, num_sections, has_lab, credits, is_capstone, is_external, is_thesis, is_research, is_seminar FROM courses WHERE id = $1`,
     [courseId]);
   const course = cRes.rows[0];
   if (!course) return res.json({ feasible: false, moves: [] });
@@ -988,11 +1117,12 @@ const autoFixAround = ah(async (req, res) => {
     course_code: course.course_code, course_name: course.name,
     academic_level: course.academic_level, category: course.category,
     num_sections: course.num_sections, instructor_name: instrName,
-    venue_name: venue?.name, section_type: sectionType || 'Lec', venue_type: venue?.type,
+    venue_name: venue?.name, section_type: course.is_seminar ? 'Sem' : (sectionType || 'Lec'), venue_type: venue?.type,
     has_lab: course.has_lab, credits: course.credits, is_capstone: course.is_capstone,
     // NEW-FU-555 (Batch 18): real gender (see previewConflicts) so the move-only Quick
     // Fix doesn't see false different-gender venue/instructor clashes.
     gender: selfGender || 'M', is_external: course.is_external,
+    is_thesis: course.is_thesis, is_research: course.is_research, is_seminar: course.is_seminar,
   }));
 
   // Group the other rows by (course, section-number); each group moves as a unit.
@@ -1252,23 +1382,25 @@ const exportSchedule = ah(async (req, res) => {
 // NEW-FU-415 (Phase 103 item 1): course listing, two scopes, both excluding
 // courses not offered in the given term (SWE 412 after 252, SWE 399 outside
 // Summer):
-//   • default      → courses that already have SECTIONS in the term (term-scoped).
-//   • scope=catalog→ the FULL global program catalog (so the Suggest modal still
-//                    reveals Graduate / not-yet-added courses — Phase 99 item 6),
+//   • default      → term-visible courses (owned by the term, or present through sections).
+//   • scope=catalog→ the FULL program catalog (explicit opt-in for Suggest / add flows),
 //                    minus the curriculum-invalid ones for that term.
 const getCourses = ah(async (req, res) => {
-  const term = req.query.term || null;
+  // NEW-FU-681: fall back to the active-term header (FU-210) when ?term= is omitted, so the sidebar
+  // never leaks other terms' courses; only an explicit ?scope=catalog returns the whole catalog.
+  const term = req.query.term || req.activeTerm?.code || null;
   const courses = req.query.scope === 'catalog'
-    ? await courseRepo.findAll(null)   // whole catalog
+    ? await courseRepo.findAll(null)   // whole catalog (explicit opt-in only)
     : await courseRepo.findAll(term);  // only those with sections in the term
   res.json(filterCoursesForTerm(courses, term));
 });
 
 // NEW-FU-595 (Batch 27): the "external" flag marks the department's single internship /
 // summer-training co-op course, and by department rule only ONE such course is allowed
-// PER TERM. Courses are global (no owner_semester) and "in a term" = has a section there,
-// so we scope by the active term: returns an error message if some OTHER course is already
-// external in that term, else null. `excludeCourseId` skips the course being created/edited.
+// PER TERM. A course counts as active in a term once it has a section in that term's
+// schedule; term-owned catalog rows may also exist but do not trigger this gate until
+// scheduled. Returns an error message if some OTHER scheduled course is already external
+// in that term, else null. `excludeCourseId` skips the course being created/edited.
 async function externalTermConflictError(activeTerm, excludeCourseId = null) {
   if (!activeTerm) return null;       // no term context (rare direct API call) → can't scope
   const r = await query(
@@ -1292,7 +1424,12 @@ const createCourse = ah(async (req, res) => {
           isCapstone /* NEW-FU-278 (Phase 54): Phase 50 flag — venue-rule
                        exemption for graduation-project capstones */,
           isExternal /* NEW-FU-278 (Phase 54): Phase 52 flag — full
-                       rule exemption for off-campus internships */ } = req.body;
+                       rule exemption for off-campus internships */,
+          isThesis   /* NEW-FU-687 (Phase 125): thesis flag — full
+                       time/place exemption like external, distinct meaning */,
+          isResearch /* NEW-FU-688 (Phase 126): research flag — the Thesis
+                       sibling, same full exemption */,
+          isSeminar  /* graduate-only seminar course flag */ } = req.body;
   if (!courseCode || !name || credits == null || !academicLevel || !category)
     return badRequest(res, 'courseCode, name, credits, academicLevel, category required.');
   // NEW-FU-94: hasLab is a boolean toggle. Accept truthy/falsy values from
@@ -1311,15 +1448,19 @@ const createCourse = ah(async (req, res) => {
   // mismatch; this is the authoritative gate for any direct API call.
   { const e = courseCodeLevelError(courseCode, academicLevel, category); if (e) return badRequest(res, e); }
   { const e = courseNameError(name);       if (e) return badRequest(res, e); }
-  { const e = courseFlagError({ hasLab, isCapstone, isExternal }); if (e) return badRequest(res, e); }
+  { const e = courseFlagError({ hasLab, isCapstone, isExternal, isThesis, isResearch, isSeminar }); if (e) return badRequest(res, e); }
+  { const e = seminarFlagError({ courseCode, academicLevel, category, credits, isSeminar }); if (e) return badRequest(res, e); }
   { const e = creditsFlagError({ credits, hasLab, isCapstone }); if (e) return badRequest(res, e); }   // audit P2-8: 4cr ⇒ has-lab; FU-602: 0cr ⇒ capstone
   // NEW-FU-484 (Phase 118 item 3): level-gated flag constraints.
   // CAPSTONE requires Undergraduate + Senior; EXTERNAL requires Undergraduate + Junior.
   // Frontend disables the checkboxes, but the backend is the authoritative gate.
   if (isCapstone && !(category === 'UG' && academicLevel === 'Senior'))
-    return badRequest(res, 'The Capstone flag is only allowed for Undergraduate Senior courses.');
+    return badRequest(res, 'The Project flag is only allowed for Undergraduate Senior courses.');
   if (isExternal && !(category === 'UG' && academicLevel === 'Junior'))
     return badRequest(res, 'The External flag is only allowed for Undergraduate Junior courses.');
+  // NEW-FU-689: Thesis and Research are allowed at BOTH Undergraduate and Graduate level (KFUPM
+  // SWE has UG thesis courses, e.g. in terms 251/252). No level gate — the mutual-exclusion gate
+  // (courseFlagError) and the info-only exemptions are the only constraints on these flags.
   // NEW-FU-595 (Batch 27): enforce one external course PER TERM (the single internship /
   // co-op course). Reject if the active term already has an external course.
   if (isExternal) {
@@ -1344,7 +1485,7 @@ const createCourse = ah(async (req, res) => {
     courseCode: normalizeName(courseCode), name: titleCaseCourseName(normalizeName(name)),
     credits, academicLevel, category, numSections,
     hasLab,
-    isCapstone, isExternal,
+    isCapstone, isExternal, isThesis, isResearch, isSeminar,
     // NEW-FU-645 (per-term isolation): stamp the active term so a new course is this term's PRIVATE
     // copy (parity with createInstructor/createVenue). Falls back to body.ownerSemester then null.
     ownerSemester: req.activeTerm?.code || req.body.ownerSemester || null,
@@ -1355,7 +1496,8 @@ const createCourse = ah(async (req, res) => {
 const updateCourse = ah(async (req, res) => {
   // M-3: allowlist fields to prevent mass-assignment
   // NEW-FU-94: include hasLab in the allowlist.
-  const { courseCode, name, credits, academicLevel, category, numSections, hasLab } = req.body;
+  const { courseCode, name, credits, academicLevel, category, numSections, hasLab,
+          isCapstone, isExternal, isThesis, isResearch, isSeminar } = req.body;
   // NEW-M8: validate enums when provided.
   if (academicLevel && !VALID_LEVELS.has(academicLevel))
     return badRequest(res, `Invalid academicLevel: "${academicLevel}".`);
@@ -1366,12 +1508,41 @@ const updateCourse = ah(async (req, res) => {
   if (name       != null && !isBoundedString(name,      120))  return badLength(res, 'name',      120);
   // NEW-FU-422 (Phase 104 item 4): same strict code/name format on edit.
   if (courseCode != null) { const e = courseCodeError(courseCode); if (e) return badRequest(res, e); }
-  // NEW-FU-576 (Batch 22): if a full update supplies code + level + category, they must
-  // agree (number ↔ academic level). Guarded on all three so a partial edit isn't blocked.
-  if (courseCode != null && academicLevel && category) {
-    const e = courseCodeLevelError(courseCode, academicLevel, category); if (e) return badRequest(res, e);
-  }
   if (name       != null) { const e = courseNameError(name);       if (e) return badRequest(res, e); }
+  const existingCourse = await courseRepo.findById(req.params.courseId);
+  if (!existingCourse) return res.status(404).json({ error: 'Course not found.' });
+  const flagFields = {
+    hasLab: 'has_lab',
+    isCapstone: 'is_capstone',
+    isExternal: 'is_external',
+    isThesis: 'is_thesis',
+    isResearch: 'is_research',
+    isSeminar: 'is_seminar',
+  };
+  const requestedFlags = { hasLab, isCapstone, isExternal, isThesis, isResearch, isSeminar };
+  for (const [apiField, dbField] of Object.entries(flagFields)) {
+    if (requestedFlags[apiField] !== undefined &&
+        Boolean(requestedFlags[apiField]) !== Boolean(existingCourse[dbField])) {
+      return badRequest(res, 'Course type flags are fixed after creation. Delete and recreate the course to use another type.');
+    }
+  }
+  const effectiveCourseCode = courseCode != null ? courseCode : existingCourse.course_code;
+  const effectiveAcademicLevel = academicLevel ?? existingCourse.academic_level;
+  const effectiveCategory = category ?? existingCourse.category;
+  {
+    const e = courseCodeLevelError(effectiveCourseCode, effectiveAcademicLevel, effectiveCategory);
+    if (e) return badRequest(res, e);
+  }
+  {
+    const e = seminarFlagError({
+      courseCode: effectiveCourseCode,
+      academicLevel: effectiveAcademicLevel,
+      category: effectiveCategory,
+      credits: credits != null ? credits : existingCourse.credits,
+      isSeminar: existingCourse.is_seminar,
+    });
+    if (e) return badRequest(res, e);
+  }
   // NEW-FU-15: validate numeric fields on update too (create-time validation
   // exists; update was leaking bad values through to pg as opaque errors).
   if (credits != null) {
@@ -1384,8 +1555,6 @@ const updateCourse = ah(async (req, res) => {
   // update could set credits=4 without touching hasLab, or clear hasLab on an existing
   // 4-credit course. Validate the effective values against the current row.
   if (credits != null || hasLab != null) {
-    const existingCourse = await courseRepo.findById(req.params.courseId);
-    if (existingCourse) {
       const e = creditsFlagError({
         credits: credits != null ? credits : existingCourse.credits,
         hasLab:  hasLab  != null ? hasLab  : existingCourse.has_lab,
@@ -1403,9 +1572,11 @@ const updateCourse = ah(async (req, res) => {
         hasLab:     hasLab != null ? hasLab : existingCourse.has_lab,
         isCapstone: existingCourse.is_capstone,
         isExternal: existingCourse.is_external,
+        isThesis:   existingCourse.is_thesis,   // NEW-FU-687: keep thesis in the mutual-exclusion gate
+        isResearch: existingCourse.is_research, // NEW-FU-688: keep research in the mutual-exclusion gate
+        isSeminar:  existingCourse.is_seminar,
       });
       if (fe) return badRequest(res, fe);
-    }
   }
   if (numSections != null) {
     const n = parseInt(numSections, 10);
@@ -1438,7 +1609,11 @@ const deleteCourse = ah(async (req, res) => {
 
 // ── Instructors ───────────────────────────────────────────────────────────────
 // NEW-FU-274 (Phase 51 #5): same ?term= filter as getCourses.
-const getInstructors = ah(async (req, res) => { res.json(await instrRepo.findAll(req.query.term || null)); });
+// NEW-FU-681: scope the sidebar to the ACTIVE TERM. findAll(null) returns EVERY term's owned copy of
+// every instructor (per-term isolation gives each term its own row), so omitting ?term= leaked all
+// terms — "AHMED AL-NAZER" appeared once PER term (read as duplicates + cross-term leakage). The
+// frontend always sends X-Active-Term (FU-210); fall back to it. findAll(null) now needs no term context.
+const getInstructors = ah(async (req, res) => { res.json(await instrRepo.findAll(req.query.term || req.activeTerm?.code || null)); });
 
 // NEW-FU-434 (Phase 106 item 6): when a real instructor/venue is created while
 // the active term still has placeholders, AUTOMATICALLY replace the OLDEST
@@ -1812,7 +1987,9 @@ const deleteOfficeHour = ah(async (req, res) => {
 
 // ── Venues ────────────────────────────────────────────────────────────────────
 // NEW-FU-274 (Phase 51 #5): same ?term= filter as getCourses.
-const getVenues = ah(async (req, res) => { res.json(await venueRepo.findAll(req.query.term || null)); });
+// NEW-FU-681: scope the sidebar to the ACTIVE TERM (see getInstructors) — findAll(null) returns
+// every term's owned venue copy, so omitting ?term= leaked all terms (e.g. "07-220" once per term).
+const getVenues = ah(async (req, res) => { res.json(await venueRepo.findAll(req.query.term || req.activeTerm?.code || null)); });
 
 // NEW-FU-483 (Phase 117): whole-room vs sub-room identity rule. Replaces the Phase-115
 // venueCanonicalKey approach (which only prevented format variants of the same key,
@@ -1957,8 +2134,8 @@ const deleteVenue = ah(async (req, res) => {
 // NEW-FU-95 + NEW-FU-110: return the next unused two-digit section number
 // for a course within a schedule, scoped to a section type. The
 // `sectionType` query parameter selects which range to search:
-//   sectionType=Lec → search 01..49
 //   sectionType=Lab → search 50..99
+//   sectionType=Lec/Prj/Ths/Sem → search 01..49
 //   sectionType absent or invalid → default to Lec range (backward-compat
 //                                   with FU-95 callers that didn't supply it)
 // Returns 409 when all numbers in the requested range are taken.
@@ -1966,11 +2143,12 @@ const getNextSectionNumber = ah(async (req, res) => {
   const { scheduleId, courseId } = req.params;
   if (!isUuid(scheduleId)) return badRequest(res, 'scheduleId must be a UUID.');
   if (!isUuid(courseId))   return badRequest(res, 'courseId must be a UUID.');
-  const sectionType = req.query.sectionType === 'Lab' ? 'Lab' : 'Lec';
+  const requestedType = String(req.query.sectionType ?? '');
+  const sectionType = VALID_SECTION_TYPES.has(requestedType) ? requestedType : 'Lec';
   const sectRepo = new (require('../repositories/SectionRepository'))();
   const next = await sectRepo.getNextSectionNumber(scheduleId, courseId, sectionType);
   if (!next) {
-    const range = sectionType === 'Lec' ? '01..49' : '50..99';
+    const range = sectionType === 'Lab' ? '50..99' : '01..49';
     return res.status(409).json({ error: `All ${sectionType} section numbers (${range}) are in use for this course.` });
   }
   res.json({ nextSectionNumber: next, sectionType });
@@ -2003,7 +2181,8 @@ const suggestSchedule = ah(async (req, res) => {
       return res.status(400).json({
         error:
           `Invalid pattern. Pass either { pattern: "<NAME>" } where NAME ∈ {${allowed.join(', ')}}, ` +
-          `or { dayPattern: "<TEMPLATE>", duration: 50|75 } where TEMPLATE ∈ {${templates.join(', ')}}.`,
+          `or { dayPattern: "<TEMPLATE>", duration: 50|75 } where TEMPLATE ∈ {${templates.join(', ')}}. ` +
+          `For ONE_DAY project rows, duration may also be 100 or 160.`,
       });
     }
     // NEW-FU-253: optional per-course single-day override. Lecture
@@ -2230,7 +2409,12 @@ const quickFixApply = ah(async (req, res) => {
     // NEW-FU-561 (audit P1-8): QuickFixService emits this (Phase 109 / FU-460) but it
     // was never added here, so quickFixApply 400'd and aborted ANY plan containing it.
     'assign-office-hours',
-    'move-office-hour'];   // NEW-FU-635 (issue #3): relocate an office hour to fix an OH↔class overlap
+    'move-office-hour',   // NEW-FU-635 (issue #3): relocate an office hour to fix an OH↔class overlap
+    // NEW-FU-682: COMPLETE an orphan Has-Laboratory course by adding its missing section (the preferred
+    // R-14 resolution). Course-level + section-less: it carries courseId + a `complement` descriptor the
+    // resolver built (the conflict-free slot/venue/instructor), not a sectionId. Kept in sync with
+    // QuickFixService.supportedOpTypes per the FU-227 allow-list discipline.
+    'add-complement-section'];
   // These metadata ops act on a course or venue row, not a section, so they
   // carry courseId / venueId instead of sectionId.
   const COURSE_LEVEL_OPS = new Set(['mark-venue-exempt', 'untag-has-lab']);
@@ -2245,6 +2429,21 @@ const quickFixApply = ah(async (req, res) => {
     // section-less; everything else is section-scoped.
     if (COURSE_LEVEL_OPS.has(o.type)) {
       return typeof o.courseId === 'string' ? null : `${o.type} op requires courseId: string.`;
+    }
+    // NEW-FU-682: validate the add-complement-section descriptor — section-less (course-level), it carries
+    // the resolver-built complement (courseId + instructor/venue ids + meeting rows). apply() mints the
+    // section number and re-evaluates under the lock, refusing the batch if any HARD conflict rises, so a
+    // hand-crafted op can never make the schedule worse; this just rejects malformed shapes up front.
+    if (o.type === 'add-complement-section') {
+      const cx = o.complement;
+      if (!cx || typeof cx !== 'object') return 'add-complement-section op requires a complement object.';
+      if (typeof cx.courseId !== 'string') return 'add-complement-section complement requires courseId: string.';
+      if (cx.sectionType !== 'Lec' && cx.sectionType !== 'Lab') return 'add-complement-section complement.sectionType must be "Lec" or "Lab".';
+      if (!Array.isArray(cx.rows) || cx.rows.length === 0
+          || !cx.rows.every(r => r && typeof r.day === 'string' && isHHMM(r.startTime) && isHHMM(r.endTime))) {
+        return 'add-complement-section complement.rows must be a non-empty array of {day, startTime, endTime}.';
+      }
+      return null;
     }
     if (VENUE_LEVEL_OPS.has(o.type)) {
       if (typeof o.venueId !== 'string') return 'reclassify-venue op requires venueId: string.';

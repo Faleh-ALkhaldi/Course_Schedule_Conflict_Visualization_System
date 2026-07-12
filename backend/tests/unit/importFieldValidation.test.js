@@ -47,9 +47,45 @@ describe('importFieldValidation (FU-661) — credits, flags, gender, type', () =
   test('credits non-numeric rejected', () => { expect(run({ credits: 3 }, { credits: 'abc' })[0]).toMatch(/Credits/); });
   test('credits negative rejected', () => { expect(run({ credits: -1 }, { credits: '-1' })[0]).toMatch(/Credits/); });
   test('capstone + external rejected', () => { expect(run({ isCapstone: true, isExternal: true })[0]).toMatch(/Course Type/); });
+  test('thesis + research rejected', () => { expect(run({ isThesis: true, isResearch: true })[0]).toMatch(/Course Type/); });
+  test('has-lab + thesis rejected', () => { expect(run({ courseTypeHasLab: true, isThesis: true })[0]).toMatch(/Course Type/); });
+  test('seminar + has-lab rejected', () => {
+    expect(run({
+      courseCode: 'SWE 599',
+      academicLevel: 'Graduate',
+      category: 'GR',
+      sectionType: 'Sem',
+      isSeminar: true,
+      courseTypeHasLab: true,
+      days: ['Monday'],
+      startTime: '17:20',
+      endTime: '18:35',
+    }, { sectionType: 'Sem' })[0]).toMatch(/Course Type/);
+  });
+  test('seminar outside Graduate SWE 500–699 rejected', () => {
+    expect(run({
+      courseCode: 'SWE 499',
+      academicLevel: 'Senior',
+      category: 'UG',
+      sectionType: 'Sem',
+      isSeminar: true,
+      days: ['Monday'],
+      startTime: '17:20',
+      endTime: '18:35',
+    }, { sectionType: 'Sem' }).join(' ')).toMatch(/Graduate SWE 500–699/);
+  });
   test('gender X rejected (not silently coerced)', () => { expect(run({}, { gender: 'X' })[0]).toMatch(/Gender/); });
   test('gender empty defaults to M (accepted)', () => { expect(run({}, { gender: '' })).toEqual([]); });
-  test('section type Tutorial rejected', () => { expect(run({}, { sectionType: 'Tutorial' })[0]).toMatch(/Section Type/); });
+  test('section type Tutorial rejected with the complete accepted-label list', () => {
+    const message = run({}, { sectionType: 'Tutorial' })[0];
+    expect(message).toMatch(/Section Type/);
+    expect(message).toMatch(/Summer Training/);
+    expect(message).toMatch(/Internship/);
+    expect(message).toMatch(/Research/);
+  });
+  test.each(['Summer Training', 'Internship', 'Research'])('section type %s is accepted for round-trip imports', (sectionType) => {
+    expect(run({}, { sectionType })).toEqual([]);
+  });
 });
 
 describe('importFieldValidation (FU-661) — section number range by type', () => {
@@ -60,6 +96,23 @@ describe('importFieldValidation (FU-661) — section number range by type', () =
     expect(run({ sectionNumber: '100' })[0]).toMatch(/Section #/);
   });
   test('Lab 50 accepted', () => { expect(run({ sectionType: 'Lab', sectionNumber: '50' }, { sectionType: 'Lab' })).toEqual([]); });
+  test('Seminar uses the lecture-number range 01–49', () => {
+    const sem = (sectionNumber) => run({
+      courseCode: 'SWE 599',
+      courseName: 'Graduate Seminar',
+      academicLevel: 'Graduate',
+      category: 'GR',
+      credits: 1,
+      sectionType: 'Sem',
+      sectionNumber,
+      isSeminar: true,
+      days: ['Monday'],
+      startTime: '17:20',
+      endTime: '18:35',
+    }, { sectionType: 'Sem', credits: '1' });
+    expect(sem('49')).toEqual([]);
+    expect(sem('50').join(' ')).toMatch(/Section #/);
+  });
 });
 
 describe('importFieldValidation (FU-661) — days', () => {
@@ -76,6 +129,64 @@ describe('importFieldValidation (FU-661) — times', () => {
   test('before 07:00 rejected', () => { expect(run({ startTime: '06:00', endTime: '06:50' }).some(e => /07:00–22:00/.test(e))).toBe(true); });
   test('after 22:00 rejected', () => { expect(run({ startTime: '22:10', endTime: '22:50' }).some(e => /07:00–22:00/.test(e))).toBe(true); });
   test('17:20–18:35 (graduate evening) accepted', () => { expect(run({ startTime: '17:20', endTime: '18:35' })).toEqual([]); });
+  test('seminar import accepts exactly one 75-minute graduate meeting', () => {
+    expect(run({
+      courseCode: 'SWE 599',
+      courseName: 'Graduate Seminar',
+      academicLevel: 'Graduate',
+      category: 'GR',
+      credits: 1,
+      sectionType: 'Sem',
+      isSeminar: true,
+      days: ['Monday'],
+      startTime: '17:20',
+      endTime: '18:35',
+    }, { sectionType: 'Sem', credits: '1' })).toEqual([]);
+  });
+  test('seminar import rejects non-1-credit rows', () => {
+    const badCredits = run({
+      courseCode: 'SWE 599',
+      courseName: 'Graduate Seminar',
+      academicLevel: 'Graduate',
+      category: 'GR',
+      credits: 3,
+      sectionType: 'Sem',
+      isSeminar: true,
+      days: ['Monday'],
+      startTime: '17:20',
+      endTime: '18:35',
+    }, { sectionType: 'Sem', credits: '3' }).join(' ');
+    expect(badCredits).toMatch(/1 credit/i);
+  });
+  test('seminar import rejects non-75-minute or multi-day meetings', () => {
+    const badDuration = run({
+      courseCode: 'SWE 599',
+      courseName: 'Graduate Seminar',
+      academicLevel: 'Graduate',
+      category: 'GR',
+      credits: 1,
+      sectionType: 'Sem',
+      isSeminar: true,
+      days: ['Monday'],
+      startTime: '17:20',
+      endTime: '18:10',
+    }, { sectionType: 'Sem', credits: '1' }).join(' ');
+    expect(badDuration).toMatch(/75/);
+
+    const badDays = run({
+      courseCode: 'SWE 599',
+      courseName: 'Graduate Seminar',
+      academicLevel: 'Graduate',
+      category: 'GR',
+      credits: 1,
+      sectionType: 'Sem',
+      isSeminar: true,
+      days: ['Sunday', 'Tuesday'],
+      startTime: '17:20',
+      endTime: '18:35',
+    }, { sectionType: 'Sem', credits: '1' }).join(' ');
+    expect(badDays).toMatch(/one day/i);
+  });
 });
 
 describe('importFieldValidation (FU-661) — venue type + reference sheets', () => {
@@ -128,7 +239,7 @@ describe('importFieldValidation (FU-664) — prohibited characters in names', ()
   test('venue ref sheet formula name rejected', () => { expect(errs({}, GI2, [{ name: '=cmd', type: 'LectureHall', capacity: 30 }]).length).toBeGreaterThan(0); });
 
   test('real values pass: em-dash / one-word course name, full instructor, NN-NNN venue', () => {
-    expect(errs({ courseName: 'Introduction to SE (DUMMY — Freshman-tier demo)', instructorName: 'FALEH ALKHALDI', venueName: '04-001-A' })).toEqual([]);
+    expect(errs({ courseName: 'Introduction to Software Engineering — Freshman Seminar', instructorName: 'FALEH ALKHALDI', venueName: '04-001-A' })).toEqual([]);
     expect(errs({ courseName: 'Thesis', instructorName: 'OMAR HAMMAD', venueName: '42-AUD' })).toEqual([]);
   });
 });

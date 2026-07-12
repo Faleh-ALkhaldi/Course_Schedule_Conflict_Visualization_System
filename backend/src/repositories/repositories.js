@@ -289,7 +289,7 @@ class CourseRepository {
       // show — exactly the term's own courses, never a template or another term's private course.
       const res = await query(
         `SELECT DISTINCT c.id, c.course_code, c.name, c.credits, c.academic_level,
-                         c.category, c.num_sections, c.has_lab, c.is_capstone, c.is_external
+                         c.category, c.num_sections, c.has_lab, c.is_capstone, c.is_external, c.is_thesis, c.is_research, c.is_seminar, c.owner_semester
          FROM courses c
          WHERE c.owner_semester = $1
             OR c.id IN (SELECT s.course_id FROM sections s
@@ -305,7 +305,7 @@ class CourseRepository {
     // term's private copy. (Per-term lists come from the `termCode` branch above, which returns
     // the courses referenced by that term's sections = its own private copies.)
     const res = await query(
-      `SELECT id, course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone, is_external
+      `SELECT id, course_code, name, credits, academic_level, category, num_sections, has_lab, is_capstone, is_external, is_thesis, is_research, is_seminar, owner_semester
        FROM courses WHERE owner_semester IS NULL ORDER BY academic_level, course_code`
     );
     return res.rows;
@@ -314,7 +314,7 @@ class CourseRepository {
   async findById(id) {
     const res = await query(
       `SELECT id, course_code, name, credits, academic_level, category, num_sections, has_lab,
-              is_capstone, is_external
+              is_capstone, is_external, is_thesis, is_research, is_seminar, owner_semester
        FROM courses WHERE id = $1`, [id]
     );
     return res.rows[0] ?? null;
@@ -322,19 +322,21 @@ class CourseRepository {
 
   // NEW-FU-278 (Phase 54): create() now accepts isCapstone + isExternal so
   // admins can mark new courses at creation time. Both default to FALSE.
+  // NEW-FU-687/688: + isThesis + isResearch flags, also defaulting FALSE.
   async create({ courseCode, name, credits, academicLevel, category, numSections, hasLab,
-                 isCapstone, isExternal, ownerSemester = null }) {
+                 isCapstone, isExternal, isThesis, isResearch, isSeminar, ownerSemester = null }) {
     // NEW-FU-645 (per-term isolation): stamp owner_semester so a course created in a term is that
     // term's PRIVATE copy (uniqueness is per-term now), never a global/shared row. Parity with
     // instructor/venue create. ownerSemester comes from the active term (controller).
     const res = await query(
       `INSERT INTO courses (course_code, name, credits, academic_level, category, num_sections, has_lab,
-                            is_capstone, is_external, owner_semester)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+                            is_capstone, is_external, is_thesis, is_research, is_seminar, owner_semester)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
       [courseCode, name, parseInt(credits, 10) /* NEW-L2 */, academicLevel, category,
        parseInt(numSections, 10) || 1 /* NEW-L2 */,
        Boolean(hasLab) /* NEW-FU-94 */,
-       Boolean(isCapstone), Boolean(isExternal), ownerSemester]
+       Boolean(isCapstone), Boolean(isExternal), Boolean(isThesis), Boolean(isResearch) /* NEW-FU-688 */,
+       Boolean(isSeminar), ownerSemester]
     );
     return this.findById(res.rows[0].id);
   }

@@ -24,6 +24,16 @@ class Section {
     // NEW-FU-275 (Phase 52 #5): course.is_external — student is placed
     // off-campus (SWE 399 internship). Every conflict rule skips these.
     isExternal,
+    // NEW-FU-687 (Phase 125): course.is_thesis — independent research (SWE 610
+    // Thesis). No fixed time/place, so it is exempt from every rule exactly like
+    // is_external (a distinct meaning, shared exemption).
+    isThesis,
+    // NEW-FU-688 (Phase 126): course.is_research — the Research sibling of Thesis
+    // (SWE 6xx Independent Research). Same full time/place exemption.
+    isResearch,
+    // Seminar is a scheduled graduate activity. It is not conflict-exempt; this flag is
+    // carried so renderers and exports can derive the correct activity label from legacy rows.
+    isSeminar,
     createdAt, updatedAt,
   }) {
     this.id             = id;
@@ -56,6 +66,11 @@ class Section {
     this.gender         = gender ?? 'M';
     // NEW-FU-275 (Phase 52 #5)
     this.isExternal     = isExternal === true;
+    // NEW-FU-687 (Phase 125)
+    this.isThesis       = isThesis === true;
+    // NEW-FU-688 (Phase 126)
+    this.isResearch     = isResearch === true;
+    this.isSeminar      = isSeminar === true;
     this.createdAt      = createdAt;
     this.updatedAt      = updatedAt;
   }
@@ -76,6 +91,16 @@ class Section {
 
   get startMinutes() { return Section.toMinutes(this.startTime); }
   get endMinutes()   { return Section.toMinutes(this.endTime);   }
+
+  // NEW-FU-688: a section that NEVER raises a conflict. External (off-campus Summer Training /
+  // Internship), Thesis, and Research are off-campus/independent — exempt from every rule (Phase 52/
+  // FU-687). Project (capstone) joins them: the registrar lets a project meet at the instructor's
+  // discretion — optional time + venue — so it must never clash either (FU-688). Project still APPEARS
+  // in the grid when it has a time (see isInfoOnlyCourse, which is the grid-exclusion set and excludes
+  // Project); these four just never produce a conflict.
+  get isConflictExempt() {
+    return this.isExternal || this.isThesis || this.isResearch || this.isCapstone;
+  }
 
   overlaps(other) {
     if (!this.day || !other.day) return false;
@@ -121,6 +146,12 @@ class Section {
       // NEW-FU-275 (Phase 52 #5): so the frontend can render external
       // sections with a dedicated badge (e.g., "Off-campus internship").
       isExternal: this.isExternal,
+      // NEW-FU-687 (Phase 125): so the frontend can render the Thesis badge
+      // and derive the effective section type (Ths) for the grid card.
+      isThesis: this.isThesis,
+      // NEW-FU-688 (Phase 126): Research flag (derives Res; info-only/exempt like Thesis).
+      isResearch: this.isResearch,
+      isSeminar: this.isSeminar,
     };
   }
 }

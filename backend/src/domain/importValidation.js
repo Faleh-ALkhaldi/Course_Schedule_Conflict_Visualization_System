@@ -27,18 +27,24 @@ const RANGE_BY_TYPE = {
   Lec: /^(0[1-9]|[1-4][0-9])$/,
   Prj: /^(0[1-9]|[1-4][0-9])$/,
   Ths: /^(0[1-9]|[1-4][0-9])$/,
+  Sem: /^(0[1-9]|[1-4][0-9])$/,
   Lab: /^[5-9][0-9]$/,
 };
 
-// A course "has a lab" iff any of its imported sections is a Lab. This is the
-// authoritative has_lab signal for import, and what commitRows persists onto the
-// course row (so a 4-credit course with a Lab section is correctly schedulable).
+// A course "has a lab" iff any of its imported sections is a Lab OR its "Course Type" column says
+// "Has Laboratory". This is the authoritative has_lab signal for import, persisted onto the course.
 function deriveHasLabByCourse(rowData) {
   const map = new Map();
   for (const r of rowData) {
     const key = String(r.courseCode ?? '').toLowerCase();
     const isLab = (r.sectionType ?? 'Lec') === 'Lab';
-    map.set(key, (map.get(key) || false) || isLab);
+    // NEW-FU-681: also honor the "Has Laboratory" Course Type label. The old derivation looked ONLY
+    // at Lab sections, so a scoped / lecture-only import (the lab is taught by another instructor or
+    // in another venue, and is absent from THIS file) dropped has_lab → the course re-imported as a
+    // plain 3-credit course → R-15 wrongly demanded 150 min of lecture. A has_lab 3-credit lecture
+    // legitimately meets only 100 min (the lab carries the 3rd credit), so reading the column keeps
+    // the flag even with no Lab row present.
+    map.set(key, (map.get(key) || false) || isLab || Boolean(r.courseTypeHasLab));
   }
   return map;
 }
@@ -79,7 +85,7 @@ function validateImportRows(rowData) {
     const hasLab = hasLabByCourse.get(String(r.courseCode ?? '').toLowerCase()) || false;
     const re = RANGE_BY_TYPE[type];
     if (!re) {
-      errors.push(`${r.courseCode} §${num}: invalid section type "${type}" (expected Lec, Lab, Prj, or Ths).`);
+      errors.push(`${r.courseCode} §${num}: invalid section type "${type}" (expected Lec, Lab, Prj, Ths, or Sem).`);
     } else if (!re.test(num)) {
       errors.push(`${r.courseCode} §${num} (${type}): section number must be ${type === 'Lab' ? '50–99' : '01–49'} for ${type} sections.`);
     }

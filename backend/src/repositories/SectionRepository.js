@@ -15,7 +15,7 @@ const SELECT_SECTION = `
     s.section_type, s.gender,
     s.created_at, s.updated_at,
     c.course_code, c.name  AS course_name,
-    c.academic_level, c.category, c.num_sections, c.has_lab, c.is_capstone, c.is_external,
+    c.academic_level, c.category, c.num_sections, c.has_lab, c.is_capstone, c.is_external, c.is_thesis, c.is_research, c.is_seminar,
     c.credits,
     i.name AS instructor_name,
     v.name AS venue_name, v.type AS venue_type
@@ -52,6 +52,11 @@ function toSection(row) {
     // NEW-FU-275 (Phase 52 #5): external = student is off-campus on an
     // internship; the conflict engine skips every rule for these.
     isExternal: row.is_external,
+    // NEW-FU-687 (Phase 125): thesis = independent research; same full exemption.
+    isThesis: row.is_thesis,
+    // NEW-FU-688 (Phase 126): research = the Thesis sibling; same full exemption.
+    isResearch: row.is_research,
+    isSeminar: row.is_seminar,
     createdAt: row.created_at, updatedAt: row.updated_at,
   });
 }
@@ -72,6 +77,31 @@ class SectionRepository {
   async findByVenue(scheduleId, venueId) {
     const res = await query(`${SELECT_SECTION} WHERE s.schedule_id=$1 AND s.venue_id=$2`, [scheduleId, venueId]);
     return res.rows.map(toSection);
+  }
+
+  // NEW-FU-682: the scoped section set INCLUDING the COMPLEMENTARY half of each has_lab course (the
+  // Lab when this scope has the Lecture, or vice versa) — every section of the scope's own has_lab
+  // courses, even those taught by someone else / held elsewhere — so a scoped re-import rebuilds the
+  // COMPLETE lecture+lab course (no missing-section / coverage conflict). Each complement section is
+  // flagged `isComplement` (NOT taught by this instructor / not held in this venue) so the renderers
+  // can mark it and the user can tell it apart. Full scope already has every section.
+  async findScopedWithComplement(scheduleId, filter = { type: 'full' }) {
+    // The complement is the MISSING TYPE only (the Lab when the scope holds the Lecture, or vice versa):
+    // a section of one of the scope's has_lab courses whose section_type the scope does NOT itself
+    // provide for that course — kept in sync with exportScope.complementSub.
+    const complement = (col) =>
+      `(s.course_id IN (SELECT s2.course_id FROM sections s2 JOIN courses c2 ON c2.id = s2.course_id
+                         WHERE s2.schedule_id = $1 AND s2.${col} = $2 AND c2.has_lab = true)
+        AND s.section_type NOT IN (SELECT s3.section_type FROM sections s3
+                                    WHERE s3.schedule_id = $1 AND s3.${col} = $2 AND s3.course_id = s.course_id))`;
+    let col = null;
+    if (filter?.type === 'instructor' && filter.id) col = 'instructor_id';
+    else if (filter?.type === 'venue' && filter.id) col = 'venue_id';
+    if (!col) return this.findBySchedule(scheduleId);
+    const res = await query(
+      `${SELECT_SECTION} WHERE s.schedule_id = $1 AND (s.${col} = $2 OR ${complement(col)})`,
+      [scheduleId, filter.id]);
+    return res.rows.map((r) => { const s = toSection(r); s.isComplement = r[col] !== filter.id; return s; });
   }
 
   // NEW-FU-23: create/update/delete were removed. All section writes go
@@ -119,9 +149,8 @@ class SectionRepository {
    * Returns { severity, message } or null if OK
    */
   validateOneInstructor(section) {
-    // NEW-FU-275 (Phase 52 #5): external courses (SWE 399 internship)
-    // have no instructor by design — suppress R-09.
-    if (section.isExternal) return null;
+    // Information-only activities still need an assigned/supervising instructor;
+    // only their venue and meeting time are intentionally absent.
     if (!section.instructorId) {
       return {
         severity: 'Soft',
@@ -153,7 +182,8 @@ class SectionRepository {
     if (section.isCapstone) return null;
     // NEW-FU-275 (Phase 52 #5): external courses are off-campus; no venue
     // is the correct state. Suppress R-10 in addition to the capstone path.
-    if (section.isExternal) return null;
+    // NEW-FU-687/688: thesis + research are venue-exempt too (Project already handled above).
+    if (section.isExternal || section.isThesis || section.isResearch) return null;
     // NEW-FU-567 (audit-2 P2-16 follow-up): Project/Thesis sections are
     // venue-optional BY TYPE — they meet online or in whatever room the
     // instructor and students agree on (the registrar rule confirmed while

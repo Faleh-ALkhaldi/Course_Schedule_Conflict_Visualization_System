@@ -77,3 +77,92 @@ describe('QuickFixService.apply weighted-cost gate (Batch 21 / FU-574)', () => {
     evalSpy.mockRestore();
   });
 });
+
+describe('QuickFixService simulator parity for information-only instructor warnings', () => {
+  const baseSection = (over = {}) => ({
+    id: over.id ?? 's1',
+    scheduleId: 'sch',
+    courseId: over.courseId ?? 'c1',
+    instructorId: null,
+    venueId: null,
+    sectionNumber: over.sectionNumber ?? '01',
+    day: null,
+    startTime: null,
+    endTime: null,
+    sectionType: over.sectionType ?? 'Lec',
+    courseCode: over.courseCode ?? 'SWE 494',
+    academicLevel: 'Senior',
+    category: 'UG',
+    credits: 3,
+    hasLab: false,
+    isExternal: false,
+    isThesis: false,
+    isResearch: false,
+    isCapstone: false,
+    ...over,
+  });
+
+  test('info-only activities still require a supervising instructor in Quick Fix simulation', () => {
+    const conflicts = qfSvc._evaluateInMemory([
+      baseSection({ id: 'ext', courseId: 'c-ext', courseCode: 'SWE 399', isExternal: true }),
+      baseSection({ id: 'ths', courseId: 'c-ths', courseCode: 'SWE 494', isThesis: true, sectionType: 'Ths' }),
+      baseSection({ id: 'res', courseId: 'c-res', courseCode: 'SWE 595', isResearch: true }),
+    ], new Map());
+
+    const r09Ids = conflicts
+      .filter((conflict) => conflict.ruleId === 'R-09')
+      .map((conflict) => conflict.sectionAId)
+      .sort();
+
+    expect(r09Ids).toEqual(['ext', 'res', 'ths']);
+  });
+
+  test('missing-instructor and missing-venue warnings are deduped per gendered section group', () => {
+    const conflicts = qfSvc._evaluateInMemory([
+      baseSection({ id: 'm', courseId: 'c1', sectionNumber: '01', gender: 'M', courseCode: 'SWE 333' }),
+      baseSection({ id: 'f', courseId: 'c1', sectionNumber: '01', gender: 'F', courseCode: 'SWE 333' }),
+    ], new Map());
+
+    const idsByRule = (ruleId) => conflicts
+      .filter((conflict) => conflict.ruleId === ruleId)
+      .map((conflict) => conflict.sectionAId)
+      .sort();
+
+    expect(idsByRule('R-09')).toEqual(['f', 'm']);
+    expect(idsByRule('R-10')).toEqual(['f', 'm']);
+  });
+
+  test('venue-type mismatch warnings are deduped per gendered section group', () => {
+    const conflicts = qfSvc._evaluateInMemory([
+      baseSection({
+        id: 'm',
+        courseId: 'c1',
+        sectionNumber: '01',
+        gender: 'M',
+        venueId: 'v-lab',
+        venueType: 'Laboratory',
+        day: 'Monday',
+        startTime: '17:20',
+        endTime: '18:35',
+      }),
+      baseSection({
+        id: 'f',
+        courseId: 'c1',
+        sectionNumber: '01',
+        gender: 'F',
+        venueId: 'v-lab',
+        venueType: 'Laboratory',
+        day: 'Monday',
+        startTime: '17:20',
+        endTime: '18:35',
+      }),
+    ], new Map());
+
+    const r12Ids = conflicts
+      .filter((conflict) => conflict.ruleId === 'R-12')
+      .map((conflict) => conflict.sectionAId)
+      .sort();
+
+    expect(r12Ids).toEqual(['f', 'm']);
+  });
+});
